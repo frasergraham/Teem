@@ -15,7 +15,7 @@ type Backend string
 const (
 	BackendLocal   Backend = "local"
 	BackendSSH     Backend = "ssh"
-	BackendRailway Backend = "railway"
+	BackendFargate Backend = "fargate"
 )
 
 // AgentSpec is the input to Provision — the subset of team.AgentSpec the
@@ -26,8 +26,15 @@ type AgentSpec struct {
 	WorkingDir string
 	SSHTarget  string
 	Backend    Backend
-	MCPs       []team.MCPRef
+	// Lifecycle is "ephemeral" (default) or "persistent". Persistent
+	// agents are not torn down on Spawner.Stop and may be reconciled
+	// across `teem chat` sessions.
+	Lifecycle string
+	MCPs      []team.MCPRef
 }
+
+// IsPersistent reports whether the spec carries a persistent lifecycle.
+func (s AgentSpec) IsPersistent() bool { return s.Lifecycle == "persistent" }
 
 // Agent is the result of Provision: a placed worker, ready to run
 // subprocesses via Transport.
@@ -36,11 +43,26 @@ type Agent struct {
 	Role       string
 	WorkingDir string
 	Backend    Backend
+	Lifecycle  string
 	// TailnetHost is the worker's hostname on the tailnet, if any. Empty
 	// for local backends.
 	TailnetHost string
-	Transport   transport.Transport
-	MCPs        []team.MCPRef
+	// Transport is set for local/ssh agents; nil for cloud agents (the
+	// spawner builds an HTTPExecutor instead).
+	Transport transport.Transport
+	MCPs      []team.MCPRef
+	// Cloud holds backend-specific identifiers needed for Teardown.
+	Cloud *CloudPlacement
+}
+
+// IsPersistent reports whether the agent carries a persistent lifecycle.
+func (a *Agent) IsPersistent() bool { return a != nil && a.Lifecycle == "persistent" }
+
+// CloudPlacement carries identifiers a cloud provisioner needs to find or
+// stop a previously-launched agent.
+type CloudPlacement struct {
+	// TaskARN is the ECS task ARN for fargate-backed agents.
+	TaskARN string
 }
 
 // Provisioner places agents on hosts.
@@ -49,21 +71,35 @@ type Provisioner interface {
 	Teardown(ctx context.Context, a *Agent) error
 }
 
-// ErrNotImplemented is returned by stubbed backends (currently Railway).
-var ErrNotImplemented = errors.New("provisioner: not implemented")
+// ErrAgentStopped signals that the underlying placement has stopped (e.g.
+// ECS task moved to STOPPED). Returned by Watcher.CheckLiveness.
+var ErrAgentStopped = errors.New("provisioner: agent stopped")
+
+// Watcher is an optional capability for backends whose underlying compute
+// can die out-of-band (Fargate task killed, spot interruption, …). The
+// spawner type-asserts and runs a slow polling goroutine per agent.
+type Watcher interface {
+	// CheckLiveness returns nil if the agent is still alive on the
+	// backend, ErrAgentStopped if it has stopped, or another error for
+	// transient lookup failures.
+	CheckLiveness(ctx context.Context, a *Agent) error
+}
 
 // FromTeamSpec converts a team.AgentSpec into a provisioner AgentSpec,
-// inferring Backend from local/ssh_target. Future cloud backends will be
-// selected by an explicit field on team.AgentSpec.
+// inferring Backend from local/ssh_target/backend. The team package has
+// already validated that exactly one placement marker is set.
 func FromTeamSpec(a team.AgentSpec) AgentSpec {
 	spec := AgentSpec{
 		ID:         a.ID,
 		Role:       a.Role,
 		WorkingDir: a.WorkingDir,
 		SSHTarget:  a.SSHTarget,
+		Lifecycle:  a.LifecycleOrDefault(),
 		MCPs:       a.MCPs,
 	}
 	switch {
+	case a.Backend != "":
+		spec.Backend = Backend(a.Backend)
 	case a.Local:
 		spec.Backend = BackendLocal
 	case a.SSHTarget != "":
@@ -79,11 +115,17 @@ func FromTeamSpec(a team.AgentSpec) AgentSpec {
 func Select(spec AgentSpec) (Provisioner, error) {
 	switch spec.Backend {
 	case BackendLocal:
-		return LocalProvisioner{}, nil
+		// Fallback constructor with no worktree support. Spawners that
+		// want auto-worktree should build LocalProvisioner via
+		// NewLocalProvisioner with the leader's repo root.
+		return &LocalProvisioner{}, nil
 	case BackendSSH:
 		return SSHProvisioner{}, nil
-	case BackendRailway:
-		return RailwayProvisioner{}, nil
+	case BackendFargate:
+		// FargateProvisioner needs runtime deps (AWS client + leader-side
+		// tailnet HTTP client + worker token). It is constructed by the
+		// spawner via NewFargateProvisioner, not here.
+		return nil, fmt.Errorf("provisioner: fargate must be constructed via NewFargateProvisioner")
 	default:
 		return nil, fmt.Errorf("provisioner: unknown backend %q", spec.Backend)
 	}

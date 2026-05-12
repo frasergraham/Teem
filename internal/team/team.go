@@ -17,13 +17,13 @@ type Team struct {
 }
 
 type TailnetSpec struct {
-	Hostname    string `yaml:"hostname"`
-	AuthKeyEnv  string `yaml:"auth_key_env"`
+	Hostname   string `yaml:"hostname,omitempty"`
+	AuthKeyEnv string `yaml:"auth_key_env,omitempty"`
 }
 
 type LeaderSpec struct {
 	SystemPrompt string   `yaml:"system_prompt"`
-	MCPs         []MCPRef `yaml:"mcps"`
+	MCPs         []MCPRef `yaml:"mcps,omitempty"`
 }
 
 type AgentSpec struct {
@@ -32,8 +32,48 @@ type AgentSpec struct {
 	Description string   `yaml:"description"`
 	SSHTarget   string   `yaml:"ssh_target,omitempty"`
 	Local       bool     `yaml:"local,omitempty"`
-	WorkingDir  string   `yaml:"working_dir,omitempty"`
-	MCPs        []MCPRef `yaml:"mcps,omitempty"`
+	// Backend names a cloud placement strategy (currently "fargate"). Mutually
+	// exclusive with Local and SSHTarget. WorkingDir is ignored for cloud
+	// backends.
+	Backend string `yaml:"backend,omitempty"`
+	// WorkingDir is an optional path override.
+	//   - Local agents: when unset, Teem creates an isolated git worktree
+	//     at ~/.teem/worktrees/<team>/<agent-id> on branch teem/<agent-id>.
+	//     When set, the agent runs in this path raw (no worktree).
+	//   - SSH agents: required; the directory on the remote host.
+	//   - Cloud agents: ignored.
+	WorkingDir string `yaml:"working_dir,omitempty"`
+	// Lifecycle is "ephemeral" (default) or "persistent". Persistent
+	// agents survive a `teem chat` shutdown: their underlying placement
+	// is not torn down, and Teem reconciles + reuses on next startup.
+	// Persistent local agents require the operator to run `teem-worker`
+	// themselves at hostname teem-<id>; persistent cloud agents are
+	// launched the first time and reused thereafter.
+	Lifecycle  string   `yaml:"lifecycle,omitempty"`
+	MCPs       []MCPRef `yaml:"mcps,omitempty"`
+}
+
+// SupportedBackends is the set of cloud backend strings accepted in
+// agent.backend. Local/ssh placements use the dedicated fields, not
+// backend.
+var SupportedBackends = map[string]struct{}{
+	"fargate": {},
+}
+
+// SupportedLifecycles is the set of lifecycle strings accepted in
+// agent.lifecycle. Empty string is treated as "ephemeral".
+var SupportedLifecycles = map[string]struct{}{
+	"ephemeral":  {},
+	"persistent": {},
+}
+
+// LifecycleOrDefault returns the agent's lifecycle, defaulting to
+// "ephemeral" when unset.
+func (a AgentSpec) LifecycleOrDefault() string {
+	if a.Lifecycle == "" {
+		return "ephemeral"
+	}
+	return a.Lifecycle
 }
 
 type MCPRef struct {
@@ -112,11 +152,29 @@ func (t *Team) Validate() error {
 		if a.Role == "" {
 			return fmt.Errorf("agents[%d] (%s): role is required", i, a.ID)
 		}
-		if !a.Local && a.SSHTarget == "" {
-			return fmt.Errorf("agents[%d] (%s): must set local: true or ssh_target", i, a.ID)
+		placements := 0
+		if a.Local {
+			placements++
 		}
-		if a.Local && a.SSHTarget != "" {
-			return fmt.Errorf("agents[%d] (%s): cannot be both local and ssh_target", i, a.ID)
+		if a.SSHTarget != "" {
+			placements++
+		}
+		if a.Backend != "" {
+			placements++
+			if _, ok := SupportedBackends[a.Backend]; !ok {
+				return fmt.Errorf("agents[%d] (%s): unknown backend %q (supported: fargate)", i, a.ID, a.Backend)
+			}
+		}
+		if placements == 0 {
+			return fmt.Errorf("agents[%d] (%s): must set exactly one of local: true, ssh_target, or backend", i, a.ID)
+		}
+		if placements > 1 {
+			return fmt.Errorf("agents[%d] (%s): set exactly one of local, ssh_target, or backend (got %d)", i, a.ID, placements)
+		}
+		if a.Lifecycle != "" {
+			if _, ok := SupportedLifecycles[a.Lifecycle]; !ok {
+				return fmt.Errorf("agents[%d] (%s): unknown lifecycle %q (supported: ephemeral, persistent)", i, a.ID, a.Lifecycle)
+			}
 		}
 	}
 	return nil

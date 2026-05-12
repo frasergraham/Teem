@@ -22,18 +22,34 @@ team:
       role: backend
       description: "Writes and tests Go service code."
       local: true
-      working_dir: ./workspaces/backend
+      # working_dir is intentionally unset: local agents get an isolated
+      # git worktree under ~/.teem/worktrees/<team>/<agent-id> on branch
+      # teem/<agent-id>. Set working_dir to opt out (raw path, no worktree).
 
     - id: fe-1
       role: frontend
       description: "Builds the React dashboard."
       local: true
-      working_dir: ./workspaces/frontend
 
     - id: rv-1
       role: reviewer
       description: "Independent reviewer. Reads diffs, flags risk."
-      # Remote: requires `claude` already installed on review-box and
-      # your ssh-agent loaded with the matching key.
-      ssh_target: user@review-box
-      working_dir: /home/user/teem-review
+      local: true
+
+    - id: rs-1
+      role: researcher
+      description: "Runs slow research and exploration jobs."
+      local: true
+
+    # Persistent agents survive a `teem chat` shutdown. For local
+    # persistent agents you run the worker daemon yourself:
+    #   teem-worker --no-tailnet=false   # joins the tailnet as teem-bg-1
+    # with env: TEEM_AGENT_ID=bg-1, TEEM_WORKER_TOKEN=<same as leader>,
+    # TEEM_WORKER_HOSTNAME=teem-bg-1, TS_AUTHKEY=...
+    # On the next `teem chat`, Teem reconnects via /healthz over the
+    # tailnet without re-spawning.
+    - id: bg-1
+      role: background
+      description: "Long-running worker; survives leader restarts."
+      local: true
+      lifecycle: persistent

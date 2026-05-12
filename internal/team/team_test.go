@@ -99,7 +99,7 @@ team:
   agents:
     - {id: a, role: r}
 `,
-			want: "must set local",
+			want: "must set exactly one",
 		},
 		{
 			name: "both placements",
@@ -110,7 +110,29 @@ team:
   agents:
     - {id: a, role: r, local: true, ssh_target: u@h}
 `,
-			want: "cannot be both",
+			want: "set exactly one",
+		},
+		{
+			name: "unknown backend",
+			body: `
+team:
+  name: x
+  leader: {system_prompt: p}
+  agents:
+    - {id: a, role: r, backend: heroku}
+`,
+			want: "unknown backend",
+		},
+		{
+			name: "backend with ssh_target",
+			body: `
+team:
+  name: x
+  leader: {system_prompt: p}
+  agents:
+    - {id: a, role: r, backend: fargate, ssh_target: u@h}
+`,
+			want: "set exactly one",
 		},
 	}
 	for _, tc := range cases {

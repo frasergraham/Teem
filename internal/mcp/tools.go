@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 )
@@ -105,6 +107,38 @@ func (s *Server) handleReadTeam(_ context.Context, _ mcpgo.CallToolRequest) (*mc
 	body, err := json.Marshal(s.team)
 	if err != nil {
 		return mcpgo.NewToolResultErrorFromErr("marshal team", err), nil
+	}
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleQueryAudit(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.audit == nil {
+		return mcpgo.NewToolResultError("audit log is not configured"), nil
+	}
+	agentID := req.GetString("agent_id", "")
+	var since time.Time
+	if v := req.GetString("since", ""); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return mcpgo.NewToolResultErrorf("bad since %q: %v", v, err), nil
+		}
+		since = t
+	}
+	limit := 50
+	if v := req.GetString("limit", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return mcpgo.NewToolResultErrorf("bad limit %q", v), nil
+		}
+		limit = n
+	}
+	events, err := s.audit.Query(agentID, since, limit)
+	if err != nil {
+		return mcpgo.NewToolResultErrorFromErr("audit query", err), nil
+	}
+	body, err := json.Marshal(events)
+	if err != nil {
+		return mcpgo.NewToolResultErrorFromErr("marshal audit", err), nil
 	}
 	return mcpgo.NewToolResultText(string(body)), nil
 }

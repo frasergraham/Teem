@@ -11,6 +11,7 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpsrv "github.com/mark3labs/mcp-go/server"
 
+	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
 	"github.com/frasergraham/teem/internal/team"
 )
@@ -34,6 +35,7 @@ type Server struct {
 	team     *team.Team
 	registry *Registry
 	spawner  Spawner
+	audit    audit.Sink
 }
 
 // Config holds the deps the orchestrator server needs.
@@ -42,6 +44,9 @@ type Config struct {
 	Team     *team.Team
 	Registry *Registry
 	Spawner  Spawner
+	// Audit is the audit-log Sink the query_audit tool reads from. Optional
+	// — if nil the tool returns an error explaining audit isn't configured.
+	Audit audit.Sink
 }
 
 // New builds an orchestrator MCP server. Call Serve to start serving on a
@@ -61,6 +66,7 @@ func New(cfg Config) (*Server, error) {
 		team:     cfg.Team,
 		registry: cfg.Registry,
 		spawner:  cfg.Spawner,
+		audit:    cfg.Audit,
 	}
 	s.registerTools()
 	s.handler = mcpsrv.NewStreamableHTTPServer(core)
@@ -136,5 +142,14 @@ func (s *Server) registerTools() {
 			mcpgo.WithDescription("Return the team roster and Leader configuration."),
 		),
 		s.handleReadTeam,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("query_audit",
+			mcpgo.WithDescription("Read the audit log: structured events workers emit about their work (job lifecycle, decisions, errors). Use this to summarize what an agent did or to diagnose a job."),
+			mcpgo.WithString("agent_id", mcpgo.Description("Optional. Restrict to events from this agent.")),
+			mcpgo.WithString("since", mcpgo.Description("Optional. RFC3339 timestamp; only events at or after.")),
+			mcpgo.WithString("limit", mcpgo.Description("Optional. Max events to return (default 50).")),
+		),
+		s.handleQueryAudit,
 	)
 }

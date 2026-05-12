@@ -10,11 +10,12 @@ import (
 type AgentState string
 
 const (
-	StatePending  AgentState = "pending"
-	StateRunning  AgentState = "running"
-	StateBusy     AgentState = "busy"
-	StateError    AgentState = "error"
-	StateStopped  AgentState = "stopped"
+	StatePending      AgentState = "pending"
+	StateProvisioning AgentState = "provisioning"
+	StateRunning      AgentState = "running"
+	StateBusy         AgentState = "busy"
+	StateError        AgentState = "error"
+	StateStopped      AgentState = "stopped"
 )
 
 // AgentEntry is a Registry entry.
