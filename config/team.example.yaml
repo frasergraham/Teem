@@ -1,0 +1,39 @@
+team:
+  name: example-team
+
+  tailnet:
+    # DNS label this Teem node presents on the tailnet.
+    hostname: teem-leader
+    # Environment variable Teem reads the tailnet auth key from. If unset
+    # or empty, tsnet falls back to interactive login (URL printed to
+    # stderr on first run).
+    auth_key_env: TS_AUTHKEY
+
+  leader:
+    system_prompt: |
+      You are leading a small team building a Go service.
+      Spawn the backend agent for service code and the frontend agent for
+      the dashboard. Use the reviewer agent before declaring a change done.
+      Keep messages concise.
+    mcps: []
+
+  agents:
+    - id: be-1
+      role: backend
+      description: "Writes and tests Go service code."
+      local: true
+      working_dir: ./workspaces/backend
+
+    - id: fe-1
+      role: frontend
+      description: "Builds the React dashboard."
+      local: true
+      working_dir: ./workspaces/frontend
+
+    - id: rv-1
+      role: reviewer
+      description: "Independent reviewer. Reads diffs, flags risk."
+      # Remote: requires `claude` already installed on review-box and
+      # your ssh-agent loaded with the matching key.
+      ssh_target: user@review-box
+      working_dir: /home/user/teem-review
