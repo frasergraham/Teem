@@ -47,8 +47,14 @@ type Agent struct {
 	// TailnetHost is the worker's hostname on the tailnet, if any. Empty
 	// for local backends.
 	TailnetHost string
-	// Transport is set for local/ssh agents; nil for cloud agents (the
-	// spawner builds an HTTPExecutor instead).
+	// SocketPath is the unix-socket path the spawner should dial when
+	// the worker speaks HTTP locally (ephemeral local backend after
+	// the teem-worker subprocess migration). Mutually exclusive with
+	// Transport.
+	SocketPath string
+	// Transport is set for SSH agents; nil for cloud agents and
+	// socket-based local agents (the spawner builds an HTTPExecutor
+	// instead).
 	Transport transport.Transport
 	MCPs      []team.MCPRef
 	// Cloud holds backend-specific identifiers needed for Teardown.

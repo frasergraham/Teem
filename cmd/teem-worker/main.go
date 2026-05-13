@@ -116,8 +116,12 @@ func run() error {
 	fs := flag.NewFlagSet("teem-worker", flag.ExitOnError)
 	noTailnet := fs.Bool("no-tailnet", false, "skip tsnet; bind on 127.0.0.1 (smoke testing)")
 	port := fs.String("port", "", "listen port (overrides TEEM_LISTEN_PORT; default :7780)")
+	unixSocket := fs.String("unix-socket", "", "listen on a unix socket at this path instead of tcp; overrides --no-tailnet and tailnet")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
+	}
+	if *unixSocket == "" {
+		*unixSocket = os.Getenv("TEEM_UNIX_SOCKET")
 	}
 
 	cfg, err := loadConfig(*port)
@@ -178,19 +182,53 @@ func run() error {
 	defer ob.Close()
 	w.outbox = ob
 
+	// Shutdown channel: hit POST /shutdown to stop the worker. Done
+	// in-place via a small channel the HTTP handler closes; the
+	// signal-context shutdown path picks it up.
+	shutdownCh := make(chan struct{})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", w.handleHealth)
 	mux.HandleFunc("/jobs", w.handleJobsCollection)
 	mux.HandleFunc("/jobs/", w.handleJob)
+	mux.HandleFunc("/shutdown", func(rw http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		rw.WriteHeader(http.StatusAccepted)
+		select {
+		case <-shutdownCh:
+			// already shutting down
+		default:
+			close(shutdownCh)
+		}
+	})
 
 	var ln net.Listener
-	if *noTailnet {
+	switch {
+	case *unixSocket != "":
+		// Clean up a stale socket from a previous run (after a crash
+		// or kill). If a worker is genuinely already running we'll
+		// fail to listen below, surfacing a clear error.
+		_ = os.Remove(*unixSocket)
+		if err := os.MkdirAll(filepath.Dir(*unixSocket), 0o755); err != nil {
+			return fmt.Errorf("unix socket dir: %w", err)
+		}
+		ln, err = net.Listen("unix", *unixSocket)
+		if err != nil {
+			return fmt.Errorf("unix listen: %w", err)
+		}
+		// On exit, remove the socket so the daemon's reconcile pass
+		// doesn't think a dead worker is alive.
+		defer os.Remove(*unixSocket)
+		fmt.Fprintf(os.Stderr, "[teem-worker] listening on unix:%s\n", *unixSocket)
+	case *noTailnet:
 		ln, err = net.Listen("tcp", "127.0.0.1"+cfg.listenPort)
 		if err != nil {
 			return fmt.Errorf("listen: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "[teem-worker] listening on 127.0.0.1%s (no-tailnet)\n", cfg.listenPort)
-	} else {
+	default:
 		node, err := tailnet.New(tailnet.Config{
 			Hostname:  cfg.hostname,
 			AuthKey:   cfg.tsAuthKey,
@@ -228,7 +266,11 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-shutdownCh:
+			fmt.Fprintln(os.Stderr, "[teem-worker] /shutdown received")
+		}
 		ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx2)

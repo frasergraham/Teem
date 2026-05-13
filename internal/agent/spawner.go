@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,6 +54,12 @@ type Config struct {
 	// WorktreeBase is the directory under which local agent worktrees are
 	// placed. Defaults to ~/.teem/worktrees/<team> when empty.
 	WorktreeBase string
+	// SocketDir is the directory under which per-agent unix sockets
+	// live for the subprocess local-worker model. When set, local
+	// agents are spawned as teem-worker subprocesses that survive
+	// daemon restart. Empty (e.g. in tests) falls back to the
+	// in-process LocalTransport model.
+	SocketDir string
 	// LeaderURL is the base URL workers POST audit events to (the
 	// leader's tailnet hostname + listen port, e.g.
 	// http://teem-leader:7777). Cloud provisioners pass this to workers
@@ -346,6 +353,77 @@ func (s *Spawner) Reconcile(ctx context.Context) int {
 			connected++
 			s.publishLog(id, "reconciled — persistent worker reused")
 		}
+	}
+	return connected
+}
+
+// ReconcileLocalSockets walks the per-team socket directory and, for
+// every existing socket file, registers the worker as a running
+// agent without re-spawning. Used at daemon start so workers that
+// outlived a previous daemon are immediately addressable. Best-effort:
+// a socket whose /healthz doesn't answer is removed as stale; a
+// surviving worker's audit outbox will drain its accumulated events
+// against the freshly-started daemon as soon as the leader URL
+// resolves.
+func (s *Spawner) ReconcileLocalSockets(ctx context.Context) int {
+	if s.cfg.SocketDir == "" || s.cfg.WorkerToken == "" {
+		return 0
+	}
+	entries, err := os.ReadDir(s.cfg.SocketDir)
+	if err != nil {
+		return 0
+	}
+	connected := 0
+	for _, ent := range entries {
+		name := ent.Name()
+		if !strings.HasSuffix(name, ".sock") {
+			continue
+		}
+		agentID := strings.TrimSuffix(name, ".sock")
+		socketPath := filepath.Join(s.cfg.SocketDir, name)
+		client := executor.NewUnixClient(socketPath)
+		exec := executor.NewHTTP(client, "http://unix", s.cfg.WorkerToken)
+		hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := exec.CheckHealth(hctx)
+		cancel()
+		if err != nil {
+			_ = os.Remove(socketPath)
+			continue
+		}
+		role, _, ok := parseInstanceID(agentID)
+		if !ok {
+			continue
+		}
+		a := &provisioner.Agent{
+			ID:         agentID,
+			Role:       role,
+			Backend:    provisioner.BackendLocal,
+			SocketPath: socketPath,
+		}
+		w := &Worker{Agent: a, Bus: s.bus, Executor: exec}
+		if err := w.Start(s.baseCtx); err != nil {
+			continue
+		}
+		s.registry.Add(mcpsrv.AgentEntry{
+			ID:        agentID,
+			Role:      role,
+			State:     mcpsrv.StateRunning,
+			Backend:   string(provisioner.BackendLocal),
+			StartedAt: time.Now(),
+		})
+		s.subscribeResults(agentID)
+		// Use a real LocalProvisioner for teardown so stop_agent on a
+		// reattached worker actually POSTs /shutdown and removes the
+		// socket. A no-op would silently leak the process.
+		p, _ := s.selectProvisioner(provisioner.BackendLocal)
+		if p == nil {
+			p = noopTeardownProvisioner{}
+		}
+		s.mu.Lock()
+		s.workers[agentID] = w
+		s.provisioned[agentID] = provisionedAgent{provisioner: p, agent: a}
+		s.mu.Unlock()
+		connected++
 	}
 	return connected
 }
@@ -655,7 +733,16 @@ func (s *Spawner) failOutstandingJobs(ctx context.Context, agentID, reason strin
 func (s *Spawner) selectProvisioner(b provisioner.Backend) (provisioner.Provisioner, error) {
 	switch b {
 	case provisioner.BackendLocal:
-		return provisioner.NewLocalProvisioner(s.cfg.RepoRoot, s.cfg.WorktreeBase), nil
+		// Subprocess mode requires SocketDir + WorkerToken. When
+		// SocketDir is unset (tests, --no-tailnet smoke flows) the
+		// provisioner falls back to in-process LocalTransport.
+		return provisioner.NewLocalProvisionerForSubprocess(
+			s.cfg.RepoRoot,
+			s.cfg.WorktreeBase,
+			s.cfg.SocketDir,
+			s.cfg.LeaderURL,
+			s.cfg.WorkerToken,
+		), nil
 	case provisioner.BackendSSH:
 		return provisioner.Select(provisioner.AgentSpec{Backend: b})
 	case provisioner.BackendFargate:
@@ -773,23 +860,37 @@ func (s *Spawner) subscribeResults(agentID string) {
 	}()
 }
 
-// executorFor builds the Executor for a provisioned agent. It picks by
-// capability rather than backend: if the provisioner gave us a Transport
-// we use ProcessExecutor (local exec / SSH); otherwise we look for a
-// tailnet host and talk to a remote teem-worker daemon over HTTP. This
-// lets persistent local agents (no spawn, just connect to a daemon the
-// operator started) fall out without a special case.
+// executorFor builds the Executor for a provisioned agent. It picks
+// by Agent shape:
+//
+//   - SocketPath != "" → unix-socket HTTPExecutor (local subprocess
+//     teem-worker). The default for ephemeral local agents after the
+//     subprocess migration.
+//   - TailnetHost != ""  → tailnet HTTPExecutor (SSH-spawned remote,
+//     Fargate, or persistent local that the operator manages).
+//   - Transport != nil   → legacy in-process ProcessExecutor. Today
+//     used only by SSH (which still wraps an exec.Cmd transport).
+//
+// Any of these means the daemon and worker are independent processes
+// at the network layer; the difference is the dialer.
 func (s *Spawner) executorFor(a *provisioner.Agent) (executor.Executor, error) {
-	if a.Transport != nil {
-		return executor.NewProcess(a.Transport, a.WorkingDir, a.MCPs), nil
+	if a.SocketPath != "" {
+		if s.cfg.WorkerToken == "" {
+			return nil, fmt.Errorf("agent %s: unix-socket executor needs WorkerToken", a.ID)
+		}
+		client := executor.NewUnixClient(a.SocketPath)
+		return executor.NewHTTP(client, "http://unix", s.cfg.WorkerToken), nil
 	}
 	if a.TailnetHost != "" {
 		if s.cfg.HTTPClient == nil || s.cfg.WorkerToken == "" {
-			return nil, fmt.Errorf("agent %s: remote executor needs HTTPClient + WorkerToken (tailnet must be enabled)", a.ID)
+			return nil, fmt.Errorf("agent %s: tailnet executor needs HTTPClient + WorkerToken (tailnet must be enabled)", a.ID)
 		}
 		return executor.NewHTTP(s.cfg.HTTPClient, "http://"+a.TailnetHost+":7780", s.cfg.WorkerToken), nil
 	}
-	return nil, fmt.Errorf("agent %s: provisioner returned neither transport nor tailnet host", a.ID)
+	if a.Transport != nil {
+		return executor.NewProcess(a.Transport, a.WorkingDir, a.MCPs), nil
+	}
+	return nil, fmt.Errorf("agent %s: provisioner returned no executor handle", a.ID)
 }
 
 // StopAgent tears down a single agent: cancels its result subscriber,

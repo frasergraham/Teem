@@ -406,6 +406,13 @@ func defaultInFlightPath(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "in-flight.jsonl")
 }
 
+// defaultSocketDir returns the directory under which per-agent unix
+// sockets live for the subprocess local-worker model. Each socket
+// path is socketDir/<agent-id>.sock with a sibling .pid file.
+func defaultSocketDir(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "sockets")
+}
+
 // drainTimeout returns the configured drain window for graceful
 // daemon shutdown. Defaults to 30s. 0 disables drain. Read every time
 // so it can be tuned without restarting.

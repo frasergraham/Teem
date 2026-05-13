@@ -660,9 +660,17 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 	d.mu.Unlock()
 	d.persistStateSnapshot()
 
-	// Best-effort reconcile of persistent agents — done after
-	// registration so list_agents reflects them straight away.
+	// Best-effort reconcile in two passes:
+	//
+	// 1. Local subprocess workers from the previous daemon run. Their
+	//    sockets are still on disk; probe each, register live ones,
+	//    sweep stale.
+	// 2. Persistent agents from the team YAML (tailnet-hosted; either
+	//    operator-managed local or Fargate).
 	go func() {
+		if n := rt.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
+			fmt.Fprintf(os.Stderr, "[teemd] reattached %d local worker(s) for %s\n", n, t.Name)
+		}
 		if n := rt.spawner.Reconcile(context.Background()); n > 0 {
 			fmt.Fprintf(os.Stderr, "[teemd] reconciled %d persistent agent(s) for %s\n", n, t.Name)
 		}
@@ -751,6 +759,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		AuditSink:        auditSink,
 		ArchetypeSeqPath: defaultArchetypeSeqPath(t.Name),
 		InFlight:         inFlightLog,
+		SocketDir:        defaultSocketDir(t.Name),
 	})
 
 	srv, err := mcpsrv.New(mcpsrv.Config{
