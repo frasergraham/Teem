@@ -6,6 +6,20 @@ Claude sessions placed on local or remote hosts. The Leader talks to
 Teem through an MCP server that exposes tools for spawning agents,
 assigning jobs, and inspecting bus traffic.
 
+## Getting started
+
+```sh
+teem init
+```
+
+The wizard asks for a team name, then offers one-keystroke defaults: the
+standard archetypes (**worker**, **reviewer**, **integrator**, all local)
+and a leader brief that frames the leader as a delegator. If a
+`CLAUDE.md` (or `.claude/CLAUDE.md`) is present in the current directory,
+its contents are folded into the leader brief so the leader inherits your
+project conventions. Decline the defaults to walk through the custom
+archetype builder, or edit the resulting `teem.yaml` directly afterwards.
+
 ## Quickstart
 
 ```sh

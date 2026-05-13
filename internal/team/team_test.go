@@ -77,6 +77,47 @@ team:
 	}
 }
 
+func TestDefaultLeaderBrief_RendersInSystemPrompt(t *testing.T) {
+	team := &Team{
+		Name:       "alpha",
+		Leader:     LeaderSpec{SystemPrompt: DefaultLeaderBrief},
+		Archetypes: cloneArchetypes(DefaultArchetypes),
+	}
+	if err := team.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	prompt := team.LeaderSystemPrompt()
+	for _, want := range []string{
+		"worker",
+		"reviewer",
+		"integrator",
+		"leading a small team",
+		"Plan first, dispatch second.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("LeaderSystemPrompt missing %q\n--- full ---\n%s", want, prompt)
+		}
+	}
+}
+
+func TestBuildDefaultLeaderPrompt_FoldsClaudeMD(t *testing.T) {
+	got := BuildDefaultLeaderPrompt("# alpha\nuse goimports\n")
+	if !strings.Contains(got, "leading a small team") {
+		t.Errorf("missing default brief")
+	}
+	if !strings.Contains(got, "--- Project specifics (from CLAUDE.md) ---") {
+		t.Errorf("missing project-specifics header")
+	}
+	if !strings.Contains(got, "use goimports") {
+		t.Errorf("missing CLAUDE.md body")
+	}
+
+	plain := BuildDefaultLeaderPrompt("")
+	if plain != DefaultLeaderBrief {
+		t.Errorf("empty claudeMD should return DefaultLeaderBrief verbatim")
+	}
+}
+
 func TestValidate_Errors(t *testing.T) {
 	cases := []struct {
 		name, body, want string
