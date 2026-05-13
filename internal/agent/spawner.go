@@ -491,6 +491,56 @@ func (s *Spawner) executorFor(a *provisioner.Agent) (executor.Executor, error) {
 	return nil, fmt.Errorf("agent %s: provisioner returned neither transport nor tailnet host", a.ID)
 }
 
+// StopAgent tears down a single agent: cancels its result subscriber,
+// calls provisioner.Teardown (unless the agent is persistent), flips
+// the registry to Stopped, and removes it from internal maps. Returns
+// nil if the agent isn't currently running.
+func (s *Spawner) StopAgent(ctx context.Context, agentID string) error {
+	s.mu.Lock()
+	w, hasWorker := s.workers[agentID]
+	pa, hasProv := s.provisioned[agentID]
+	cancelLiveness := s.subs["liveness:"+agentID]
+	cancelResults := s.subs[agentID]
+	delete(s.workers, agentID)
+	delete(s.provisioned, agentID)
+	delete(s.subs, "liveness:"+agentID)
+	delete(s.subs, agentID)
+	s.mu.Unlock()
+
+	_ = w // worker has no Stop() — its goroutine exits when the bus subscription cancels
+
+	if cancelLiveness != nil {
+		cancelLiveness()
+	}
+	if cancelResults != nil {
+		cancelResults()
+	}
+
+	_ = s.registry.SetState(agentID, mcpsrv.StateStopped)
+
+	if !hasWorker && !hasProv {
+		return nil // agent wasn't running
+	}
+	if hasProv && !pa.agent.IsPersistent() {
+		tdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		if err := pa.provisioner.Teardown(tdCtx, pa.agent); err != nil {
+			return fmt.Errorf("teardown %s: %w", agentID, err)
+		}
+	}
+	return nil
+}
+
+// IsRunning reports whether the spawner currently owns a worker for
+// agentID. Used by MCP tools that need to decide whether removing the
+// agent from the roster is safe.
+func (s *Spawner) IsRunning(agentID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.workers[agentID]
+	return ok
+}
+
 // Stop tears down all workers and result subscribers. For cloud-backed
 // agents this also calls Teardown so we don't leak running tasks.
 func (s *Spawner) Stop() {

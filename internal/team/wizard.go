@@ -6,8 +6,6 @@ import (
 	"io"
 	"strconv"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Wizard drives an interactive build of a Team from prompts written to W
@@ -78,8 +76,9 @@ func (z *Wizard) Run() (*Team, []byte, error) {
 		return nil, nil, fmt.Errorf("validate: %w", err)
 	}
 
-	// Marshal under the same fileWrapper team.Load expects.
-	body, err := yaml.Marshal(fileWrapper{Team: *t})
+	// Marshal under the same fileWrapper team.Load expects. Go through
+	// Team.MarshalYAML so we don't copy the embedded mutex.
+	body, err := t.MarshalYAML()
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal: %w", err)
 	}

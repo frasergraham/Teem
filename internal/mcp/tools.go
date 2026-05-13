@@ -3,10 +3,14 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/frasergraham/teem/internal/team"
 )
 
 func (s *Server) handleSpawnAgent(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -109,6 +113,98 @@ func (s *Server) handleReadTeam(_ context.Context, _ mcpgo.CallToolRequest) (*mc
 		return mcpgo.NewToolResultErrorFromErr("marshal team", err), nil
 	}
 	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleAddAgent(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	role, err := req.RequireString("role")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	placement, err := req.RequireString("placement")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	spec := team.AgentSpec{
+		ID:          id,
+		Role:        role,
+		Description: req.GetString("description", ""),
+		WorkingDir:  req.GetString("working_dir", ""),
+		Lifecycle:   req.GetString("lifecycle", ""),
+	}
+	switch {
+	case placement == "local":
+		spec.Local = true
+	case placement == "fargate":
+		spec.Backend = "fargate"
+	case strings.HasPrefix(placement, "ssh:"):
+		spec.SSHTarget = strings.TrimPrefix(placement, "ssh:")
+		if spec.WorkingDir == "" {
+			return mcpgo.NewToolResultError("ssh placement requires working_dir"), nil
+		}
+	default:
+		return mcpgo.NewToolResultErrorf("unknown placement %q (use 'local', 'fargate', or 'ssh:user@host')", placement), nil
+	}
+	if err := s.team.AddAgent(spec); err != nil {
+		if errors.Is(err, team.ErrAgentExists) {
+			return mcpgo.NewToolResultErrorf("agent %q already in roster", id), nil
+		}
+		return mcpgo.NewToolResultErrorFromErr("add_agent", err), nil
+	}
+	out, _ := json.Marshal(map[string]string{"agent_id": id, "role": role})
+	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+func (s *Server) handleRemoveAgent(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	agentID, err := req.RequireString("agent_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if s.spawner.IsRunning(agentID) {
+		return mcpgo.NewToolResultErrorf("agent %q is currently running — stop_agent first, then remove_agent", agentID), nil
+	}
+	if err := s.team.RemoveAgent(agentID); err != nil {
+		if errors.Is(err, team.ErrAgentNotFound) {
+			return mcpgo.NewToolResultErrorf("agent %q not in roster", agentID), nil
+		}
+		return mcpgo.NewToolResultErrorFromErr("remove_agent", err), nil
+	}
+	out, _ := json.Marshal(map[string]string{"removed": agentID})
+	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+func (s *Server) handleStopAgent(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	agentID, err := req.RequireString("agent_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if err := s.spawner.StopAgent(ctx, agentID); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("stop_agent", err), nil
+	}
+	out, _ := json.Marshal(map[string]string{"stopped": agentID})
+	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+func (s *Server) handleUpdateAgentDescription(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	agentID, err := req.RequireString("agent_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	description, err := req.RequireString("description")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if err := s.team.UpdateAgentDescription(agentID, description); err != nil {
+		if errors.Is(err, team.ErrAgentNotFound) {
+			return mcpgo.NewToolResultErrorf("agent %q not in roster", agentID), nil
+		}
+		return mcpgo.NewToolResultErrorFromErr("update_agent_description", err), nil
+	}
+	out, _ := json.Marshal(map[string]string{"updated": agentID})
+	return mcpgo.NewToolResultText(string(out)), nil
 }
 
 func (s *Server) handleQueryAudit(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

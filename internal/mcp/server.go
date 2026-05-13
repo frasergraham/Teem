@@ -22,6 +22,8 @@ type Spawner interface {
 	SpawnByRole(ctx context.Context, role string) (string, error)
 	AssignJob(ctx context.Context, agentID, prompt, contextNote string) (string, error)
 	JobStatus(jobID string) (status string, output string, found bool)
+	StopAgent(ctx context.Context, agentID string) error
+	IsRunning(agentID string) bool
 }
 
 // Server bundles the MCP server, its handler, and the dependencies its
@@ -151,5 +153,39 @@ func (s *Server) registerTools() {
 			mcpgo.WithString("limit", mcpgo.Description("Optional. Max events to return (default 50).")),
 		),
 		s.handleQueryAudit,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("add_agent",
+			mcpgo.WithDescription("Add a new agent to the team roster at runtime. Use when the user wants to bring on a new specialty (a new worker, reviewer, etc.) without restarting Teem. Changes are in-memory only — they revert when the daemon restarts."),
+			mcpgo.WithString("id", mcpgo.Required(), mcpgo.Description("Unique agent id (e.g. wk-2).")),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Agent's role (worker, reviewer, integrator, custom).")),
+			mcpgo.WithString("description", mcpgo.Description("One-line description shown to the leader.")),
+			mcpgo.WithString("placement", mcpgo.Required(), mcpgo.Description("Where the agent runs: 'local', 'ssh:user@host', or 'fargate'.")),
+			mcpgo.WithString("working_dir", mcpgo.Description("Optional working directory override.")),
+			mcpgo.WithString("lifecycle", mcpgo.Description("'ephemeral' (default) or 'persistent'.")),
+		),
+		s.handleAddAgent,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("remove_agent",
+			mcpgo.WithDescription("Remove an agent from the team roster. Refuses if the agent is currently running — stop it first with stop_agent."),
+			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the agent to remove.")),
+		),
+		s.handleRemoveAgent,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("stop_agent",
+			mcpgo.WithDescription("Tear down a running worker. Cancels its result subscriber and calls Teardown on the provisioner (unless the agent is persistent). The roster entry stays — to also drop it, follow up with remove_agent."),
+			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the running agent to stop.")),
+		),
+		s.handleStopAgent,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("update_agent_description",
+			mcpgo.WithDescription("Update the description string for an existing agent. Useful when the user wants to refine a worker's specialty without removing and re-adding."),
+			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the agent.")),
+			mcpgo.WithString("description", mcpgo.Required(), mcpgo.Description("New description text.")),
+		),
+		s.handleUpdateAgentDescription,
 	)
 }

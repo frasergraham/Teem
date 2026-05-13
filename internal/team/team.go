@@ -5,15 +5,21 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Team struct {
-	Name    string       `yaml:"name"`
-	Tailnet TailnetSpec  `yaml:"tailnet"`
-	Leader  LeaderSpec   `yaml:"leader"`
-	Agents  []AgentSpec  `yaml:"agents"`
+	Name    string      `yaml:"name"`
+	Tailnet TailnetSpec `yaml:"tailnet"`
+	Leader  LeaderSpec  `yaml:"leader"`
+	Agents  []AgentSpec `yaml:"agents"`
+
+	// mu guards concurrent mutation via Add/Remove/Update methods and
+	// makes the read-side helpers (FindAgentByRole etc.) safe to call
+	// from goroutines that may race with the daemon's MCP tools.
+	mu sync.RWMutex `yaml:"-"`
 }
 
 type TailnetSpec struct {
@@ -84,8 +90,36 @@ type MCPRef struct {
 	Env     map[string]string `yaml:"env,omitempty"`
 }
 
+// fileWrapper / marshalShape are the shape of the on-disk YAML.
+// marshalShape is a lock-free mirror of Team so we can serialize without
+// copying the embedded mutex (which `go vet` rightly flags).
 type fileWrapper struct {
 	Team Team `yaml:"team"`
+}
+
+type marshalWrapper struct {
+	Team marshalShape `yaml:"team"`
+}
+
+type marshalShape struct {
+	Name    string      `yaml:"name"`
+	Tailnet TailnetSpec `yaml:"tailnet,omitempty"`
+	Leader  LeaderSpec  `yaml:"leader"`
+	Agents  []AgentSpec `yaml:"agents,omitempty"`
+}
+
+// MarshalYAML serializes the team to YAML in the canonical fileWrapper
+// shape ("team:" at the top level). The mutex is intentionally not
+// part of the on-disk representation.
+func (t *Team) MarshalYAML() ([]byte, error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return yaml.Marshal(marshalWrapper{Team: marshalShape{
+		Name:    t.Name,
+		Tailnet: t.Tailnet,
+		Leader:  t.Leader,
+		Agents:  append([]AgentSpec(nil), t.Agents...),
+	}})
 }
 
 func Load(path string) (*Team, error) {
@@ -184,6 +218,8 @@ func (t *Team) Validate() error {
 // launched with: a fixed Teem preamble + the team roster + the YAML's
 // leader.system_prompt verbatim.
 func (t *Team) LeaderSystemPrompt() string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	var b strings.Builder
 	b.WriteString("You are the Leader of a Teem — a small team of Claude Code agents working together on a software project.\n\n")
 	b.WriteString("You have access to MCP tools that let you spawn agents, assign jobs, inspect status, and read the shared message bus. ")
@@ -201,22 +237,132 @@ func (t *Team) LeaderSystemPrompt() string {
 	return b.String()
 }
 
-// FindAgentByRole returns the first agent matching the role, or nil.
+// FindAgentByRole returns the first agent matching the role, or nil. The
+// returned pointer references team-internal storage and is only safe to
+// read; mutations should go through AddAgent/RemoveAgent/UpdateAgent.
 func (t *Team) FindAgentByRole(role string) *AgentSpec {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	for i := range t.Agents {
 		if t.Agents[i].Role == role {
-			return &t.Agents[i]
+			a := t.Agents[i]
+			return &a
 		}
 	}
 	return nil
 }
 
-// FindAgentByID returns the agent with the given id, or nil.
+// FindAgentByID returns the agent with the given id, or nil. See
+// FindAgentByRole for the same caveat about mutation.
 func (t *Team) FindAgentByID(id string) *AgentSpec {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
 	for i := range t.Agents {
 		if t.Agents[i].ID == id {
-			return &t.Agents[i]
+			a := t.Agents[i]
+			return &a
 		}
+	}
+	return nil
+}
+
+// Snapshot returns a copy of the agent roster safe to iterate without
+// holding the lock. Used by MCP tools that report the current team
+// shape.
+func (t *Team) Snapshot() []AgentSpec {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]AgentSpec, len(t.Agents))
+	copy(out, t.Agents)
+	return out
+}
+
+// AddAgent appends spec to the roster after validating it. Returns
+// ErrAgentExists if an agent with the same id is already in the
+// roster, or a validation error if the spec is malformed.
+func (t *Team) AddAgent(spec AgentSpec) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if spec.ID == "" {
+		return fmt.Errorf("AddAgent: id is required")
+	}
+	if spec.Role == "" {
+		return fmt.Errorf("AddAgent: role is required")
+	}
+	for _, a := range t.Agents {
+		if a.ID == spec.ID {
+			return ErrAgentExists
+		}
+	}
+	if err := validatePlacement(spec); err != nil {
+		return err
+	}
+	if spec.Lifecycle != "" {
+		if _, ok := SupportedLifecycles[spec.Lifecycle]; !ok {
+			return fmt.Errorf("AddAgent: unknown lifecycle %q", spec.Lifecycle)
+		}
+	}
+	t.Agents = append(t.Agents, spec)
+	return nil
+}
+
+// RemoveAgent drops the agent with the given id from the roster.
+// Returns ErrAgentNotFound when no such agent exists.
+func (t *Team) RemoveAgent(id string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i, a := range t.Agents {
+		if a.ID == id {
+			t.Agents = append(t.Agents[:i], t.Agents[i+1:]...)
+			return nil
+		}
+	}
+	return ErrAgentNotFound
+}
+
+// UpdateAgentDescription mutates an existing agent's description. Other
+// fields are immutable post-creation; to change placement or lifecycle,
+// remove and re-add.
+func (t *Team) UpdateAgentDescription(id, description string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.Agents {
+		if t.Agents[i].ID == id {
+			t.Agents[i].Description = description
+			return nil
+		}
+	}
+	return ErrAgentNotFound
+}
+
+// ErrAgentExists / ErrAgentNotFound are returned by the mutator methods
+// so callers can distinguish "no-op" from "real failure".
+var (
+	ErrAgentExists   = fmt.Errorf("team: agent already exists")
+	ErrAgentNotFound = fmt.Errorf("team: agent not found")
+)
+
+// validatePlacement enforces the same exactly-one-of rule the YAML
+// validator does, plus the supported-backend check.
+func validatePlacement(a AgentSpec) error {
+	placements := 0
+	if a.Local {
+		placements++
+	}
+	if a.SSHTarget != "" {
+		placements++
+	}
+	if a.Backend != "" {
+		placements++
+		if _, ok := SupportedBackends[a.Backend]; !ok {
+			return fmt.Errorf("unknown backend %q (supported: fargate)", a.Backend)
+		}
+	}
+	if placements == 0 {
+		return fmt.Errorf("must set exactly one of local, ssh_target, or backend")
+	}
+	if placements > 1 {
+		return fmt.Errorf("set exactly one of local, ssh_target, or backend (got %d)", placements)
 	}
 	return nil
 }

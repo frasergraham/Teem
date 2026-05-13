@@ -1,17 +1,18 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -19,16 +20,10 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/agent"
-	"github.com/frasergraham/teem/internal/audit"
-	"github.com/frasergraham/teem/internal/bus"
-	"github.com/frasergraham/teem/internal/leader"
 	"github.com/frasergraham/teem/internal/llm"
-	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/provisioner"
 	"github.com/frasergraham/teem/internal/state"
-	"github.com/frasergraham/teem/internal/tailnet"
 	"github.com/frasergraham/teem/internal/team"
-	"github.com/frasergraham/teem/internal/transport"
 )
 
 func main() {
@@ -46,6 +41,16 @@ func main() {
 		err = runInit(args)
 	case "audit":
 		err = runAudit(args)
+	case "start":
+		err = runStart(args)
+	case "stop":
+		err = runStop(args)
+	case "status":
+		err = runStatus(args)
+	case "teams":
+		err = runTeams(args)
+	case "install-plugin":
+		err = runInstallPlugin(args)
 	case "llm":
 		err = runLLM(args)
 	case "version":
@@ -67,9 +72,14 @@ func usage() string {
 teem — orchestrate Claude Code agents as a team
 
 Usage:
-  teem init                                            show current team or run the setup wizard
-  teem chat    [--team teem.yaml] [--tailnet=true] [--leader-host user@host] [--listen :7777]
+  teem init                                            install plugin + show team or run the setup wizard
+  teem start   [--foreground] [--listen :7777]         start the orchestrator daemon (headless by default)
+  teem stop                                            stop the daemon
+  teem status                                          report daemon state + registered teams
+  teem teams                                           list teams the running daemon serves
+  teem chat    [--team teem.yaml]                      register the current team with the daemon, launch Claude
   teem audit   [--agent ID] [--since RFC3339] [--limit 50] [--follow]
+  teem install-plugin [--force]                        install/refresh the ~/.claude/plugins/teem plugin
   teem llm ping --prompt "say hi"
   teem version
 
@@ -84,13 +94,14 @@ func versionString() string {
 	return "dev"
 }
 
-// runChat starts the orchestrator and the Leader, then runs a REPL.
+// runChat: ensure the multi-tenant daemon is up, register the current
+// team with it (lazy registration — idempotent), then exec Claude Code
+// pointed at the daemon's per-team MCP URL.
 func runChat(args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	teamPath := fs.String("team", "", "team YAML (default: ./teem.yaml or ./config/team.example.yaml)")
-	useTailnet := fs.Bool("tailnet", true, "join the tailnet via tsnet")
-	leaderHost := fs.String("leader-host", "", "if set (user@host), run the Leader on that host via SSH; otherwise local")
-	listenAddr := fs.String("listen", ":7777", "address the orchestrator MCP server listens on")
+	useTailnet := fs.Bool("tailnet", true, "join the tailnet (used only when auto-starting the daemon)")
+	listenAddr := fs.String("listen", ":7777", "daemon listen address (used only when auto-starting)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -103,220 +114,150 @@ func runChat(args []string) error {
 	if err != nil {
 		return err
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	var (
-		listener  net.Listener
-		mcpHost   string
-		tnetNode  *tailnet.Node
-	)
-	if *useTailnet {
-		tnetNode, err = tailnet.New(tailnet.Config{
-			Hostname: t.Tailnet.Hostname,
-			AuthKey:  resolveAuthKey(t.Tailnet.AuthKeyEnv),
-		})
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(os.Stderr, "[teem] joining tailnet as %q...\n", t.Tailnet.Hostname)
-		if err := tnetNode.Start(ctx); err != nil {
-			return err
-		}
-		listener, err = tnetNode.Listen("tcp", *listenAddr)
-		if err != nil {
-			return fmt.Errorf("tailnet listen: %w", err)
-		}
-		mcpHost = t.Tailnet.Hostname
-	} else {
-		listener, err = net.Listen("tcp", "127.0.0.1"+normalizePort(*listenAddr))
-		if err != nil {
-			return fmt.Errorf("listen: %w", err)
-		}
-		mcpHost = "127.0.0.1"
-	}
-
-	bs := bus.NewMemBus()
-	defer bs.Close()
-
-	// Tailnet HTTP client + per-session worker token for cloud-backed
-	// agents. The token is generated if not pre-set in env; cloud
-	// provisioners inject it into the worker container so HTTP calls from
-	// the leader can be authenticated. Without a tailnet, cloud agents are
-	// not reachable, so we leave HTTPClient nil and the spawner returns a
-	// clear error if a fargate agent is requested.
-	var httpClient *http.Client
-	if tnetNode != nil {
-		httpClient = tnetNode.HTTPClient()
-	}
-	workerToken := os.Getenv("TEEM_WORKER_TOKEN")
-	if workerToken == "" {
-		workerToken = randomToken()
-	}
-
-	// Resolve the leader's git repo root (best-effort) and derive a
-	// per-team base directory for local agent worktrees. Neither is fatal
-	// if missing — the local provisioner only needs them when an agent
-	// without an explicit working_dir is spawned.
-	repoRoot, _ := provisioner.ResolveRepoRoot("")
-	worktreeBase := defaultWorktreeBase(t.Name)
-
-	// Leader URL workers reach for audit posts. Empty when no tailnet
-	// (a worker on a remote container can't reach 127.0.0.1).
-	var leaderURL string
-	if tnetNode != nil {
-		leaderURL = fmt.Sprintf("http://%s%s", t.Tailnet.Hostname, normalizePort(*listenAddr))
-	}
-
-	gitCfg := readGitConfig()
-	if gitCfg.RepoURL != "" {
-		fmt.Fprintf(os.Stderr, "[teem] cloud workers will clone %s on branch %s<agent-id>\n", gitCfg.RepoURL, branchPrefixOrDefault(gitCfg.BranchPrefix))
-	}
-
-	stateStore := state.NewStore(defaultStateDir(t.Name))
-
-	reg := mcpsrv.NewRegistry()
-	spawner := agent.NewSpawner(t, bs, reg, agent.Config{
-		HTTPClient:       httpClient,
-		WorkerToken:      workerToken,
-		CloudProvisioner: cloudProvisionerFactory(workerToken, leaderURL, gitCfg, stateStore),
-		RepoRoot:         repoRoot,
-		WorktreeBase:     worktreeBase,
-		LeaderURL:        leaderURL,
-		StateStore:       stateStore,
-	})
-	defer spawner.Stop()
-
-	// Reconnect to any persistent agents the operator has running. This
-	// makes them visible in `list_agents` without an explicit spawn.
-	if n := spawner.Reconcile(ctx); n > 0 {
-		fmt.Fprintf(os.Stderr, "[teem] reconciled %d persistent agent(s)\n", n)
-	}
-
-	// Audit sink — workers POST structured events here over the tailnet.
-	// Survives leader restarts; greppable JSONL on disk.
-	auditPath := defaultAuditPath(t.Name)
-	auditSink, err := audit.OpenFile(auditPath)
+	yamlBody, err := os.ReadFile(resolved)
 	if err != nil {
-		return fmt.Errorf("audit: %w", err)
+		return fmt.Errorf("read %s: %w", resolved, err)
 	}
-	defer auditSink.Close()
-	fmt.Fprintf(os.Stderr, "[teem] audit log: %s\n", auditPath)
 
-	srv, err := mcpsrv.New(mcpsrv.Config{
-		Bus:      bs,
-		Team:     t,
-		Registry: reg,
-		Spawner:  spawner,
-		Audit:    auditSink,
-	})
-	if err != nil {
+	// 1. Ensure the (single, multi-tenant) daemon is running.
+	if err := ensureDaemon(&daemonFlags{useTailnet: *useTailnet, listenAddr: *listenAddr}); err != nil {
 		return err
 	}
 
-	// Composite HTTP routing: /mcp/* → MCP server (no auth — local
-	// consumer is the leader claude); /audit → audit endpoints (bearer
-	// auth via worker token, since workers post across the tailnet).
-	rootHandler := newRootHandler(srv.Handler(), audit.Handler(auditSink, workerToken))
-
-	httpSrv := &http.Server{
-		Handler:           rootHandler,
-		ReadHeaderTimeout: 10 * time.Second,
+	// 2. Read the daemon's endpoint + shared bearer.
+	ds, ok, err := readDaemonStateFile()
+	if err != nil {
+		return fmt.Errorf("read daemon state: %w", err)
 	}
-	serverErr := make(chan error, 1)
-	go func() {
-		err := httpSrv.Serve(listener)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-		} else {
-			serverErr <- nil
+	if !ok {
+		return errors.New("daemon state missing — try `teem start` manually")
+	}
+
+	// 3. Register this team with the daemon. Idempotent: re-registering
+	//    an existing team returns the same URLs.
+	repoRoot, _ := provisioner.ResolveRepoRoot("")
+	regResp, err := registerWithDaemon(ds, string(yamlBody), repoRoot)
+	if err != nil {
+		return fmt.Errorf("register team: %w", err)
+	}
+
+	// 4. Write the MCP config Claude Code consumes.
+	mcpCfgPath := filepath.Join(defaultStateDir(t.Name), "claude-mcp.json")
+	if err := writeClaudeMCPConfig(mcpCfgPath, regResp.MCPURL); err != nil {
+		return fmt.Errorf("write claude mcp config: %w", err)
+	}
+
+	// 5. Team brief + first-run plugin install.
+	brief := t.LeaderSystemPrompt()
+	quietEnsurePlugin()
+
+	// 6. Hand off to Claude Code.
+	claudePath, err := exec.LookPath("claude")
+	if err != nil {
+		return fmt.Errorf("claude CLI not found on PATH: %w (install Claude Code: https://docs.claude.com/en/docs/claude-code)", err)
+	}
+	argv := []string{
+		"claude",
+		"--mcp-config", mcpCfgPath,
+		"--append-system-prompt", brief,
+	}
+	fmt.Fprintf(os.Stderr, "[teem] team %q → %s — launching claude\n", t.Name, regResp.MCPURL)
+	return syscall.Exec(claudePath, argv, os.Environ())
+}
+
+// ensureDaemon starts the daemon detached if missing and waits for
+// /healthz to answer.
+func ensureDaemon(df *daemonFlags) error {
+	if pid, alive := readDaemonPID(); alive {
+		fmt.Fprintf(os.Stderr, "[teem] daemon already running (pid %d)\n", pid)
+		return nil
+	}
+	if err := forkDetached(df); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, alive := readDaemonPID(); alive {
+			st, ok, _ := readDaemonStateFile()
+			if ok && st.Endpoint != "" && probeDaemonHealthz(st) {
+				return nil
+			}
 		}
-	}()
-	defer func() {
-		ctx2, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = httpSrv.Shutdown(ctx2)
-	}()
-	_ = srv // hold the reference so its registry/spawner deps don't get GC'd
-
-	endpoint := fmt.Sprintf("http://%s%s/mcp", mcpHost, normalizePort(*listenAddr))
-	fmt.Fprintf(os.Stderr, "[teem] orchestrator MCP endpoint: %s\n", endpoint)
-
-	var tr transport.Transport = transport.LocalTransport{}
-	leaderLoc := "local"
-	if *leaderHost != "" {
-		tr = transport.SSHTransport{Target: *leaderHost}
-		leaderLoc = *leaderHost
+		time.Sleep(250 * time.Millisecond)
 	}
+	return fmt.Errorf("daemon did not become ready in 15s — check %s", daemonLogPath())
+}
 
-	ld, err := leader.Start(ctx, leader.Config{
-		Transport:    tr,
-		MCPEndpoint:  endpoint,
-		SystemPrompt: t.LeaderSystemPrompt(),
+// probeDaemonHealthz returns true if the daemon answers /healthz at the
+// recorded endpoint. For tailnet endpoints the chat process can't dial
+// the hostname without joining the tailnet itself; we trust the pid
+// file in that case.
+func probeDaemonHealthz(st daemonStateFile) bool {
+	if !strings.HasPrefix(st.Endpoint, "http://127.0.0.1") && !strings.HasPrefix(st.Endpoint, "http://localhost") {
+		return true
+	}
+	client := &http.Client{Timeout: 1 * time.Second}
+	resp, err := client.Get(st.Endpoint + "/healthz")
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
+// registerWithDaemon POSTs the team YAML to /control/teams. Re-registering
+// an existing team returns the same URLs (200 OK rather than 201).
+func registerWithDaemon(ds daemonStateFile, yamlBody, repoRoot string) (*registerResponse, error) {
+	body, err := json.Marshal(map[string]string{
+		"team_yaml": yamlBody,
+		"repo_root": repoRoot,
 	})
 	if err != nil {
-		return fmt.Errorf("leader start: %w", err)
+		return nil, err
 	}
-	defer ld.Close()
-	fmt.Fprintf(os.Stderr, "[teem] leader running on: %s\n", leaderLoc)
-	fmt.Fprintln(os.Stderr, "[teem] ready — type your message and press Enter. Ctrl-D to quit.")
-
-	return runREPL(ctx, ld, serverErr)
+	req, err := http.NewRequest(http.MethodPost, ds.Endpoint+"/control/teams", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+ds.Token)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("daemon returned %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+	}
+	var r registerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return nil, fmt.Errorf("decode register response: %w", err)
+	}
+	return &r, nil
 }
 
-func runREPL(ctx context.Context, ld leader.Leader, serverErr <-chan error) error {
-	in := bufio.NewScanner(os.Stdin)
-	prompt := func() { fmt.Print("> ") }
-	prompt()
-	for in.Scan() {
-		text := strings.TrimSpace(in.Text())
-		if text == "" {
-			prompt()
-			continue
-		}
-		if err := ld.Send(ctx, text); err != nil {
-			return fmt.Errorf("send: %w", err)
-		}
-		if err := drainTurn(ctx, ld, serverErr); err != nil {
-			return err
-		}
-		prompt()
+// writeClaudeMCPConfig writes the JSON Claude Code's --mcp-config flag
+// expects.
+func writeClaudeMCPConfig(path, url string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
 	}
-	return in.Err()
+	body, err := json.MarshalIndent(map[string]any{
+		"mcpServers": map[string]any{
+			"teem": map[string]any{
+				"type": "http",
+				"url":  url,
+			},
+		},
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, body)
 }
 
-func drainTurn(ctx context.Context, ld leader.Leader, serverErr <-chan error) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-serverErr:
-			if err != nil {
-				return fmt.Errorf("mcp server: %w", err)
-			}
-			return errors.New("mcp server stopped unexpectedly")
-		case ev, ok := <-ld.Events():
-			if !ok {
-				return errors.New("leader exited")
-			}
-			switch ev.Kind {
-			case leader.EventAssistantText:
-				fmt.Println(ev.Text)
-			case leader.EventToolUse:
-				fmt.Fprintf(os.Stderr, "[tool] %s\n", ev.ToolName)
-			case leader.EventResult:
-				if ev.Text != "" {
-					fmt.Println(ev.Text)
-				}
-				return nil
-			case leader.EventError:
-				fmt.Fprintf(os.Stderr, "[error] %s\n", ev.Text)
-				return nil
-			}
-		}
-	}
-}
 
 // teamSearchPaths lists the file names `teem chat` searches for a team
 // when --team is unset, in priority order. The wizard writes to the first
