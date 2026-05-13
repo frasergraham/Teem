@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="refresh" content="10">
+  <title>teem</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f5f5f4;
+      --fg: #1c1917;
+      --muted: #78716c;
+      --card: #ffffff;
+      --border: #e7e5e4;
+      --accent: #15803d;
+      --warn: #b45309;
+      --error: #b91c1c;
+      --pill-bg: #f5f5f4;
+      --code-bg: #fafaf9;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0c0a09;
+        --fg: #fafaf9;
+        --muted: #a8a29e;
+        --card: #1c1917;
+        --border: #292524;
+        --accent: #22c55e;
+        --warn: #f59e0b;
+        --error: #ef4444;
+        --pill-bg: #292524;
+        --code-bg: #1c1917;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+      font-size: 15px;
+      line-height: 1.4;
+      max-width: 720px;
+      margin: 0 auto;
+      padding-bottom: 64px;
+    }
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    header .endpoint {
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 12px;
+    }
+    header .clock {
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .team {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 14px;
+    }
+    .team h2 {
+      margin: 0 0 4px 0;
+      font-size: 17px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .team .meta {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--pill-bg);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .pill.running { background: var(--accent); color: white; }
+    .pill.paused  { background: var(--warn); color: white; }
+    .pill.error   { background: var(--error); color: white; }
+    .pill.notes   { background: #2563eb; color: white; }
+
+    .section {
+      margin-top: 12px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .section h3 {
+      margin: 0 0 8px 0;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .agents, .tasks, .events {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .agent, .task, .event {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      font-size: 14px;
+      padding: 4px 0;
+    }
+    .agent .id, .task .id, .event .agent {
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 12px;
+      color: var(--muted);
+      min-width: 90px;
+    }
+    .agent .state.busy  { color: var(--accent); font-weight: 500; }
+    .agent .state.running { color: var(--accent); }
+    .agent .state.error { color: var(--error); }
+    .agent .state.stopped { color: var(--muted); }
+    .agent .seen  { color: var(--muted); font-size: 12px; margin-left: auto; }
+    .task .status { color: var(--muted); font-size: 12px; }
+    .task .assignee { margin-left: auto; color: var(--muted); font-size: 12px; }
+    .event .time  { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 60px; }
+    .event .kind  { color: var(--muted); font-size: 12px; min-width: 100px; }
+    .event .msg   { color: var(--fg); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+    .empty {
+      color: var(--muted);
+      font-style: italic;
+      font-size: 13px;
+    }
+
+    .summary {
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      font-size: 13px;
+    }
+    .summary .stat {
+      display: flex;
+      gap: 4px;
+      align-items: baseline;
+    }
+    .summary .stat .n { font-weight: 600; color: var(--fg); }
+    .summary .stat .lbl { color: var(--muted); }
+
+    footer {
+      margin-top: 32px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>teem</h1>
+    <span class="endpoint">{{ .Endpoint }}</span>
+    <span class="clock">{{ .NowFormatted }}</span>
+  </header>
+
+  {{ if not .Teams }}
+    <div class="team empty">
+      No teams registered yet. Run <code>teem chat</code> in a project to register one.
+    </div>
+  {{ end }}
+
+  {{ range .Teams }}
+    <section class="team">
+      <h2>
+        {{ .Name }}
+        {{ if .PulseRunning }}
+          {{ if .PulsePaused }}
+            <span class="pill paused">pulse paused</span>
+          {{ else }}
+            <span class="pill running">pulse running</span>
+          {{ end }}
+        {{ else }}
+          <span class="pill">pulse off</span>
+        {{ end }}
+        {{ if gt .UnreadNotes 0 }}
+          <span class="pill notes">{{ .UnreadNotes }} note{{ if gt .UnreadNotes 1 }}s{{ end }}</span>
+        {{ end }}
+      </h2>
+      <div class="meta">
+        registered {{ .RegisteredAgo }}
+        {{ if .PulseRunning }}· tick every {{ .PulseInterval }} · last {{ .PulseLastTick }} · {{ .PulseTickCount }} ticks{{ end }}
+      </div>
+
+      <div class="summary">
+        <span class="stat"><span class="n">{{ len .Agents }}</span><span class="lbl">agent{{ if ne (len .Agents) 1 }}s{{ end }}</span></span>
+        <span class="stat"><span class="n">{{ .InFlight }}</span><span class="lbl">in flight</span></span>
+        <span class="stat"><span class="n">{{ .OpenTaskCount }}</span><span class="lbl">open task{{ if ne .OpenTaskCount 1 }}s{{ end }}</span></span>
+      </div>
+
+      <div class="section">
+        <h3>Agents</h3>
+        {{ if not .Agents }}<div class="empty">none running</div>{{ end }}
+        <div class="agents">
+          {{ range .Agents }}
+            <div class="agent">
+              <span class="id">{{ .ID }}</span>
+              <span class="role">{{ .Role }}</span>
+              <span class="state {{ .State }}">{{ .State }}</span>
+              <span class="seen">{{ .LastSeen }}</span>
+            </div>
+          {{ end }}
+        </div>
+      </div>
+
+      {{ if .PendingTasks }}
+      <div class="section">
+        <h3>Open tasks</h3>
+        <div class="tasks">
+          {{ range .PendingTasks }}
+            <div class="task">
+              <span class="id">{{ .ID }}</span>
+              <span class="title">{{ .Title }}</span>
+              <span class="status">{{ .Status }}</span>
+              {{ if .AssignedTo }}<span class="assignee">→ {{ .AssignedTo }}</span>{{ end }}
+            </div>
+          {{ end }}
+        </div>
+      </div>
+      {{ end }}
+
+      <div class="section">
+        <h3>Recent activity</h3>
+        {{ if not .RecentEvents }}<div class="empty">quiet for now</div>{{ end }}
+        <div class="events">
+          {{ range .RecentEvents }}
+            <div class="event">
+              <span class="time">{{ .Time }}</span>
+              <span class="agent">{{ .AgentID }}</span>
+              <span class="kind">{{ .Kind }}</span>
+              <span class="msg">{{ .Message }}</span>
+            </div>
+          {{ end }}
+        </div>
+      </div>
+    </section>
+  {{ end }}
+
+  <footer>
+    teem · refreshing every 10s · uptime {{ .UptimeAgo }}
+  </footer>
+</body>
+</html>

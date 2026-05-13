@@ -289,7 +289,7 @@ type registeredTeam struct {
 func serveDaemon(ctx context.Context, df *daemonFlags) error {
 	hostname := os.Getenv("TEEM_DAEMON_HOSTNAME")
 	if hostname == "" {
-		hostname = "teem-daemon"
+		hostname = "teem"
 	}
 
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: ctx}
@@ -432,6 +432,11 @@ func (d *daemon) handler() http.Handler {
 			d.requireAuth(w, r, d.handleControlTeamsItem)
 		case strings.HasPrefix(path, "/teams/"):
 			d.handleTeamRoute(w, r)
+		case path == "/" || path == "/ui" || path == "/ui/":
+			// Dashboard. Unauth on purpose: tailnet is the security
+			// boundary (same model as the MCP endpoint). Read-only
+			// for now — no actions exposed.
+			d.renderDashboard(w, r)
 		default:
 			http.NotFound(w, r)
 		}
