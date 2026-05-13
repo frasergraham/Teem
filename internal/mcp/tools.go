@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/frasergraham/teem/internal/audit"
+	"github.com/frasergraham/teem/internal/notes"
+	"github.com/frasergraham/teem/internal/plan"
 	"github.com/frasergraham/teem/internal/team"
 )
 
@@ -207,6 +210,144 @@ func (s *Server) handleUpdateArchetype(_ context.Context, req mcpgo.CallToolRequ
 	}
 	out, _ := json.Marshal(map[string]string{"updated": role})
 	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+// --- notes handler --------------------------------------------------------
+
+func (s *Server) handleWriteUserNote(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.notes == nil {
+		return mcpgo.NewToolResultError("notes inbox is not configured"), nil
+	}
+	text, err := req.RequireString("text")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if err := s.notes.Write(notes.Note{Text: text, Timestamp: time.Now().UTC()}); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("write_user_note", err), nil
+	}
+	body, _ := json.Marshal(map[string]string{"queued": "ok"})
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+// --- plan / task handlers -------------------------------------------------
+
+func (s *Server) handleAddTask(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured"), nil
+	}
+	title, err := req.RequireString("title")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	in := plan.NewTaskInput{
+		Title:    title,
+		ParentID: req.GetString("parent_id", ""),
+		Notes:    req.GetString("notes", ""),
+	}
+	if v := req.GetString("depends_on", ""); v != "" {
+		in.DependsOn = splitCSV(v)
+	}
+	task, err := s.plan.AddTask(in)
+	if err != nil {
+		return mcpgo.NewToolResultErrorFromErr("add_task", err), nil
+	}
+	body, _ := json.Marshal(task)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleUpdateTask(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured"), nil
+	}
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	in := plan.UpdateInput{}
+	if v := req.GetString("status", ""); v != "" {
+		in.Status = plan.Status(v)
+	}
+	if v := req.GetString("assigned_to", ""); v != "" {
+		s := v
+		in.AssignedTo = &s
+	}
+	// "notes" present-but-empty = "clear notes". We treat the missing
+	// arg as "leave alone", which is the common case for the leader.
+	if _, ok := req.Params.Arguments.(map[string]any)["notes"]; ok {
+		v := req.GetString("notes", "")
+		in.Notes = &v
+	}
+	if v := req.GetString("depends_on", ""); v != "" {
+		deps := splitCSV(v)
+		in.DependsOn = &deps
+	}
+	if v := req.GetString("add_evidence", ""); v != "" {
+		in.AddEvidence = splitCSV(v)
+	}
+	task, err := s.plan.UpdateTask(id, in)
+	if err != nil {
+		if errors.Is(err, plan.ErrTaskNotFound) {
+			return mcpgo.NewToolResultErrorf("task %q not found", id), nil
+		}
+		return mcpgo.NewToolResultErrorFromErr("update_task", err), nil
+	}
+	body, _ := json.Marshal(task)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleListTasks(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured"), nil
+	}
+	f := plan.Filter{
+		ParentID: req.GetString("parent_id", ""),
+	}
+	if v := req.GetString("status", ""); v != "" {
+		f.Status = plan.Status(v)
+	}
+	if req.GetString("open_only", "") == "true" {
+		f.OpenOnly = true
+	}
+	tasks := s.plan.List(f)
+	body, _ := json.Marshal(tasks)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleLinkTaskToJob(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	jobID, err := req.RequireString("job_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	task, err := s.plan.LinkJob(taskID, jobID)
+	if err != nil {
+		if errors.Is(err, plan.ErrTaskNotFound) {
+			return mcpgo.NewToolResultErrorf("task %q not found", taskID), nil
+		}
+		return mcpgo.NewToolResultErrorFromErr("link_task_to_job", err), nil
+	}
+	body, _ := json.Marshal(task)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+// splitCSV trims whitespace and drops empty entries from a
+// comma-separated MCP-string-arg.
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleRecallJobs(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

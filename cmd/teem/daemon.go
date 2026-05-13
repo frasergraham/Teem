@@ -23,6 +23,9 @@ import (
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
+	"github.com/frasergraham/teem/internal/notes"
+	"github.com/frasergraham/teem/internal/plan"
+	"github.com/frasergraham/teem/internal/pulse"
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/tailnet"
 	"github.com/frasergraham/teem/internal/team"
@@ -271,6 +274,9 @@ type registeredTeam struct {
 	spawner    *agent.Spawner
 	auditSink  *audit.FileSink
 	auditH     http.Handler
+	plan       *plan.Plan
+	notes      *notes.Inbox
+	pulse      *pulse.Pulse
 	registry   *mcpsrv.Registry
 	leaderURL  string
 	registered time.Time
@@ -357,8 +363,10 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		// Tear down each team's spawner so ephemeral workers exit.
 		d.mu.Lock()
 		for _, rt := range d.teams {
+			rt.pulse.Stop()
 			rt.spawner.Stop()
 			_ = rt.auditSink.Close()
+			_ = rt.plan.Close()
 		}
 		d.mu.Unlock()
 	}()
@@ -434,29 +442,124 @@ func (d *daemon) handleControlTeamsCollection(w http.ResponseWriter, r *http.Req
 }
 
 func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/control/teams/")
-	if name == "" || strings.Contains(name, "/") {
+	rest := strings.TrimPrefix(r.URL.Path, "/control/teams/")
+	if rest == "" {
 		http.Error(w, "bad team name", http.StatusBadRequest)
 		return
 	}
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
+	// Split into <name> and optional <subresource>.
+	name := rest
+	sub := ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		name, sub = rest[:i], rest[i+1:]
 	}
 	d.mu.Lock()
 	rt, ok := d.teams[name]
-	if ok {
-		delete(d.teams, name)
-	}
 	d.mu.Unlock()
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
-	rt.spawner.Stop()
-	_ = rt.auditSink.Close()
-	d.persistStateSnapshot()
-	w.WriteHeader(http.StatusNoContent)
+
+	switch sub {
+	case "":
+		// Whole-team operations.
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		d.mu.Lock()
+		delete(d.teams, name)
+		d.mu.Unlock()
+		rt.pulse.Stop()
+		rt.spawner.Stop()
+		_ = rt.auditSink.Close()
+		_ = rt.plan.Close()
+		_ = rt.notes.Close()
+		d.persistStateSnapshot()
+		w.WriteHeader(http.StatusNoContent)
+	case "pulse":
+		d.handlePulseControl(w, r, rt)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// pulseStatus is the GET response shape and the start-result shape.
+type pulseStatus struct {
+	Running   bool      `json:"running"`
+	Paused    bool      `json:"paused"`
+	Interval  string    `json:"interval"`
+	LastTick  time.Time `json:"last_tick,omitempty"`
+	TickCount int64     `json:"tick_count"`
+}
+
+// pulseCommand is the POST body for action-style requests.
+type pulseCommand struct {
+	Action   string `json:"action"`   // start|stop|pause|resume|tick
+	Interval string `json:"interval"` // for start; Go duration string
+	Reason   string `json:"reason"`   // for pause
+}
+
+// handlePulseControl handles GET/POST under /control/teams/<name>/pulse.
+// The control plane is intentionally small: the daemon does the work,
+// the CLI is a thin formatter.
+func (d *daemon) handlePulseControl(w http.ResponseWriter, r *http.Request, rt *registeredTeam) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, currentPulseStatus(rt))
+	case http.MethodPost:
+		var cmd pulseCommand
+		if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil && err != io.EOF {
+			http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch cmd.Action {
+		case "start":
+			if cmd.Interval != "" {
+				dur, err := time.ParseDuration(cmd.Interval)
+				if err != nil {
+					http.Error(w, "bad interval: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				rt.pulse.SetInterval(dur)
+			}
+			rt.pulse.Start(d.baseCtx)
+		case "stop":
+			rt.pulse.Stop()
+		case "pause":
+			if err := rt.pulse.Pause(cmd.Reason); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		case "resume":
+			if err := rt.pulse.Resume(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		case "tick":
+			// Synchronous one-off tick — useful for `teem pulse tick`
+			// and for testing. Runs on a background context so the
+			// HTTP request returning doesn't cancel the tick.
+			go func() { _ = rt.pulse.Tick(d.baseCtx, "manual") }()
+		default:
+			http.Error(w, "unknown action: "+cmd.Action, http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, currentPulseStatus(rt))
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func currentPulseStatus(rt *registeredTeam) pulseStatus {
+	return pulseStatus{
+		Running:   rt.pulse.Running(),
+		Paused:    rt.pulse.Paused(),
+		Interval:  rt.pulse.Interval().String(),
+		LastTick:  rt.pulse.LastTick(),
+		TickCount: rt.pulse.TickCount(),
+	}
 }
 
 func (d *daemon) handleListTeams(w http.ResponseWriter, _ *http.Request) {
@@ -556,6 +659,20 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		return nil, fmt.Errorf("audit: %w", err)
 	}
 
+	planPath := defaultPlanPath(t.Name)
+	planStore, err := plan.Open(planPath)
+	if err != nil {
+		_ = auditSink.Close()
+		return nil, fmt.Errorf("plan: %w", err)
+	}
+
+	notesInbox, err := notes.Open(defaultNotesPath(t.Name))
+	if err != nil {
+		_ = auditSink.Close()
+		_ = planStore.Close()
+		return nil, fmt.Errorf("notes: %w", err)
+	}
+
 	bs := bus.NewMemBus()
 	reg := mcpsrv.NewRegistry()
 	spawner := agent.NewSpawner(d.baseCtx, t, bs, reg, agent.Config{
@@ -575,35 +692,73 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		Registry: reg,
 		Spawner:  spawner,
 		Audit:    auditSink,
+		Plan:     planStore,
+		Notes:    notesInbox,
 	})
 	if err != nil {
 		_ = auditSink.Close()
+		_ = planStore.Close()
+		_ = notesInbox.Close()
 		return nil, err
 	}
+
+	// Pulse: autonomous-leader heartbeat. Built per team, NOT started
+	// (phase 4's `teem pulse start` activates it). Needs the team's
+	// MCP URL via a small JSON file pulse hands to claude.
+	pulseMCPPath := filepath.Join(defaultStateDir(t.Name), "pulse-mcp.json")
+	if err := pulse.WriteMCPConfig(pulseMCPPath, leaderURL+"/mcp"); err != nil {
+		_ = auditSink.Close()
+		_ = planStore.Close()
+		_ = notesInbox.Close()
+		return nil, fmt.Errorf("pulse mcp config: %w", err)
+	}
+	pulseInst := pulse.New(pulse.Config{
+		TeamName: t.Name,
+		LoadSession: func() (string, bool, error) {
+			s, ok, err := loadLeaderSession(t.Name)
+			if err != nil || !ok {
+				return "", false, err
+			}
+			return s.SessionID, true, nil
+		},
+		PauseFile: filepath.Join(defaultStateDir(t.Name), "pulse.paused"),
+		MCPConfig: pulseMCPPath,
+		RepoRoot:  repoRoot,
+		Plan:      planStore,
+		Audit:     auditSink,
+		Registry:  reg,
+	})
 
 	return &registeredTeam{
 		team:      t,
 		mcp:       srv,
 		spawner:   spawner,
 		auditSink: auditSink,
-		// Wrap the audit handler so every POST also updates the
-		// registry's LastSeen for the reporting agent.
-		auditH:     newAuditHandlerWithLastSeen(audit.Handler(auditSink, d.token), reg),
+		// Audit handler fans every POST out to: write to disk, bump
+		// the agent's LastSeen, AND nudge Pulse so an event-triggered
+		// tick can fire after the debounce window.
+		auditH:     newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, pulseInst.NudgeFromAudit),
+		plan:       planStore,
+		notes:      notesInbox,
+		pulse:      pulseInst,
 		registry:   reg,
 		leaderURL:  leaderURL,
 		registered: time.Now(),
 	}, nil
 }
 
-// newAuditHandlerWithLastSeen wraps an audit handler so each accepted
-// POST body has its events scanned for agent_id, and the registry's
-// LastSeen is bumped for any agent that reports in. The underlying
-// audit Handler is the actual responder.
-func newAuditHandlerWithLastSeen(inner http.Handler, reg *mcpsrv.Registry) http.Handler {
+// auditHook is a side-channel callback invoked on every accepted
+// audit POST. Used by Pulse to schedule debounced event-triggered
+// ticks. nil is fine — the handler just skips the call.
+type auditHook func(events []audit.Event)
+
+// newAuditHandlerWithHooks wraps an audit handler so each accepted
+// POST body is parsed once and its events get fanned out to the
+// registry (LastSeen update) and any extra hook. The inner audit
+// Handler is the actual responder.
+func newAuditHandlerWithHooks(inner http.Handler, reg *mcpsrv.Registry, hook auditHook) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
-			// Tee the body: read, decode for our side-effect, then
-			// replace r.Body so the inner handler can read it again.
 			body, err := io.ReadAll(r.Body)
 			r.Body.Close()
 			if err == nil {
@@ -616,6 +771,9 @@ func newAuditHandlerWithLastSeen(inner http.Handler, reg *mcpsrv.Registry) http.
 							ts = now
 						}
 						reg.SetLastSeen(e.AgentID, ts)
+					}
+					if hook != nil {
+						hook(events)
 					}
 				}
 				r.Body = newBytesReadCloser(body)

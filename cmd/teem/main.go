@@ -21,6 +21,7 @@ import (
 
 	"github.com/frasergraham/teem/internal/agent"
 	"github.com/frasergraham/teem/internal/llm"
+	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/provisioner"
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/team"
@@ -49,6 +50,8 @@ func main() {
 		err = runStatus(args)
 	case "teams":
 		err = runTeams(args)
+	case "pulse":
+		err = runPulse(args)
 	case "install-plugin":
 		err = runInstallPlugin(args)
 	case "llm":
@@ -79,6 +82,7 @@ Usage:
   teem teams                                           list teams the running daemon serves
   teem chat    [--team teem.yaml]                      register the current team with the daemon, launch Claude
   teem audit   [--agent ID] [--since RFC3339] [--limit 50] [--follow]
+  teem pulse   <start|stop|pause|resume|tick|status> [--team t] [--interval 5m]
   teem install-plugin [--force]                        install/refresh the ~/.claude/plugins/teem plugin
   teem llm ping --prompt "say hi"
   teem version
@@ -147,22 +151,61 @@ func runChat(args []string) error {
 		return fmt.Errorf("write claude mcp config: %w", err)
 	}
 
-	// 5. Team brief + first-run plugin install.
+	// 5. Team brief + first-run plugin install + show any notes the
+	//    leader left while we were away.
 	brief := t.LeaderSystemPrompt()
 	quietEnsurePlugin()
+	showUnreadNotes(t.Name)
 
-	// 6. Hand off to Claude Code.
+	// 6. Resolve or create the leader's persistent Claude Code session.
+	//    First chat for a team creates the session id (--session-id);
+	//    every subsequent chat resumes the same conversation
+	//    (--resume <uuid>). Pulse will use the same id in phase 3.
+	sessFlags, err := claudeSessionFlags(t.Name)
+	if err != nil {
+		return fmt.Errorf("leader session: %w", err)
+	}
+
+	// 7. Hand off to Claude Code.
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		return fmt.Errorf("claude CLI not found on PATH: %w (install Claude Code: https://docs.claude.com/en/docs/claude-code)", err)
 	}
-	argv := []string{
-		"claude",
+	argv := append([]string{"claude"}, sessFlags...)
+	argv = append(argv,
 		"--mcp-config", mcpCfgPath,
 		"--append-system-prompt", brief,
-	}
+	)
 	fmt.Fprintf(os.Stderr, "[teem] team %q → %s — launching claude\n", t.Name, regResp.MCPURL)
 	return syscall.Exec(claudePath, argv, os.Environ())
+}
+
+// claudeSessionFlags returns the claude CLI args needed to resume the
+// team's persistent session, creating it on first invocation. Returns
+// either [--resume <uuid>] or [--session-id <uuid>] depending on
+// whether a session record already exists. The state file is written
+// before the flag is returned so a successful first chat persists the
+// id even if the user Ctrl-Cs out before claude finishes.
+func claudeSessionFlags(teamName string) ([]string, error) {
+	sess, ok, err := loadLeaderSession(teamName)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return []string{"--resume", sess.SessionID}, nil
+	}
+	uuid, err := newSessionUUID()
+	if err != nil {
+		return nil, fmt.Errorf("generate session uuid: %w", err)
+	}
+	if err := saveLeaderSession(teamName, leaderSession{
+		SessionID: uuid,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "[teem] new leader session %s for team %q\n", uuid, teamName)
+	return []string{"--session-id", uuid}, nil
 }
 
 // ensureDaemon starts the daemon detached if missing and waits for
@@ -305,6 +348,41 @@ func defaultStateDir(teamName string) string {
 		return filepath.Join(".teem", "state")
 	}
 	return filepath.Join(home, ".teem", "state", slug(teamName))
+}
+
+// showUnreadNotes prints any leader-written notes accumulated since
+// the user's last chat, then advances the read cursor so the same
+// notes don't reappear. Failure is best-effort — we never abort the
+// chat over a notes problem.
+func showUnreadNotes(teamName string) {
+	inbox, err := notes.Open(defaultNotesPath(teamName))
+	if err != nil {
+		return
+	}
+	defer inbox.Close()
+	unread, err := inbox.Unread()
+	if err != nil || len(unread) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n[teem] %d note(s) from the leader since you were last here:\n", len(unread))
+	for _, n := range unread {
+		fmt.Fprintf(os.Stderr, "  • %s — %s\n", n.Timestamp.Local().Format("Jan 2 15:04"), n.Text)
+	}
+	fmt.Fprintln(os.Stderr, "")
+	_ = inbox.MarkAllRead()
+}
+
+// defaultPlanPath returns the JSONL plan log path for a team. Lives
+// under the team's state dir alongside the persistent-agent records.
+func defaultPlanPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "plan.jsonl")
+}
+
+// defaultNotesPath returns the JSONL notes inbox path for a team.
+// The user-facing "messages from the leader since you were away"
+// channel.
+func defaultNotesPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "notes.jsonl")
 }
 
 // defaultAuditPath returns the on-disk audit log path for a team.

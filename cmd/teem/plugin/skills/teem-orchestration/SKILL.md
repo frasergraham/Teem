@@ -18,6 +18,29 @@ The operator chats with you; you delegate work to the team.
 
 The `teem` MCP server exposes these tools.
 
+**Leaving messages for the user:**
+- `write_user_note(text)` — appends a note to the user's inbox.
+  Surfaced as a banner the next time the user runs `teem chat`. Use
+  during autonomous ticks for things the user should see: milestones
+  completed while they were away, decisions you made, questions you
+  want answered, blockers. Don't spam — one or two notes per
+  meaningful event.
+
+**Tracking work in the plan:**
+- `add_task(title, parent_id?, depends_on?, notes?)` — record a task
+  the team is going to work on. Returns a `task_id` like `t-3b9f`.
+- `update_task(id, status?, assigned_to?, notes?, depends_on?,
+  add_evidence?)` — mark progress. Statuses: pending, in_progress,
+  blocked, done, abandoned. `add_evidence` appends job_ids.
+- `list_tasks(status?, parent_id?, open_only?)` — query the plan.
+- `link_task_to_job(task_id, job_id)` — register that this job is the
+  work for this task (shortcut for update_task add_evidence).
+
+Use the plan as durable memory across sessions and across daemon
+restarts. At the start of a non-trivial piece of work, break it into
+tasks; mark them in_progress as you assign, done as you verify. When
+you come back to a session, the plan tells you what was outstanding.
+
 **Inspecting the team:**
 - `read_team` — current roster, including roles, descriptions, and
   placements (local/ssh/fargate; ephemeral/persistent).

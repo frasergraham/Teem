@@ -13,6 +13,8 @@ import (
 
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
+	"github.com/frasergraham/teem/internal/notes"
+	"github.com/frasergraham/teem/internal/plan"
 	"github.com/frasergraham/teem/internal/team"
 )
 
@@ -39,6 +41,8 @@ type Server struct {
 	registry *Registry
 	spawner  Spawner
 	audit    audit.Sink
+	plan     *plan.Plan
+	notes    *notes.Inbox
 }
 
 // Config holds the deps the orchestrator server needs.
@@ -50,6 +54,12 @@ type Config struct {
 	// Audit is the audit-log Sink the query_audit tool reads from. Optional
 	// — if nil the tool returns an error explaining audit isn't configured.
 	Audit audit.Sink
+	// Plan is the task store the add_task/update_task/list_tasks tools
+	// operate on. Optional — if nil those tools return a clear error.
+	Plan *plan.Plan
+	// Notes is the user-notes inbox the write_user_note tool appends
+	// to. Optional — if nil the tool returns a clear error.
+	Notes *notes.Inbox
 }
 
 // New builds an orchestrator MCP server. Call Serve to start serving on a
@@ -70,6 +80,8 @@ func New(cfg Config) (*Server, error) {
 		registry: cfg.Registry,
 		spawner:  cfg.Spawner,
 		audit:    cfg.Audit,
+		plan:     cfg.Plan,
+		notes:    cfg.Notes,
 	}
 	s.registerTools()
 	s.handler = mcpsrv.NewStreamableHTTPServer(core)
@@ -198,5 +210,51 @@ func (s *Server) registerTools() {
 			mcpgo.WithString("max_concurrent", mcpgo.Description("New cap (optional). Positive integer.")),
 		),
 		s.handleUpdateArchetype,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("add_task",
+			mcpgo.WithDescription("Add a task to the team's plan — the canonical work queue. Use this at the start of complex work to break it into pieces, then update_task as instances make progress. Tasks persist across daemon restarts, so the leader can pick up where it left off in a new session."),
+			mcpgo.WithString("title", mcpgo.Required(), mcpgo.Description("Short title for the task.")),
+			mcpgo.WithString("parent_id", mcpgo.Description("Optional parent task id for hierarchies.")),
+			mcpgo.WithString("depends_on", mcpgo.Description("Optional comma-separated task ids this task is blocked on.")),
+			mcpgo.WithString("notes", mcpgo.Description("Optional markdown notes the leader keeps as working memory.")),
+		),
+		s.handleAddTask,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("update_task",
+			mcpgo.WithDescription("Mutate a task. Any subset of fields can be supplied; omitted fields are left as-is. Add evidence (job_ids that worked on this task) via add_evidence."),
+			mcpgo.WithString("id", mcpgo.Required(), mcpgo.Description("Task id.")),
+			mcpgo.WithString("status", mcpgo.Description("New status: pending, in_progress, blocked, done, abandoned.")),
+			mcpgo.WithString("assigned_to", mcpgo.Description("Agent id currently working on this task.")),
+			mcpgo.WithString("notes", mcpgo.Description("Replace the notes field.")),
+			mcpgo.WithString("depends_on", mcpgo.Description("Comma-separated task ids; replaces existing list.")),
+			mcpgo.WithString("add_evidence", mcpgo.Description("Comma-separated job_ids to append to evidence.")),
+		),
+		s.handleUpdateTask,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("list_tasks",
+			mcpgo.WithDescription("List tasks in the plan, optionally filtered. Returns the materialised view (title, status, assigned_to, depends_on, evidence, timestamps)."),
+			mcpgo.WithString("status", mcpgo.Description("Restrict to one status.")),
+			mcpgo.WithString("parent_id", mcpgo.Description("Only direct children of this task.")),
+			mcpgo.WithString("open_only", mcpgo.Description("If 'true', skip done/abandoned tasks.")),
+		),
+		s.handleListTasks,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("link_task_to_job",
+			mcpgo.WithDescription("Record that a particular job worked on a task. Shortcut for update_task with add_evidence."),
+			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id.")),
+			mcpgo.WithString("job_id", mcpgo.Required(), mcpgo.Description("Job id from assign_job.")),
+		),
+		s.handleLinkTaskToJob,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("write_user_note",
+			mcpgo.WithDescription("Leave a short message for the user to read when they next open `teem chat`. Use during autonomous ticks for anything that needs the human's attention — completed milestones, decisions made, questions you want answered, blockers. The user sees a banner with unread notes before the chat opens."),
+			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Note body. One or more lines of markdown.")),
+		),
+		s.handleWriteUserNote,
 	)
 }
