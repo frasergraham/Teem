@@ -385,6 +385,20 @@ func defaultNotesPath(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "notes.jsonl")
 }
 
+// defaultArchetypeSeqPath returns the JSON file persisting the
+// spawner's per-role instance-id counter for a team. Survives daemon
+// restarts so freshly-spawned ids don't collide with historical ones.
+func defaultArchetypeSeqPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "archetype-seq.json")
+}
+
+// defaultPulseRunningFlag returns the file path used to persist
+// Pulse's "running" state. Presence at daemon startup means
+// auto-resume.
+func defaultPulseRunningFlag(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "pulse.running")
+}
+
 // defaultAuditPath returns the on-disk audit log path for a team.
 // Lives alongside the other ~/.teem state so it's predictable across
 // sessions. Team name is slugged so YAML can't escape the path.

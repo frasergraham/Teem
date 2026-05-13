@@ -312,6 +312,60 @@ func TestPulse_NudgeIgnoredIfNotRunning(t *testing.T) {
 	}
 }
 
+func TestPulse_RunningFlagFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:    "x",
+		LoadSession: func() (string, bool, error) { return "", false, nil }, // session-less; ticks no-op
+		PauseFile:   filepath.Join(dir, "paused"),
+		RunningFile: filepath.Join(dir, "running"),
+		MCPConfig:   filepath.Join(dir, "mcp.json"),
+		RepoRoot:    dir,
+		Audit:       tempSink(t),
+		Interval:    1 * time.Hour, // long; we just want the flag side-effects
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp")
+
+	p := New(cfg)
+	if p.WasRunning() {
+		t.Fatal("WasRunning true before any Start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+	if !p.WasRunning() {
+		t.Error("WasRunning should be true while Pulse is running")
+	}
+	p.Stop()
+	if p.WasRunning() {
+		t.Error("WasRunning should be false after explicit Stop")
+	}
+
+	// Simulate "daemon restart": new Pulse instance against the same
+	// state dir. Flag was cleared by Stop, so WasRunning is false.
+	p2 := New(cfg)
+	if p2.WasRunning() {
+		t.Error("post-Stop, a fresh Pulse should not see WasRunning=true")
+	}
+
+	// Now Start + crash (no Stop). Flag stays. A fresh Pulse sees
+	// WasRunning=true and the daemon would auto-resume.
+	p2.Start(ctx)
+	// Don't call Stop — simulate daemon crashing.
+	// Reach in and clear running atomic so a fresh Pulse can stand up
+	// without the cooperative shutdown machinery.
+	p2.running.Store(false)
+	if p2.cancel != nil {
+		p2.cancel()
+	}
+
+	p3 := New(cfg)
+	if !p3.WasRunning() {
+		t.Error("after a Start without Stop (simulated crash), a fresh Pulse should see WasRunning=true")
+	}
+}
+
 func TestPulse_IsInterestingKind(t *testing.T) {
 	for _, k := range []audit.Kind{audit.KindJobComplete, audit.KindJobError, audit.KindNote} {
 		if !isInterestingKind(k) {

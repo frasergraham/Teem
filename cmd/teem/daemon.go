@@ -684,6 +684,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		LeaderURL:        leaderURL,
 		StateStore:       stateStore,
 		AuditSink:        auditSink,
+		ArchetypeSeqPath: defaultArchetypeSeqPath(t.Name),
 	})
 
 	srv, err := mcpsrv.New(mcpsrv.Config{
@@ -721,13 +722,22 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 			}
 			return s.SessionID, true, nil
 		},
-		PauseFile: filepath.Join(defaultStateDir(t.Name), "pulse.paused"),
-		MCPConfig: pulseMCPPath,
-		RepoRoot:  repoRoot,
-		Plan:      planStore,
-		Audit:     auditSink,
-		Registry:  reg,
+		PauseFile:   filepath.Join(defaultStateDir(t.Name), "pulse.paused"),
+		RunningFile: defaultPulseRunningFlag(t.Name),
+		MCPConfig:   pulseMCPPath,
+		RepoRoot:    repoRoot,
+		Plan:        planStore,
+		Audit:       auditSink,
+		Registry:    reg,
 	})
+	// Auto-resume Pulse if it was running before the daemon
+	// restarted. Operator opt-out is `teem pulse stop` (which clears
+	// the flag) or `teem pulse pause` (which leaves it alone but
+	// skips ticks).
+	if pulseInst.WasRunning() {
+		pulseInst.Start(d.baseCtx)
+		fmt.Fprintf(os.Stderr, "[teemd] auto-resumed Pulse for %q\n", t.Name)
+	}
 
 	return &registeredTeam{
 		team:      t,

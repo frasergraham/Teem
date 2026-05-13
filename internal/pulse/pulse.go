@@ -41,6 +41,7 @@ type Config struct {
 	TeamName    string
 	LoadSession SessionLoader // returns the session id or (false) if no chat has run yet
 	PauseFile   string        // path; presence skips ticks
+	RunningFile string        // path; presence signals daemon to auto-resume on restart
 	MCPConfig   string        // path to ~/.teem/state/<team>/pulse-mcp.json
 	RepoRoot    string        // CWD for the claude subprocess
 	Plan        *plan.Plan
@@ -115,19 +116,22 @@ func New(cfg Config) *Pulse {
 // Start kicks off the periodic loop AND the audit-event debouncer.
 // Idempotent — calling Start on an already-running Pulse is a no-op.
 // The loops exit when Stop is called or the parent context is
-// cancelled.
+// cancelled. Writes a "running" flag file so a daemon restart can
+// auto-resume Pulse without operator intervention.
 func (p *Pulse) Start(parent context.Context) {
 	if !p.running.CompareAndSwap(false, true) {
 		return
 	}
 	ctx, cancel := context.WithCancel(parent)
 	p.cancel = cancel
+	_ = p.writeRunningFlag()
 	go p.run(ctx)
 	go p.runDebouncer(ctx)
 }
 
 // Stop ends the loop. Safe to call multiple times; safe to call before
-// Start.
+// Start. Removes the running-flag file so daemon restarts don't
+// auto-resume an explicitly-stopped Pulse.
 func (p *Pulse) Stop() {
 	if !p.running.CompareAndSwap(true, false) {
 		return
@@ -135,6 +139,39 @@ func (p *Pulse) Stop() {
 	if p.cancel != nil {
 		p.cancel()
 	}
+	_ = p.clearRunningFlag()
+}
+
+// WasRunning checks the persisted running-flag file. Used by the
+// daemon at startup to decide whether to auto-Start a freshly-built
+// Pulse instance. Does not affect the in-memory running atomic.
+func (p *Pulse) WasRunning() bool {
+	if p.cfg.RunningFile == "" {
+		return false
+	}
+	_, err := os.Stat(p.cfg.RunningFile)
+	return err == nil
+}
+
+func (p *Pulse) writeRunningFlag() error {
+	if p.cfg.RunningFile == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(p.cfg.RunningFile), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p.cfg.RunningFile, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+}
+
+func (p *Pulse) clearRunningFlag() error {
+	if p.cfg.RunningFile == "" {
+		return nil
+	}
+	err := os.Remove(p.cfg.RunningFile)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // Running reports whether the loop is active.

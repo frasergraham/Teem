@@ -44,6 +44,10 @@ func (p *ProcessExecutor) Execute(ctx context.Context, job Job) (string, error) 
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
+		// --verbose is required by Claude Code when stream-json
+		// output is requested with -p; without it claude errors
+		// out before producing any events.
+		"--verbose",
 		"--dangerously-skip-permissions",
 	}
 	if mcpPath != "" {
