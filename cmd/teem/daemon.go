@@ -22,6 +22,7 @@ import (
 	"github.com/frasergraham/teem/internal/agent"
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
+	"github.com/frasergraham/teem/internal/inflight"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
@@ -277,6 +278,7 @@ type registeredTeam struct {
 	plan       *plan.Plan
 	notes      *notes.Inbox
 	pulse      *pulse.Pulse
+	inFlight   *inflight.Log
 	registry   *mcpsrv.Registry
 	leaderURL  string
 	registered time.Time
@@ -357,16 +359,44 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		}
 	}()
 	defer func() {
+		// 1. Stop accepting new HTTP requests.
 		ctx2, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(ctx2)
-		// Tear down each team's spawner so ephemeral workers exit.
+
+		// 2. Graceful drain — wait up to TEEM_DRAIN_TIMEOUT for
+		//    in-flight worker jobs to finish. After this expires,
+		//    anything still running gets killed by Spawner.Stop's
+		//    context cancellation. The startup reconcile of the next
+		//    daemon will emit job_interrupted for it.
+		if drain := drainTimeout(); drain > 0 {
+			fmt.Fprintf(os.Stderr, "[teemd] draining in-flight jobs (up to %s)...\n", drain)
+			drainCtx, dcancel := context.WithTimeout(context.Background(), drain)
+			d.mu.Lock()
+			teams := make([]*registeredTeam, 0, len(d.teams))
+			for _, rt := range d.teams {
+				teams = append(teams, rt)
+			}
+			d.mu.Unlock()
+			for _, rt := range teams {
+				if err := rt.spawner.Drain(drainCtx); err != nil {
+					fmt.Fprintf(os.Stderr, "[teemd] %s: drain timed out with %d job(s) still in flight\n", rt.team.Name, rt.spawner.TotalInFlight())
+				}
+			}
+			dcancel()
+		}
+
+		// 3. Final teardown.
 		d.mu.Lock()
 		for _, rt := range d.teams {
 			rt.pulse.Stop()
 			rt.spawner.Stop()
 			_ = rt.auditSink.Close()
 			_ = rt.plan.Close()
+			_ = rt.notes.Close()
+			if rt.inFlight != nil {
+				_ = rt.inFlight.Close()
+			}
 		}
 		d.mu.Unlock()
 	}()
@@ -476,6 +506,9 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		_ = rt.auditSink.Close()
 		_ = rt.plan.Close()
 		_ = rt.notes.Close()
+		if rt.inFlight != nil {
+			_ = rt.inFlight.Close()
+		}
 		d.persistStateSnapshot()
 		w.WriteHeader(http.StatusNoContent)
 	case "pulse":
@@ -673,6 +706,38 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		return nil, fmt.Errorf("notes: %w", err)
 	}
 
+	// In-flight log for durability. Opened before reconcile so the
+	// next steps can both (a) emit job_interrupted for orphans and
+	// (b) hand it to the spawner for future jobs.
+	inFlightLog, err := inflight.Open(defaultInFlightPath(t.Name))
+	if err != nil {
+		_ = auditSink.Close()
+		_ = planStore.Close()
+		_ = notesInbox.Close()
+		return nil, fmt.Errorf("inflight: %w", err)
+	}
+	// Reconcile: any "start" without a matching "end" in the log was
+	// interrupted by the previous shutdown. Emit a final audit event
+	// so the leader can see what's incomplete, then truncate so we
+	// don't re-report on the next restart.
+	if orphans, err := inFlightLog.Outstanding(); err == nil && len(orphans) > 0 {
+		for _, o := range orphans {
+			_ = auditSink.Write(audit.Event{
+				Timestamp: time.Now().UTC(),
+				AgentID:   o.AgentID,
+				JobID:     o.JobID,
+				Kind:      audit.KindJobInterrupted,
+				Message:   "daemon shutdown interrupted this job",
+				Meta: map[string]any{
+					"prompt_preview": o.PromptPreview,
+					"started_at":     o.StartedAt.Format(time.RFC3339),
+				},
+			})
+		}
+		fmt.Fprintf(os.Stderr, "[teemd] %s: marked %d job(s) interrupted by prior shutdown\n", t.Name, len(orphans))
+		_ = inFlightLog.Reset()
+	}
+
 	bs := bus.NewMemBus()
 	reg := mcpsrv.NewRegistry()
 	spawner := agent.NewSpawner(d.baseCtx, t, bs, reg, agent.Config{
@@ -685,6 +750,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		StateStore:       stateStore,
 		AuditSink:        auditSink,
 		ArchetypeSeqPath: defaultArchetypeSeqPath(t.Name),
+		InFlight:         inFlightLog,
 	})
 
 	srv, err := mcpsrv.New(mcpsrv.Config{
@@ -751,6 +817,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		plan:       planStore,
 		notes:      notesInbox,
 		pulse:      pulseInst,
+		inFlight:   inFlightLog,
 		registry:   reg,
 		leaderURL:  leaderURL,
 		registered: time.Now(),

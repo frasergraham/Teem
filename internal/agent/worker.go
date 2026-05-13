@@ -12,6 +12,7 @@ import (
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
 	"github.com/frasergraham/teem/internal/executor"
+	"github.com/frasergraham/teem/internal/inflight"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/provisioner"
 )
@@ -48,6 +49,7 @@ type Worker struct {
 	// Optional observability hookups. nil = no-op.
 	Audit             audit.Sink
 	Registry          *mcpsrv.Registry
+	InFlight          *inflight.Log // durability: records start/end so daemon restarts can mark interrupted
 	HeartbeatInterval time.Duration // 0 disables; spawner picks 60s default
 	BodyCap           int           // truncation cap for prompt/output meta (default 64 KiB)
 
@@ -105,6 +107,13 @@ func (w *Worker) runJob(ctx context.Context, job jobMessage) {
 	w.inFlight.Add(1)
 	defer w.inFlight.Add(-1)
 
+	// Durability: record this job as in-flight before doing any
+	// work. If the daemon dies between start and end, restart
+	// reconcile picks up the orphan.
+	if w.InFlight != nil {
+		_ = w.InFlight.RecordStart(job.JobID, w.Agent.ID, truncate(job.Prompt, 200))
+	}
+
 	w.emit(audit.Event{
 		AgentID: w.Agent.ID,
 		JobID:   job.JobID,
@@ -145,6 +154,9 @@ func (w *Worker) runJob(ctx context.Context, job jobMessage) {
 				"output_bytes": len(output),
 			},
 		})
+		if w.InFlight != nil {
+			_ = w.InFlight.RecordEnd(job.JobID)
+		}
 		return
 	}
 	w.emit(audit.Event{
@@ -156,6 +168,9 @@ func (w *Worker) runJob(ctx context.Context, job jobMessage) {
 			"output_bytes": len(output),
 		},
 	})
+	if w.InFlight != nil {
+		_ = w.InFlight.RecordEnd(job.JobID)
+	}
 }
 
 // runHeartbeat emits a heartbeat audit event on a fixed interval while

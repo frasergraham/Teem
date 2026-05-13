@@ -14,6 +14,7 @@ import (
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
 	"github.com/frasergraham/teem/internal/executor"
+	"github.com/frasergraham/teem/internal/inflight"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/provisioner"
 	"github.com/frasergraham/teem/internal/state"
@@ -82,6 +83,11 @@ type Config struct {
 	// (`worker-3` after restart stays distinct from a historical
 	// `worker-3`). Empty disables persistence.
 	ArchetypeSeqPath string
+	// InFlight is the per-team in-flight job log. When set, the
+	// spawner hands it to every Worker so start/end records get
+	// written for each job. Used by the daemon's restart-reconcile
+	// path to emit job_interrupted audit events for orphans.
+	InFlight *inflight.Log
 }
 
 // GitConfig is the source-control configuration the leader hands to
@@ -533,6 +539,7 @@ func (s *Spawner) startWorker(p provisioner.Provisioner, a *provisioner.Agent) e
 		w.Registry = s.registry
 		w.HeartbeatInterval = s.heartbeatInterval()
 		w.BodyCap = s.cfg.JobBodyCap
+		w.InFlight = s.cfg.InFlight
 	}
 	if err := w.Start(s.baseCtx); err != nil {
 		return err
@@ -833,6 +840,41 @@ func (s *Spawner) IsRunning(agentID string) bool {
 	defer s.mu.Unlock()
 	_, ok := s.workers[agentID]
 	return ok
+}
+
+// TotalInFlight returns the sum of in-flight job counts across every
+// active worker. Used by the daemon's graceful-shutdown drain to
+// decide whether the team is idle yet.
+func (s *Spawner) TotalInFlight() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for _, w := range s.workers {
+		n += w.inFlight.Load()
+	}
+	return n
+}
+
+// Drain blocks until either TotalInFlight reaches zero or ctx
+// expires. Polled rather than condition-variable based because the
+// in-flight signals come from many workers and the check is cheap.
+// Returns nil on clean drain, ctx.Err() on timeout.
+func (s *Spawner) Drain(ctx context.Context) error {
+	if s.TotalInFlight() == 0 {
+		return nil
+	}
+	t := time.NewTicker(200 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+		}
+		if s.TotalInFlight() == 0 {
+			return nil
+		}
+	}
 }
 
 // AnyRunningWithRole reports whether at least one instance of an

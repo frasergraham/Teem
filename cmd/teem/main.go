@@ -399,6 +399,31 @@ func defaultPulseRunningFlag(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "pulse.running")
 }
 
+// defaultInFlightPath returns the JSONL log path the spawner uses to
+// record start/end pairs for every job a worker is handed. Consulted
+// on next daemon startup to emit job_interrupted for orphans.
+func defaultInFlightPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "in-flight.jsonl")
+}
+
+// drainTimeout returns the configured drain window for graceful
+// daemon shutdown. Defaults to 30s. 0 disables drain. Read every time
+// so it can be tuned without restarting.
+func drainTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv("TEEM_DRAIN_TIMEOUT"))
+	if v == "" {
+		return 30 * time.Second
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 30 * time.Second
+	}
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
 // defaultAuditPath returns the on-disk audit log path for a team.
 // Lives alongside the other ~/.teem state so it's predictable across
 // sessions. Team name is slugged so YAML can't escape the path.

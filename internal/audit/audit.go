@@ -44,6 +44,12 @@ const (
 	// registry can compute a LastSeen per agent. Meta carries in_flight
 	// and uptime_s.
 	KindHeartbeat Kind = "heartbeat"
+	// KindJobInterrupted is emitted by the daemon at startup for jobs
+	// that were in flight when the previous run shut down (graceful
+	// drain expired or crash). Distinguishes "job failed inside
+	// claude" from "the daemon killed it mid-execution." Meta carries
+	// prompt_preview + started_at.
+	KindJobInterrupted Kind = "job_interrupted"
 )
 
 // Event is one entry on the audit channel. Meta is a free-form bag for
