@@ -24,6 +24,7 @@ type Spawner interface {
 	JobStatus(jobID string) (status string, output string, found bool)
 	StopAgent(ctx context.Context, agentID string) error
 	IsRunning(agentID string) bool
+	AnyRunningWithRole(role string) bool
 }
 
 // Server bundles the MCP server, its handler, and the dependencies its
@@ -155,37 +156,47 @@ func (s *Server) registerTools() {
 		s.handleQueryAudit,
 	)
 	s.core.AddTool(
-		mcpgo.NewTool("add_agent",
-			mcpgo.WithDescription("Add a new agent to the team roster at runtime. Use when the user wants to bring on a new specialty (a new worker, reviewer, etc.) without restarting Teem. Changes are in-memory only — they revert when the daemon restarts."),
-			mcpgo.WithString("id", mcpgo.Required(), mcpgo.Description("Unique agent id (e.g. wk-2).")),
-			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Agent's role (worker, reviewer, integrator, custom).")),
+		mcpgo.NewTool("add_archetype",
+			mcpgo.WithDescription("Add a new role template (archetype) to the team. Use when the user wants a new specialty available — instances are spawned later via spawn_agent up to max_concurrent. Changes are in-memory only; they revert when the daemon restarts."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Role name (worker, reviewer, integrator, custom).")),
+			mcpgo.WithString("placement", mcpgo.Required(), mcpgo.Description("Where instances run: 'local', 'ssh:user@host', or 'fargate'.")),
+			mcpgo.WithString("max_concurrent", mcpgo.Required(), mcpgo.Description("Cap on simultaneously-running instances. Positive integer.")),
 			mcpgo.WithString("description", mcpgo.Description("One-line description shown to the leader.")),
-			mcpgo.WithString("placement", mcpgo.Required(), mcpgo.Description("Where the agent runs: 'local', 'ssh:user@host', or 'fargate'.")),
-			mcpgo.WithString("working_dir", mcpgo.Description("Optional working directory override.")),
+			mcpgo.WithString("working_dir", mcpgo.Description("Required for ssh placement; optional otherwise.")),
 			mcpgo.WithString("lifecycle", mcpgo.Description("'ephemeral' (default) or 'persistent'.")),
 		),
-		s.handleAddAgent,
+		s.handleAddArchetype,
 	)
 	s.core.AddTool(
-		mcpgo.NewTool("remove_agent",
-			mcpgo.WithDescription("Remove an agent from the team roster. Refuses if the agent is currently running — stop it first with stop_agent."),
-			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the agent to remove.")),
+		mcpgo.NewTool("remove_archetype",
+			mcpgo.WithDescription("Drop a role template from the roster. Refuses if any instance of that role is currently running — call stop_agent first."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Role to remove.")),
 		),
-		s.handleRemoveAgent,
+		s.handleRemoveArchetype,
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("stop_agent",
-			mcpgo.WithDescription("Tear down a running worker. Cancels its result subscriber and calls Teardown on the provisioner (unless the agent is persistent). The roster entry stays — to also drop it, follow up with remove_agent."),
-			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the running agent to stop.")),
+			mcpgo.WithDescription("Tear down a running worker instance. Cancels its result subscriber and calls Teardown on the provisioner (unless the archetype is persistent). The archetype stays in the roster."),
+			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the running instance, e.g. worker-3.")),
 		),
 		s.handleStopAgent,
 	)
 	s.core.AddTool(
-		mcpgo.NewTool("update_agent_description",
-			mcpgo.WithDescription("Update the description string for an existing agent. Useful when the user wants to refine a worker's specialty without removing and re-adding."),
-			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the agent.")),
-			mcpgo.WithString("description", mcpgo.Required(), mcpgo.Description("New description text.")),
+		mcpgo.NewTool("recall_jobs",
+			mcpgo.WithDescription("Reconstruct past job assignments from the audit log. Use this when you want to remember what an agent was asked to do, especially across daemon restarts or fresh chat sessions. Returns materialized job records joining job_received with job_complete/error: {job_id, agent_id, status, prompt, output, error, started_at, completed_at}. Bodies are capped at TEEM_JOB_BODY_CAP_BYTES on the worker side."),
+			mcpgo.WithString("agent_id", mcpgo.Description("Optional. Restrict to one agent.")),
+			mcpgo.WithString("since", mcpgo.Description("Optional. RFC3339 timestamp; only jobs whose audit events are at or after.")),
+			mcpgo.WithString("limit", mcpgo.Description("Optional. Max jobs to return (default 25). Most recent first.")),
 		),
-		s.handleUpdateAgentDescription,
+		s.handleRecallJobs,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("update_archetype",
+			mcpgo.WithDescription("Refine an archetype's description and/or change its max_concurrent. At least one of those fields must be supplied."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Archetype role.")),
+			mcpgo.WithString("description", mcpgo.Description("New description text (optional).")),
+			mcpgo.WithString("max_concurrent", mcpgo.Description("New cap (optional). Positive integer.")),
+		),
+		s.handleUpdateArchetype,
 	)
 }

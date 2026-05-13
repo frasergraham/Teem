@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
-	"strings"
 	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/team"
 )
 
@@ -18,8 +18,8 @@ func (s *Server) handleSpawnAgent(ctx context.Context, req mcpgo.CallToolRequest
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	if s.team.FindAgentByRole(role) == nil {
-		return mcpgo.NewToolResultErrorf("no agent with role %q in team roster", role), nil
+	if s.team.FindArchetypeByRole(role) == nil {
+		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
 	}
 	id, err := s.spawner.SpawnByRole(ctx, role)
 	if err != nil {
@@ -115,11 +115,7 @@ func (s *Server) handleReadTeam(_ context.Context, _ mcpgo.CallToolRequest) (*mc
 	return mcpgo.NewToolResultText(string(body)), nil
 }
 
-func (s *Server) handleAddAgent(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	id, err := req.RequireString("id")
-	if err != nil {
-		return mcpgo.NewToolResultError(err.Error()), nil
-	}
+func (s *Server) handleAddArchetype(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 	role, err := req.RequireString("role")
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
@@ -128,51 +124,47 @@ func (s *Server) handleAddAgent(_ context.Context, req mcpgo.CallToolRequest) (*
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	spec := team.AgentSpec{
-		ID:          id,
-		Role:        role,
-		Description: req.GetString("description", ""),
-		WorkingDir:  req.GetString("working_dir", ""),
-		Lifecycle:   req.GetString("lifecycle", ""),
-	}
-	switch {
-	case placement == "local":
-		spec.Local = true
-	case placement == "fargate":
-		spec.Backend = "fargate"
-	case strings.HasPrefix(placement, "ssh:"):
-		spec.SSHTarget = strings.TrimPrefix(placement, "ssh:")
-		if spec.WorkingDir == "" {
-			return mcpgo.NewToolResultError("ssh placement requires working_dir"), nil
-		}
-	default:
-		return mcpgo.NewToolResultErrorf("unknown placement %q (use 'local', 'fargate', or 'ssh:user@host')", placement), nil
-	}
-	if err := s.team.AddAgent(spec); err != nil {
-		if errors.Is(err, team.ErrAgentExists) {
-			return mcpgo.NewToolResultErrorf("agent %q already in roster", id), nil
-		}
-		return mcpgo.NewToolResultErrorFromErr("add_agent", err), nil
-	}
-	out, _ := json.Marshal(map[string]string{"agent_id": id, "role": role})
-	return mcpgo.NewToolResultText(string(out)), nil
-}
-
-func (s *Server) handleRemoveAgent(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	agentID, err := req.RequireString("agent_id")
+	maxStr, err := req.RequireString("max_concurrent")
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	if s.spawner.IsRunning(agentID) {
-		return mcpgo.NewToolResultErrorf("agent %q is currently running — stop_agent first, then remove_agent", agentID), nil
+	maxN, err := strconv.Atoi(maxStr)
+	if err != nil || maxN <= 0 {
+		return mcpgo.NewToolResultErrorf("max_concurrent must be a positive integer (got %q)", maxStr), nil
 	}
-	if err := s.team.RemoveAgent(agentID); err != nil {
-		if errors.Is(err, team.ErrAgentNotFound) {
-			return mcpgo.NewToolResultErrorf("agent %q not in roster", agentID), nil
+	spec := team.ArchetypeSpec{
+		Role:          role,
+		Description:   req.GetString("description", ""),
+		Placement:     placement,
+		WorkingDir:    req.GetString("working_dir", ""),
+		MaxConcurrent: maxN,
+		Lifecycle:     req.GetString("lifecycle", ""),
+	}
+	if err := s.team.AddArchetype(spec); err != nil {
+		if errors.Is(err, team.ErrArchetypeExists) {
+			return mcpgo.NewToolResultErrorf("archetype %q already in roster", role), nil
 		}
-		return mcpgo.NewToolResultErrorFromErr("remove_agent", err), nil
+		return mcpgo.NewToolResultErrorFromErr("add_archetype", err), nil
 	}
-	out, _ := json.Marshal(map[string]string{"removed": agentID})
+	out, _ := json.Marshal(map[string]any{"role": role, "max_concurrent": maxN})
+	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+func (s *Server) handleRemoveArchetype(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	role, err := req.RequireString("role")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if s.spawner.AnyRunningWithRole(role) {
+		return mcpgo.NewToolResultErrorf("archetype %q has running instances — stop_agent them first", role), nil
+	}
+	if err := s.team.RemoveArchetype(role); err != nil {
+		if errors.Is(err, team.ErrArchetypeNotFound) {
+			return mcpgo.NewToolResultErrorf("archetype %q not in roster", role), nil
+		}
+		return mcpgo.NewToolResultErrorFromErr("remove_archetype", err), nil
+	}
+	out, _ := json.Marshal(map[string]string{"removed": role})
 	return mcpgo.NewToolResultText(string(out)), nil
 }
 
@@ -188,23 +180,78 @@ func (s *Server) handleStopAgent(ctx context.Context, req mcpgo.CallToolRequest)
 	return mcpgo.NewToolResultText(string(out)), nil
 }
 
-func (s *Server) handleUpdateAgentDescription(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	agentID, err := req.RequireString("agent_id")
+func (s *Server) handleUpdateArchetype(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	role, err := req.RequireString("role")
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	description, err := req.RequireString("description")
-	if err != nil {
-		return mcpgo.NewToolResultError(err.Error()), nil
-	}
-	if err := s.team.UpdateAgentDescription(agentID, description); err != nil {
-		if errors.Is(err, team.ErrAgentNotFound) {
-			return mcpgo.NewToolResultErrorf("agent %q not in roster", agentID), nil
+	if desc := req.GetString("description", ""); desc != "" {
+		if err := s.team.UpdateArchetypeDescription(role, desc); err != nil {
+			if errors.Is(err, team.ErrArchetypeNotFound) {
+				return mcpgo.NewToolResultErrorf("archetype %q not in roster", role), nil
+			}
+			return mcpgo.NewToolResultErrorFromErr("update_archetype: description", err), nil
 		}
-		return mcpgo.NewToolResultErrorFromErr("update_agent_description", err), nil
 	}
-	out, _ := json.Marshal(map[string]string{"updated": agentID})
+	if maxStr := req.GetString("max_concurrent", ""); maxStr != "" {
+		n, err := strconv.Atoi(maxStr)
+		if err != nil || n <= 0 {
+			return mcpgo.NewToolResultErrorf("max_concurrent must be a positive integer (got %q)", maxStr), nil
+		}
+		if err := s.team.SetArchetypeMaxConcurrent(role, n); err != nil {
+			if errors.Is(err, team.ErrArchetypeNotFound) {
+				return mcpgo.NewToolResultErrorf("archetype %q not in roster", role), nil
+			}
+			return mcpgo.NewToolResultErrorFromErr("update_archetype: max", err), nil
+		}
+	}
+	out, _ := json.Marshal(map[string]string{"updated": role})
 	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+func (s *Server) handleRecallJobs(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.audit == nil {
+		return mcpgo.NewToolResultError("audit log is not configured"), nil
+	}
+	agentID := req.GetString("agent_id", "")
+	var since time.Time
+	if v := req.GetString("since", ""); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return mcpgo.NewToolResultErrorf("bad since %q: %v", v, err), nil
+		}
+		since = t
+	}
+	limit := 25
+	if v := req.GetString("limit", ""); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return mcpgo.NewToolResultErrorf("bad limit %q", v), nil
+		}
+		limit = n
+	}
+	// Pull a generous slice of events and let MaterializeJobs do the
+	// joining. Most teams won't exceed a few thousand events in a
+	// recent window; bigger logs can use --since to bound.
+	events, err := s.audit.Query(agentID, since, 4096)
+	if err != nil {
+		return mcpgo.NewToolResultErrorFromErr("audit query", err), nil
+	}
+	jobs := audit.MaterializeJobs(events)
+	// Newest first, then trim to limit.
+	if len(jobs) > 1 {
+		for i, j := 0, len(jobs)-1; i < j; i, j = i+1, j-1 {
+			jobs[i], jobs[j] = jobs[j], jobs[i]
+		}
+	}
+	if limit > 0 && len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	body, err := json.Marshal(jobs)
+	if err != nil {
+		return mcpgo.NewToolResultErrorFromErr("marshal jobs", err), nil
+	}
+	return mcpgo.NewToolResultText(string(body)), nil
 }
 
 func (s *Server) handleQueryAudit(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

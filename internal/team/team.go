@@ -11,15 +11,44 @@ import (
 )
 
 type Team struct {
-	Name    string      `yaml:"name"`
-	Tailnet TailnetSpec `yaml:"tailnet"`
-	Leader  LeaderSpec  `yaml:"leader"`
-	Agents  []AgentSpec `yaml:"agents"`
+	Name       string          `yaml:"name"`
+	Tailnet    TailnetSpec     `yaml:"tailnet,omitempty"`
+	Leader     LeaderSpec      `yaml:"leader"`
+	Archetypes []ArchetypeSpec `yaml:"archetypes"`
 
 	// mu guards concurrent mutation via Add/Remove/Update methods and
-	// makes the read-side helpers (FindAgentByRole etc.) safe to call
-	// from goroutines that may race with the daemon's MCP tools.
+	// makes the read-side helpers (FindArchetypeByRole etc.) safe to
+	// call from goroutines that may race with the daemon's MCP tools.
 	mu sync.RWMutex `yaml:"-"`
+}
+
+// ArchetypeSpec is a template for spawning worker instances of a given
+// role. The leader decides how many to spawn, up to MaxConcurrent.
+// Auto-generated instance IDs are `<role>-<N>` where N is a monotonic
+// counter (IDs never reused — audit history stays unambiguous).
+type ArchetypeSpec struct {
+	Role        string `yaml:"role"`
+	Description string `yaml:"description,omitempty"`
+	// Placement is one of: "local", "fargate", "ssh:user@host".
+	Placement     string   `yaml:"placement"`
+	WorkingDir    string   `yaml:"working_dir,omitempty"`
+	MaxConcurrent int      `yaml:"max_concurrent"`
+	// Lifecycle is "ephemeral" (default) or "persistent". Persistent
+	// archetypes survive a daemon restart: instances are reconciled
+	// from probing teem-<role>-1..N on the tailnet. Persistent + local
+	// requires the operator to run `teem-worker` themselves at the
+	// matching hostnames.
+	Lifecycle string   `yaml:"lifecycle,omitempty"`
+	MCPs      []MCPRef `yaml:"mcps,omitempty"`
+}
+
+// LifecycleOrDefault returns the archetype's lifecycle, defaulting to
+// "ephemeral".
+func (a ArchetypeSpec) LifecycleOrDefault() string {
+	if a.Lifecycle == "" {
+		return "ephemeral"
+	}
+	return a.Lifecycle
 }
 
 type TailnetSpec struct {
@@ -102,10 +131,10 @@ type marshalWrapper struct {
 }
 
 type marshalShape struct {
-	Name    string      `yaml:"name"`
-	Tailnet TailnetSpec `yaml:"tailnet,omitempty"`
-	Leader  LeaderSpec  `yaml:"leader"`
-	Agents  []AgentSpec `yaml:"agents,omitempty"`
+	Name       string          `yaml:"name"`
+	Tailnet    TailnetSpec     `yaml:"tailnet,omitempty"`
+	Leader     LeaderSpec      `yaml:"leader"`
+	Archetypes []ArchetypeSpec `yaml:"archetypes"`
 }
 
 // MarshalYAML serializes the team to YAML in the canonical fileWrapper
@@ -115,10 +144,10 @@ func (t *Team) MarshalYAML() ([]byte, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return yaml.Marshal(marshalWrapper{Team: marshalShape{
-		Name:    t.Name,
-		Tailnet: t.Tailnet,
-		Leader:  t.Leader,
-		Agents:  append([]AgentSpec(nil), t.Agents...),
+		Name:       t.Name,
+		Tailnet:    t.Tailnet,
+		Leader:     t.Leader,
+		Archetypes: append([]ArchetypeSpec(nil), t.Archetypes...),
 	}})
 }
 
@@ -174,40 +203,27 @@ func (t *Team) Validate() error {
 	if t.Tailnet.Hostname != "" && !hostnameRE.MatchString(t.Tailnet.Hostname) {
 		return fmt.Errorf("tailnet.hostname %q is not a valid DNS label", t.Tailnet.Hostname)
 	}
-	seen := map[string]struct{}{}
-	for i, a := range t.Agents {
-		if a.ID == "" {
-			return fmt.Errorf("agents[%d]: id is required", i)
-		}
-		if _, dup := seen[a.ID]; dup {
-			return fmt.Errorf("agents[%d]: duplicate id %q", i, a.ID)
-		}
-		seen[a.ID] = struct{}{}
+	if len(t.Archetypes) == 0 {
+		return fmt.Errorf("at least one archetype is required")
+	}
+	roles := map[string]struct{}{}
+	for i, a := range t.Archetypes {
 		if a.Role == "" {
-			return fmt.Errorf("agents[%d] (%s): role is required", i, a.ID)
+			return fmt.Errorf("archetypes[%d]: role is required", i)
 		}
-		placements := 0
-		if a.Local {
-			placements++
+		if _, dup := roles[a.Role]; dup {
+			return fmt.Errorf("archetypes[%d]: duplicate role %q", i, a.Role)
 		}
-		if a.SSHTarget != "" {
-			placements++
+		roles[a.Role] = struct{}{}
+		if a.MaxConcurrent <= 0 {
+			return fmt.Errorf("archetypes[%d] (%s): max_concurrent must be > 0", i, a.Role)
 		}
-		if a.Backend != "" {
-			placements++
-			if _, ok := SupportedBackends[a.Backend]; !ok {
-				return fmt.Errorf("agents[%d] (%s): unknown backend %q (supported: fargate)", i, a.ID, a.Backend)
-			}
-		}
-		if placements == 0 {
-			return fmt.Errorf("agents[%d] (%s): must set exactly one of local: true, ssh_target, or backend", i, a.ID)
-		}
-		if placements > 1 {
-			return fmt.Errorf("agents[%d] (%s): set exactly one of local, ssh_target, or backend (got %d)", i, a.ID, placements)
+		if err := validateArchetypePlacement(a); err != nil {
+			return fmt.Errorf("archetypes[%d] (%s): %w", i, a.Role, err)
 		}
 		if a.Lifecycle != "" {
 			if _, ok := SupportedLifecycles[a.Lifecycle]; !ok {
-				return fmt.Errorf("agents[%d] (%s): unknown lifecycle %q (supported: ephemeral, persistent)", i, a.ID, a.Lifecycle)
+				return fmt.Errorf("archetypes[%d] (%s): unknown lifecycle %q (supported: ephemeral, persistent)", i, a.Role, a.Lifecycle)
 			}
 		}
 	}
@@ -215,154 +231,152 @@ func (t *Team) Validate() error {
 }
 
 // LeaderSystemPrompt builds the system prompt the Leader subprocess is
-// launched with: a fixed Teem preamble + the team roster + the YAML's
-// leader.system_prompt verbatim.
+// launched with: a fixed Teem preamble + the team's archetypes + the
+// YAML's leader.system_prompt verbatim.
 func (t *Team) LeaderSystemPrompt() string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	var b strings.Builder
-	b.WriteString("You are the Leader of a Teem — a small team of Claude Code agents working together on a software project.\n\n")
-	b.WriteString("You have access to MCP tools that let you spawn agents, assign jobs, inspect status, and read the shared message bus. ")
-	b.WriteString("Use them to coordinate the team rather than doing every task yourself.\n\n")
-	b.WriteString("Your team:\n")
-	if len(t.Agents) == 0 {
-		b.WriteString("  (no agents declared yet)\n")
+	b.WriteString("You are the Leader of a Teem — a team of Claude Code workers you spawn and dispatch jobs to.\n\n")
+	b.WriteString("You have MCP tools to spawn workers, assign jobs, inspect status, and recall past work. ")
+	b.WriteString("Use them to delegate; don't do everything yourself.\n\n")
+	b.WriteString("Worker archetypes available (templates — spawn as many as you need up to the cap):\n")
+	if len(t.Archetypes) == 0 {
+		b.WriteString("  (none declared)\n")
 	}
-	for _, a := range t.Agents {
-		fmt.Fprintf(&b, "  - %s (%s): %s\n", a.ID, a.Role, a.Description)
+	for _, a := range t.Archetypes {
+		lc := a.LifecycleOrDefault()
+		fmt.Fprintf(&b, "  - %s (up to %d, %s, %s): %s\n", a.Role, a.MaxConcurrent, a.Placement, lc, a.Description)
 	}
+	b.WriteString("\nWhen you spawn from an archetype you get an auto-numbered instance id like worker-1, worker-2, … (never reused).\n")
 	b.WriteString("\n--- Project brief ---\n")
 	b.WriteString(strings.TrimSpace(t.Leader.SystemPrompt))
 	b.WriteString("\n")
 	return b.String()
 }
 
-// FindAgentByRole returns the first agent matching the role, or nil. The
-// returned pointer references team-internal storage and is only safe to
-// read; mutations should go through AddAgent/RemoveAgent/UpdateAgent.
-func (t *Team) FindAgentByRole(role string) *AgentSpec {
+// ErrAgentNotFound is returned when an MCP tool refers to an instance
+// id the spawner doesn't know about.
+var ErrAgentNotFound = fmt.Errorf("team: agent not found")
+
+// FindArchetypeByRole returns the archetype with the given role, or
+// nil. Returned pointer is a copy safe to read; mutations should go
+// through Add/Remove/UpdateArchetype.
+func (t *Team) FindArchetypeByRole(role string) *ArchetypeSpec {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	for i := range t.Agents {
-		if t.Agents[i].Role == role {
-			a := t.Agents[i]
+	for i := range t.Archetypes {
+		if t.Archetypes[i].Role == role {
+			a := t.Archetypes[i]
 			return &a
 		}
 	}
 	return nil
 }
 
-// FindAgentByID returns the agent with the given id, or nil. See
-// FindAgentByRole for the same caveat about mutation.
-func (t *Team) FindAgentByID(id string) *AgentSpec {
+// SnapshotArchetypes returns a copy of the archetype list safe to
+// iterate without holding the lock.
+func (t *Team) SnapshotArchetypes() []ArchetypeSpec {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	for i := range t.Agents {
-		if t.Agents[i].ID == id {
-			a := t.Agents[i]
-			return &a
-		}
-	}
-	return nil
-}
-
-// Snapshot returns a copy of the agent roster safe to iterate without
-// holding the lock. Used by MCP tools that report the current team
-// shape.
-func (t *Team) Snapshot() []AgentSpec {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	out := make([]AgentSpec, len(t.Agents))
-	copy(out, t.Agents)
+	out := make([]ArchetypeSpec, len(t.Archetypes))
+	copy(out, t.Archetypes)
 	return out
 }
 
-// AddAgent appends spec to the roster after validating it. Returns
-// ErrAgentExists if an agent with the same id is already in the
-// roster, or a validation error if the spec is malformed.
-func (t *Team) AddAgent(spec AgentSpec) error {
+// AddArchetype appends a new archetype after validating it.
+func (t *Team) AddArchetype(spec ArchetypeSpec) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if spec.ID == "" {
-		return fmt.Errorf("AddAgent: id is required")
-	}
 	if spec.Role == "" {
-		return fmt.Errorf("AddAgent: role is required")
+		return fmt.Errorf("AddArchetype: role is required")
 	}
-	for _, a := range t.Agents {
-		if a.ID == spec.ID {
-			return ErrAgentExists
+	for _, a := range t.Archetypes {
+		if a.Role == spec.Role {
+			return ErrArchetypeExists
 		}
 	}
-	if err := validatePlacement(spec); err != nil {
+	if spec.MaxConcurrent <= 0 {
+		return fmt.Errorf("AddArchetype: max_concurrent must be > 0")
+	}
+	if err := validateArchetypePlacement(spec); err != nil {
 		return err
 	}
-	if spec.Lifecycle != "" {
-		if _, ok := SupportedLifecycles[spec.Lifecycle]; !ok {
-			return fmt.Errorf("AddAgent: unknown lifecycle %q", spec.Lifecycle)
-		}
-	}
-	t.Agents = append(t.Agents, spec)
+	t.Archetypes = append(t.Archetypes, spec)
 	return nil
 }
 
-// RemoveAgent drops the agent with the given id from the roster.
-// Returns ErrAgentNotFound when no such agent exists.
-func (t *Team) RemoveAgent(id string) error {
+// RemoveArchetype drops the archetype with the given role.
+func (t *Team) RemoveArchetype(role string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for i, a := range t.Agents {
-		if a.ID == id {
-			t.Agents = append(t.Agents[:i], t.Agents[i+1:]...)
+	for i, a := range t.Archetypes {
+		if a.Role == role {
+			t.Archetypes = append(t.Archetypes[:i], t.Archetypes[i+1:]...)
 			return nil
 		}
 	}
-	return ErrAgentNotFound
+	return ErrArchetypeNotFound
 }
 
-// UpdateAgentDescription mutates an existing agent's description. Other
-// fields are immutable post-creation; to change placement or lifecycle,
-// remove and re-add.
-func (t *Team) UpdateAgentDescription(id, description string) error {
+// UpdateArchetypeDescription replaces the description text on an
+// existing archetype.
+func (t *Team) UpdateArchetypeDescription(role, description string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for i := range t.Agents {
-		if t.Agents[i].ID == id {
-			t.Agents[i].Description = description
+	for i := range t.Archetypes {
+		if t.Archetypes[i].Role == role {
+			t.Archetypes[i].Description = description
 			return nil
 		}
 	}
-	return ErrAgentNotFound
+	return ErrArchetypeNotFound
 }
 
-// ErrAgentExists / ErrAgentNotFound are returned by the mutator methods
-// so callers can distinguish "no-op" from "real failure".
+// SetArchetypeMaxConcurrent updates the cap on concurrent instances of
+// the role.
+func (t *Team) SetArchetypeMaxConcurrent(role string, max int) error {
+	if max <= 0 {
+		return fmt.Errorf("max_concurrent must be > 0")
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.Archetypes {
+		if t.Archetypes[i].Role == role {
+			t.Archetypes[i].MaxConcurrent = max
+			return nil
+		}
+	}
+	return ErrArchetypeNotFound
+}
+
+// ErrArchetypeExists / ErrArchetypeNotFound mirror the agent variants.
 var (
-	ErrAgentExists   = fmt.Errorf("team: agent already exists")
-	ErrAgentNotFound = fmt.Errorf("team: agent not found")
+	ErrArchetypeExists   = fmt.Errorf("team: archetype already exists")
+	ErrArchetypeNotFound = fmt.Errorf("team: archetype not found")
 )
 
-// validatePlacement enforces the same exactly-one-of rule the YAML
-// validator does, plus the supported-backend check.
-func validatePlacement(a AgentSpec) error {
-	placements := 0
-	if a.Local {
-		placements++
-	}
-	if a.SSHTarget != "" {
-		placements++
-	}
-	if a.Backend != "" {
-		placements++
-		if _, ok := SupportedBackends[a.Backend]; !ok {
-			return fmt.Errorf("unknown backend %q (supported: fargate)", a.Backend)
+// validateArchetypePlacement enforces the placement string format and
+// supported-backend constraints. Placements: "local",
+// "ssh:user@host", or "fargate".
+func validateArchetypePlacement(a ArchetypeSpec) error {
+	switch {
+	case a.Placement == "local":
+		return nil
+	case a.Placement == "fargate":
+		return nil
+	case strings.HasPrefix(a.Placement, "ssh:"):
+		if strings.TrimPrefix(a.Placement, "ssh:") == "" {
+			return fmt.Errorf("ssh placement requires a target (e.g. ssh:user@host)")
 		}
+		if a.WorkingDir == "" {
+			return fmt.Errorf("ssh placement requires working_dir")
+		}
+		return nil
+	case a.Placement == "":
+		return fmt.Errorf("placement is required")
+	default:
+		return fmt.Errorf("unknown placement %q (supported: local, ssh:user@host, fargate)", a.Placement)
 	}
-	if placements == 0 {
-		return fmt.Errorf("must set exactly one of local, ssh_target, or backend")
-	}
-	if placements > 1 {
-		return fmt.Errorf("set exactly one of local, ssh_target, or backend (got %d)", placements)
-	}
-	return nil
 }
+

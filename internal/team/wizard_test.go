@@ -9,8 +9,7 @@ import (
 )
 
 // driveWizard feeds the wizard a script of newline-separated lines and
-// returns the produced YAML bytes (or an error). Useful for asserting the
-// wizard's YAML output round-trips through team.Load.
+// returns the produced YAML bytes (or an error).
 func driveWizard(t *testing.T, script string) ([]byte, error) {
 	t.Helper()
 	in := strings.NewReader(script)
@@ -24,14 +23,20 @@ func driveWizard(t *testing.T, script string) ([]byte, error) {
 	return body, nil
 }
 
-func TestWizard_LeaderOnly(t *testing.T) {
-	// Minimum viable team: name + leader prompt, no agents.
+func TestWizard_OneLocalArchetype(t *testing.T) {
+	// Minimum viable team after the archetype migration: one
+	// archetype is required by validation.
 	script := strings.Join([]string{
-		"example",       // team name
-		"You lead a team building Teem.", // leader prompt line 1
-		"",              // end of multiline
-		"n",             // add an agent? no
-		"y",             // write?
+		"example",                       // team name
+		"You lead a team building Teem.", // leader prompt
+		"",                              // end multiline
+		"y",                             // add an archetype?
+		"worker",                        // role
+		"writes Go",                     // description
+		"1",                             // placement = local
+		"3",                             // max_concurrent
+		"n",                             // add another? no
+		"y",                             // write?
 	}, "\n") + "\n"
 
 	body, err := driveWizard(t, script)
@@ -39,76 +44,34 @@ func TestWizard_LeaderOnly(t *testing.T) {
 		t.Fatalf("wizard: %v", err)
 	}
 
-	// Round-trip the produced YAML through team.Load.
-	dir := t.TempDir()
-	path := filepath.Join(dir, "team.yaml")
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got, err := Load(path)
-	if err != nil {
-		t.Fatalf("load: %v\nyaml:\n%s", err, body)
-	}
+	got := loadFromBytes(t, body)
 	if got.Name != "example" {
 		t.Errorf("name = %q", got.Name)
 	}
 	if !strings.Contains(got.Leader.SystemPrompt, "Teem") {
 		t.Errorf("leader prompt missing: %q", got.Leader.SystemPrompt)
 	}
-	if len(got.Agents) != 0 {
-		t.Errorf("agents: %d", len(got.Agents))
+	if len(got.Archetypes) != 1 {
+		t.Fatalf("want 1 archetype, got %d (yaml:\n%s)", len(got.Archetypes), body)
+	}
+	a := got.Archetypes[0]
+	if a.Role != "worker" || a.Placement != "local" || a.MaxConcurrent != 3 {
+		t.Errorf("unexpected archetype: %+v", a)
 	}
 }
 
-func TestWizard_LocalAgent(t *testing.T) {
-	script := strings.Join([]string{
-		"my-team",
-		"You are the leader.",
-		"",
-		"y",              // add agent
-		"backend",        // role
-		"",               // id default
-		"writes Go",      // description
-		"1",              // local
-		"n",              // no more agents
-		"y",              // write
-	}, "\n") + "\n"
-
-	body, err := driveWizard(t, script)
-	if err != nil {
-		t.Fatalf("wizard: %v", err)
-	}
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "team.yaml")
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got, err := Load(path)
-	if err != nil {
-		t.Fatalf("load: %v\nyaml:\n%s", err, body)
-	}
-	if len(got.Agents) != 1 {
-		t.Fatalf("want 1 agent, got %d (yaml:\n%s)", len(got.Agents), body)
-	}
-	a := got.Agents[0]
-	if a.ID != "backend-1" || a.Role != "backend" || !a.Local || a.SSHTarget != "" || a.Backend != "" {
-		t.Errorf("unexpected agent: %+v", a)
-	}
-}
-
-func TestWizard_SSHAgent(t *testing.T) {
+func TestWizard_SSHArchetype(t *testing.T) {
 	script := strings.Join([]string{
 		"my-team",
 		"leader brief",
 		"",
 		"y",
 		"reviewer",
-		"rv-1",                  // explicit id
-		"reads diffs",           // description
+		"reads diffs",
 		"2",                     // ssh
 		"alice@review-box",      // ssh target
 		"/home/alice/teem",      // working_dir
+		"2",                     // max_concurrent
 		"n",
 		"y",
 	}, "\n") + "\n"
@@ -117,26 +80,26 @@ func TestWizard_SSHAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wizard: %v", err)
 	}
-	got, err := loadFromBytes(t, body)
-	if err != nil {
-		t.Fatalf("load: %v\nyaml:\n%s", err, body)
+	got := loadFromBytes(t, body)
+	if len(got.Archetypes) != 1 {
+		t.Fatalf("want 1 archetype, got %d", len(got.Archetypes))
 	}
-	a := got.Agents[0]
-	if a.SSHTarget != "alice@review-box" || a.WorkingDir != "/home/alice/teem" || a.Local {
-		t.Errorf("ssh agent: %+v", a)
+	a := got.Archetypes[0]
+	if a.Placement != "ssh:alice@review-box" || a.WorkingDir != "/home/alice/teem" || a.MaxConcurrent != 2 {
+		t.Errorf("ssh archetype: %+v", a)
 	}
 }
 
-func TestWizard_FargateAgent(t *testing.T) {
+func TestWizard_FargateArchetype(t *testing.T) {
 	script := strings.Join([]string{
 		"my-team",
 		"leader",
 		"",
 		"y",
 		"integrator",
-		"",       // default id
 		"",       // no description
 		"3",      // fargate
+		"5",      // max_concurrent
 		"n",
 		"y",
 	}, "\n") + "\n"
@@ -145,13 +108,13 @@ func TestWizard_FargateAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wizard: %v", err)
 	}
-	got, err := loadFromBytes(t, body)
-	if err != nil {
-		t.Fatalf("load: %v\nyaml:\n%s", err, body)
+	got := loadFromBytes(t, body)
+	if len(got.Archetypes) != 1 {
+		t.Fatalf("want 1 archetype, got %d", len(got.Archetypes))
 	}
-	a := got.Agents[0]
-	if a.Backend != "fargate" || a.Local || a.SSHTarget != "" {
-		t.Errorf("fargate agent: %+v", a)
+	a := got.Archetypes[0]
+	if a.Placement != "fargate" || a.MaxConcurrent != 5 {
+		t.Errorf("fargate archetype: %+v", a)
 	}
 }
 
@@ -160,8 +123,13 @@ func TestWizard_Cancel(t *testing.T) {
 		"x",
 		"x",
 		"",
+		"y",        // add archetype
+		"worker",
+		"",
+		"1",
+		"3",
 		"n",
-		"n", // refuse to write
+		"n",        // refuse to write
 	}, "\n") + "\n"
 
 	_, err := driveWizard(t, script)
@@ -170,11 +138,16 @@ func TestWizard_Cancel(t *testing.T) {
 	}
 }
 
-func loadFromBytes(t *testing.T, body []byte) (*Team, error) {
+func loadFromBytes(t *testing.T, body []byte) *Team {
+	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "team.yaml")
 	if err := os.WriteFile(path, body, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return Load(path)
+	tm, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v\nyaml:\n%s", err, body)
+	}
+	return tm
 }

@@ -1,5 +1,5 @@
 ---
-description: Spawn a worker for the given role. Usage: /spawn <role>
+description: Spawn a teem worker for the given role. Usage: /teem-spawn <role>
 ---
 
 If a role was provided ($ARGUMENTS), use the `spawn_agent` MCP tool to

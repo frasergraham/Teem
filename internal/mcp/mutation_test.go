@@ -12,10 +12,11 @@ import (
 )
 
 // fakeSpawner implements the Spawner interface for tests. It tracks
-// which agent ids are "running" so IsRunning / StopAgent flows can be
-// exercised.
+// which agent ids and roles are "running" so the IsRunning /
+// AnyRunningWithRole / StopAgent flows can be exercised.
 type fakeSpawner struct {
 	running map[string]bool
+	roles   map[string]string // agent_id → role
 }
 
 func (f *fakeSpawner) SpawnByRole(ctx context.Context, role string) (string, error) {
@@ -25,11 +26,16 @@ func (f *fakeSpawner) AssignJob(ctx context.Context, agentID, prompt, contextNot
 	return "", nil
 }
 func (f *fakeSpawner) JobStatus(jobID string) (string, string, bool) { return "", "", false }
-func (f *fakeSpawner) IsRunning(id string) bool                       { return f.running[id] }
-func (f *fakeSpawner) StopAgent(ctx context.Context, id string) error {
-	if !f.running[id] {
-		return nil
+func (f *fakeSpawner) IsRunning(id string) bool                      { return f.running[id] }
+func (f *fakeSpawner) AnyRunningWithRole(role string) bool {
+	for id, r := range f.roles {
+		if r == role && f.running[id] {
+			return true
+		}
 	}
+	return false
+}
+func (f *fakeSpawner) StopAgent(ctx context.Context, id string) error {
 	delete(f.running, id)
 	return nil
 }
@@ -54,20 +60,17 @@ func callTool(t *testing.T, srv *Server, name string, args map[string]any) *mcpg
 	req.Params.Name = name
 	req.Params.Arguments = args
 
-	// Dispatch by name to the matching handler — tool dispatch in the
-	// real server goes through the streamable HTTP layer, which is more
-	// machinery than a unit test needs.
 	var res *mcpgo.CallToolResult
 	var err error
 	switch name {
-	case "add_agent":
-		res, err = srv.handleAddAgent(context.Background(), req)
-	case "remove_agent":
-		res, err = srv.handleRemoveAgent(context.Background(), req)
+	case "add_archetype":
+		res, err = srv.handleAddArchetype(context.Background(), req)
+	case "remove_archetype":
+		res, err = srv.handleRemoveArchetype(context.Background(), req)
+	case "update_archetype":
+		res, err = srv.handleUpdateArchetype(context.Background(), req)
 	case "stop_agent":
 		res, err = srv.handleStopAgent(context.Background(), req)
-	case "update_agent_description":
-		res, err = srv.handleUpdateAgentDescription(context.Background(), req)
 	case "read_team":
 		res, err = srv.handleReadTeam(context.Background(), req)
 	default:
@@ -101,146 +104,158 @@ func resultIsError(r *mcpgo.CallToolResult) bool {
 	return r.IsError
 }
 
-func TestAddAgent_HappyPath(t *testing.T) {
+func TestAddArchetype_HappyPath(t *testing.T) {
 	tm := &team.Team{Name: "t", Leader: team.LeaderSpec{SystemPrompt: "p"}}
-	sp := &fakeSpawner{running: map[string]bool{}}
+	sp := &fakeSpawner{running: map[string]bool{}, roles: map[string]string{}}
 	srv := newTestServer(t, tm, sp)
 
-	res := callTool(t, srv, "add_agent", map[string]any{
-		"id":          "rv-1",
-		"role":        "reviewer",
-		"placement":   "local",
-		"description": "Reviews diffs",
+	res := callTool(t, srv, "add_archetype", map[string]any{
+		"role":           "reviewer",
+		"placement":      "local",
+		"max_concurrent": "3",
+		"description":    "Reads diffs",
 	})
 	if resultIsError(res) {
-		t.Fatalf("add_agent should succeed, got: %s", resultText(t, res))
+		t.Fatalf("add_archetype should succeed, got: %s", resultText(t, res))
 	}
-	a := tm.FindAgentByID("rv-1")
+	a := tm.FindArchetypeByRole("reviewer")
 	if a == nil {
-		t.Fatal("rv-1 not in roster after add")
+		t.Fatal("reviewer not in roster after add")
 	}
-	if !a.Local || a.Description != "Reviews diffs" {
-		t.Errorf("unexpected agent: %+v", a)
+	if a.Placement != "local" || a.MaxConcurrent != 3 || a.Description != "Reads diffs" {
+		t.Errorf("unexpected archetype: %+v", a)
 	}
 }
 
-func TestAddAgent_DuplicateRejected(t *testing.T) {
+func TestAddArchetype_DuplicateRejected(t *testing.T) {
 	tm := &team.Team{
-		Name:   "t",
-		Leader: team.LeaderSpec{SystemPrompt: "p"},
-		Agents: []team.AgentSpec{{ID: "rv-1", Role: "reviewer", Local: true}},
+		Name:       "t",
+		Leader:     team.LeaderSpec{SystemPrompt: "p"},
+		Archetypes: []team.ArchetypeSpec{{Role: "reviewer", Placement: "local", MaxConcurrent: 1}},
 	}
-	sp := &fakeSpawner{running: map[string]bool{}}
+	sp := &fakeSpawner{running: map[string]bool{}, roles: map[string]string{}}
 	srv := newTestServer(t, tm, sp)
 
-	res := callTool(t, srv, "add_agent", map[string]any{
-		"id":        "rv-1",
-		"role":      "reviewer",
-		"placement": "local",
+	res := callTool(t, srv, "add_archetype", map[string]any{
+		"role":           "reviewer",
+		"placement":      "local",
+		"max_concurrent": "1",
 	})
 	if !resultIsError(res) {
 		t.Errorf("duplicate add should error, got: %s", resultText(t, res))
 	}
 }
 
-func TestAddAgent_SSHRequiresWorkingDir(t *testing.T) {
-	tm := &team.Team{Name: "t", Leader: team.LeaderSpec{SystemPrompt: "p"}}
-	srv := newTestServer(t, tm, &fakeSpawner{running: map[string]bool{}})
-	res := callTool(t, srv, "add_agent", map[string]any{
-		"id":        "rmt-1",
-		"role":      "remote",
-		"placement": "ssh:user@box",
-	})
-	if !resultIsError(res) {
-		t.Errorf("ssh without working_dir should error")
-	}
-}
-
-func TestRemoveAgent_RefusesWhileRunning(t *testing.T) {
+func TestRemoveArchetype_RefusesWhileRunning(t *testing.T) {
 	tm := &team.Team{
-		Name:   "t",
-		Leader: team.LeaderSpec{SystemPrompt: "p"},
-		Agents: []team.AgentSpec{{ID: "wk-1", Role: "worker", Local: true}},
+		Name:       "t",
+		Leader:     team.LeaderSpec{SystemPrompt: "p"},
+		Archetypes: []team.ArchetypeSpec{{Role: "worker", Placement: "local", MaxConcurrent: 2}},
 	}
-	sp := &fakeSpawner{running: map[string]bool{"wk-1": true}}
+	sp := &fakeSpawner{
+		running: map[string]bool{"worker-1": true},
+		roles:   map[string]string{"worker-1": "worker"},
+	}
 	srv := newTestServer(t, tm, sp)
-	res := callTool(t, srv, "remove_agent", map[string]any{"agent_id": "wk-1"})
+	res := callTool(t, srv, "remove_archetype", map[string]any{"role": "worker"})
 	if !resultIsError(res) {
-		t.Errorf("remove of running agent should error")
+		t.Errorf("remove with running instance should error")
 	}
-	if tm.FindAgentByID("wk-1") == nil {
-		t.Errorf("agent removed despite error")
+	if tm.FindArchetypeByRole("worker") == nil {
+		t.Errorf("archetype removed despite running instance")
 	}
 }
 
-func TestRemoveAgent_HappyPath(t *testing.T) {
+func TestRemoveArchetype_HappyPath(t *testing.T) {
 	tm := &team.Team{
-		Name:   "t",
-		Leader: team.LeaderSpec{SystemPrompt: "p"},
-		Agents: []team.AgentSpec{{ID: "wk-1", Role: "worker", Local: true}},
+		Name:       "t",
+		Leader:     team.LeaderSpec{SystemPrompt: "p"},
+		Archetypes: []team.ArchetypeSpec{{Role: "worker", Placement: "local", MaxConcurrent: 1}},
 	}
-	srv := newTestServer(t, tm, &fakeSpawner{running: map[string]bool{}})
-	res := callTool(t, srv, "remove_agent", map[string]any{"agent_id": "wk-1"})
+	srv := newTestServer(t, tm, &fakeSpawner{running: map[string]bool{}, roles: map[string]string{}})
+	res := callTool(t, srv, "remove_archetype", map[string]any{"role": "worker"})
 	if resultIsError(res) {
 		t.Fatalf("remove failed: %s", resultText(t, res))
 	}
-	if tm.FindAgentByID("wk-1") != nil {
-		t.Errorf("agent still in roster after remove")
+	if tm.FindArchetypeByRole("worker") != nil {
+		t.Errorf("archetype still in roster after remove")
 	}
 }
 
 func TestStopAgent_CallsSpawner(t *testing.T) {
 	tm := &team.Team{Name: "t", Leader: team.LeaderSpec{SystemPrompt: "p"}}
-	sp := &fakeSpawner{running: map[string]bool{"wk-1": true}}
+	sp := &fakeSpawner{
+		running: map[string]bool{"worker-1": true},
+		roles:   map[string]string{"worker-1": "worker"},
+	}
 	srv := newTestServer(t, tm, sp)
-	res := callTool(t, srv, "stop_agent", map[string]any{"agent_id": "wk-1"})
+	res := callTool(t, srv, "stop_agent", map[string]any{"agent_id": "worker-1"})
 	if resultIsError(res) {
 		t.Fatalf("stop_agent failed: %s", resultText(t, res))
 	}
-	if sp.IsRunning("wk-1") {
+	if sp.IsRunning("worker-1") {
 		t.Errorf("agent still marked running after stop_agent")
 	}
 }
 
-func TestUpdateAgentDescription(t *testing.T) {
+func TestUpdateArchetype_Description(t *testing.T) {
 	tm := &team.Team{
-		Name:   "t",
-		Leader: team.LeaderSpec{SystemPrompt: "p"},
-		Agents: []team.AgentSpec{{ID: "wk-1", Role: "worker", Local: true, Description: "old"}},
+		Name:       "t",
+		Leader:     team.LeaderSpec{SystemPrompt: "p"},
+		Archetypes: []team.ArchetypeSpec{{Role: "worker", Placement: "local", MaxConcurrent: 1, Description: "old"}},
 	}
-	srv := newTestServer(t, tm, &fakeSpawner{running: map[string]bool{}})
-	res := callTool(t, srv, "update_agent_description", map[string]any{
-		"agent_id":    "wk-1",
+	srv := newTestServer(t, tm, &fakeSpawner{running: map[string]bool{}, roles: map[string]string{}})
+	res := callTool(t, srv, "update_archetype", map[string]any{
+		"role":        "worker",
 		"description": "new",
 	})
 	if resultIsError(res) {
 		t.Fatalf("update failed: %s", resultText(t, res))
 	}
-	a := tm.FindAgentByID("wk-1")
+	a := tm.FindArchetypeByRole("worker")
 	if a == nil || a.Description != "new" {
 		t.Errorf("description not updated: %+v", a)
 	}
 }
 
-func TestUpdateAgentDescription_MissingAgent(t *testing.T) {
-	tm := &team.Team{Name: "t", Leader: team.LeaderSpec{SystemPrompt: "p"}}
-	srv := newTestServer(t, tm, &fakeSpawner{running: map[string]bool{}})
-	res := callTool(t, srv, "update_agent_description", map[string]any{
-		"agent_id":    "nope",
-		"description": "anything",
+func TestUpdateArchetype_MaxConcurrent(t *testing.T) {
+	tm := &team.Team{
+		Name:       "t",
+		Leader:     team.LeaderSpec{SystemPrompt: "p"},
+		Archetypes: []team.ArchetypeSpec{{Role: "worker", Placement: "local", MaxConcurrent: 1}},
+	}
+	srv := newTestServer(t, tm, &fakeSpawner{running: map[string]bool{}, roles: map[string]string{}})
+	res := callTool(t, srv, "update_archetype", map[string]any{
+		"role":           "worker",
+		"max_concurrent": "5",
 	})
-	if !resultIsError(res) {
-		t.Errorf("missing agent should error")
+	if resultIsError(res) {
+		t.Fatalf("update failed: %s", resultText(t, res))
+	}
+	a := tm.FindArchetypeByRole("worker")
+	if a == nil || a.MaxConcurrent != 5 {
+		t.Errorf("max not updated: %+v", a)
 	}
 }
 
-// Belt-and-suspenders: make sure ErrAgentNotFound is wired through.
-func TestAddRemoveUpdate_ErrorTypes(t *testing.T) {
+func TestUpdateArchetype_MissingRole(t *testing.T) {
 	tm := &team.Team{Name: "t", Leader: team.LeaderSpec{SystemPrompt: "p"}}
-	if err := tm.RemoveAgent("nope"); !errors.Is(err, team.ErrAgentNotFound) {
-		t.Errorf("RemoveAgent missing should return ErrAgentNotFound, got %v", err)
+	srv := newTestServer(t, tm, &fakeSpawner{running: map[string]bool{}, roles: map[string]string{}})
+	res := callTool(t, srv, "update_archetype", map[string]any{
+		"role":        "nope",
+		"description": "anything",
+	})
+	if !resultIsError(res) {
+		t.Errorf("missing archetype should error")
 	}
-	if err := tm.UpdateAgentDescription("nope", "x"); !errors.Is(err, team.ErrAgentNotFound) {
-		t.Errorf("UpdateAgentDescription missing should return ErrAgentNotFound, got %v", err)
+}
+
+func TestArchetype_ErrorTypes(t *testing.T) {
+	tm := &team.Team{Name: "t", Leader: team.LeaderSpec{SystemPrompt: "p"}}
+	if err := tm.RemoveArchetype("nope"); !errors.Is(err, team.ErrArchetypeNotFound) {
+		t.Errorf("RemoveArchetype missing should return ErrArchetypeNotFound, got %v", err)
+	}
+	if err := tm.UpdateArchetypeDescription("nope", "x"); !errors.Is(err, team.ErrArchetypeNotFound) {
+		t.Errorf("UpdateArchetypeDescription missing should return ErrArchetypeNotFound, got %v", err)
 	}
 }

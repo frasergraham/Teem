@@ -11,21 +11,22 @@ team:
 
   leader:
     system_prompt: |
-      You are leading a small team. Delegate implementation work to the
-      worker; run every change past the reviewer before declaring it
-      done. Keep messages concise.
+      You are leading a small team. Delegate implementation work to a
+      worker; run every change past a reviewer before declaring it
+      done. Spawn as many workers and reviewers as you need up to the
+      caps. Keep messages concise.
     mcps: []
 
-  agents:
-    - id: wk-1
-      role: worker
+  # Archetypes are role templates. The leader chooses how many to spawn
+  # of each, up to max_concurrent. Auto-generated instance ids are
+  # worker-1, worker-2, … (never reused).
+  archetypes:
+    - role: worker
       description: "Implements features and fixes — runs in its own git worktree."
-      local: true
-      # working_dir is intentionally unset: local agents get an isolated
-      # git worktree under ~/.teem/worktrees/<team>/<agent-id> on branch
-      # teem/<agent-id>. Set working_dir to opt out (raw path, no worktree).
+      placement: local
+      max_concurrent: 5
 
-    - id: rv-1
-      role: reviewer
+    - role: reviewer
       description: "Independent reviewer. Reads diffs, flags risk."
-      local: true
+      placement: local
+      max_concurrent: 3

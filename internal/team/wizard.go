@@ -51,25 +51,25 @@ func (z *Wizard) Run() (*Team, []byte, error) {
 	}
 
 	z.println("")
-	z.println("Now add team members. Leader is already set; everyone else is optional.")
+	z.println("Now declare archetypes — role templates the leader spawns from.")
+	z.println("Each archetype has a max_concurrent cap; the leader decides how many to spawn.")
 	z.println("Common roles: worker, reviewer, integrator, backend, frontend.")
 	z.println("")
 
-	roleCounts := map[string]int{}
 	for {
-		add, err := z.askYesNo("Add an agent?", true)
+		add, err := z.askYesNo("Add an archetype?", true)
 		if err != nil {
 			return nil, nil, err
 		}
 		if !add {
 			break
 		}
-		agent, err := z.askAgent(roleCounts)
+		arch, err := z.askArchetype()
 		if err != nil {
 			return nil, nil, err
 		}
-		t.Agents = append(t.Agents, agent)
-		z.printf("  ✓ added %s (%s)\n\n", agent.ID, agent.Role)
+		t.Archetypes = append(t.Archetypes, arch)
+		z.printf("  ✓ added %s (up to %d, %s)\n\n", arch.Role, arch.MaxConcurrent, arch.Placement)
 	}
 
 	if err := t.Validate(); err != nil {
@@ -100,49 +100,54 @@ func (z *Wizard) Run() (*Team, []byte, error) {
 // ErrCancelled is returned when the operator declines the final write.
 var ErrCancelled = fmt.Errorf("wizard: cancelled")
 
-func (z *Wizard) askAgent(counts map[string]int) (AgentSpec, error) {
+func (z *Wizard) askArchetype() (ArchetypeSpec, error) {
 	role, err := z.askRequired("  Role", "worker")
 	if err != nil {
-		return AgentSpec{}, err
-	}
-	counts[role]++
-	defaultID := fmt.Sprintf("%s-%d", role, counts[role])
-	id, err := z.askRequired("  Agent id", defaultID)
-	if err != nil {
-		return AgentSpec{}, err
+		return ArchetypeSpec{}, err
 	}
 	desc, err := z.ask("  Description (optional)", "")
 	if err != nil {
-		return AgentSpec{}, err
+		return ArchetypeSpec{}, err
 	}
 
-	placement, err := z.askChoice("  Where does this agent run?", []string{
-		"local  — same host as the leader, isolated git worktree",
+	placement, err := z.askChoice("  Where do instances run?", []string{
+		"local  — same host as the leader, isolated git worktree per instance",
 		"ssh    — remote host you reach via SSH",
 		"fargate — ephemeral container on AWS ECS Fargate",
 	}, 0)
 	if err != nil {
-		return AgentSpec{}, err
+		return ArchetypeSpec{}, err
 	}
 
-	a := AgentSpec{ID: id, Role: role, Description: desc}
+	a := ArchetypeSpec{Role: role, Description: desc}
 	switch placement {
 	case 0:
-		a.Local = true
+		a.Placement = "local"
 	case 1:
 		target, err := z.askRequired("    SSH target (user@host)", "")
 		if err != nil {
-			return AgentSpec{}, err
+			return ArchetypeSpec{}, err
 		}
-		a.SSHTarget = target
-		wd, err := z.askRequired("    Working dir on remote host", "/home/"+leftOfAt(target)+"/teem-"+id)
+		a.Placement = "ssh:" + target
+		wd, err := z.askRequired("    Working dir on remote host", "/home/"+leftOfAt(target)+"/teem-"+role)
 		if err != nil {
-			return AgentSpec{}, err
+			return ArchetypeSpec{}, err
 		}
 		a.WorkingDir = wd
 	case 2:
-		a.Backend = "fargate"
+		a.Placement = "fargate"
 	}
+
+	maxStr, err := z.askRequired("  Max concurrent instances", "3")
+	if err != nil {
+		return ArchetypeSpec{}, err
+	}
+	n, err := strconv.Atoi(maxStr)
+	if err != nil || n <= 0 {
+		return ArchetypeSpec{}, fmt.Errorf("max concurrent must be a positive integer (got %q)", maxStr)
+	}
+	a.MaxConcurrent = n
+
 	return a, nil
 }
 
@@ -277,20 +282,14 @@ func Summary(t *Team) string {
 		first = first[:77] + "..."
 	}
 	fmt.Fprintf(&b, "Leader brief: %s\n", first)
-	if len(t.Agents) == 0 {
-		fmt.Fprintln(&b, "Agents: (none — leader only)")
+	if len(t.Archetypes) == 0 {
+		fmt.Fprintln(&b, "Archetypes: (none — leader only)")
 		return b.String()
 	}
-	fmt.Fprintln(&b, "Agents:")
-	for _, a := range t.Agents {
-		placement := "local"
-		switch {
-		case a.SSHTarget != "":
-			placement = "ssh " + a.SSHTarget
-		case a.Backend != "":
-			placement = a.Backend
-		}
-		fmt.Fprintf(&b, "  - %s (%s) @ %s — %s\n", a.ID, a.Role, placement, a.Description)
+	fmt.Fprintln(&b, "Archetypes:")
+	for _, a := range t.Archetypes {
+		lc := a.LifecycleOrDefault()
+		fmt.Fprintf(&b, "  - %s (up to %d, %s, %s) — %s\n", a.Role, a.MaxConcurrent, a.Placement, lc, a.Description)
 	}
 	return b.String()
 }

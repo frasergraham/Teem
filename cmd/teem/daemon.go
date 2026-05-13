@@ -257,8 +257,9 @@ func atomicWrite(path string, body []byte) error {
 type daemon struct {
 	tnetNode   *tailnet.Node
 	httpClient *http.Client
-	endpoint   string // public URL: http://host:port
-	token      string // shared bearer for /audit and /control
+	endpoint   string          // public URL: http://host:port
+	token      string          // shared bearer for /audit and /control
+	baseCtx    context.Context // daemon lifetime — passed to per-team spawners
 
 	mu    sync.Mutex
 	teams map[string]*registeredTeam
@@ -270,6 +271,7 @@ type registeredTeam struct {
 	spawner    *agent.Spawner
 	auditSink  *audit.FileSink
 	auditH     http.Handler
+	registry   *mcpsrv.Registry
 	leaderURL  string
 	registered time.Time
 }
@@ -282,7 +284,7 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		hostname = "teem-daemon"
 	}
 
-	d := &daemon{teams: map[string]*registeredTeam{}}
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: ctx}
 
 	var listener net.Listener
 	var mcpHost string
@@ -548,9 +550,15 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	stateStore := state.NewStore(defaultStateDir(t.Name))
 	gitCfg := readGitConfig()
 
+	auditPath := defaultAuditPath(t.Name)
+	auditSink, err := audit.OpenFile(auditPath)
+	if err != nil {
+		return nil, fmt.Errorf("audit: %w", err)
+	}
+
 	bs := bus.NewMemBus()
 	reg := mcpsrv.NewRegistry()
-	spawner := agent.NewSpawner(t, bs, reg, agent.Config{
+	spawner := agent.NewSpawner(d.baseCtx, t, bs, reg, agent.Config{
 		HTTPClient:       d.httpClient,
 		WorkerToken:      d.token,
 		CloudProvisioner: cloudProvisionerFactory(d.token, leaderURL, gitCfg, stateStore),
@@ -558,13 +566,8 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		WorktreeBase:     worktreeBase,
 		LeaderURL:        leaderURL,
 		StateStore:       stateStore,
+		AuditSink:        auditSink,
 	})
-
-	auditPath := defaultAuditPath(t.Name)
-	auditSink, err := audit.OpenFile(auditPath)
-	if err != nil {
-		return nil, fmt.Errorf("audit: %w", err)
-	}
 
 	srv, err := mcpsrv.New(mcpsrv.Config{
 		Bus:      bs,
@@ -579,15 +582,60 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	}
 
 	return &registeredTeam{
-		team:       t,
-		mcp:        srv,
-		spawner:    spawner,
-		auditSink:  auditSink,
-		auditH:     audit.Handler(auditSink, d.token),
+		team:      t,
+		mcp:       srv,
+		spawner:   spawner,
+		auditSink: auditSink,
+		// Wrap the audit handler so every POST also updates the
+		// registry's LastSeen for the reporting agent.
+		auditH:     newAuditHandlerWithLastSeen(audit.Handler(auditSink, d.token), reg),
+		registry:   reg,
 		leaderURL:  leaderURL,
 		registered: time.Now(),
 	}, nil
 }
+
+// newAuditHandlerWithLastSeen wraps an audit handler so each accepted
+// POST body has its events scanned for agent_id, and the registry's
+// LastSeen is bumped for any agent that reports in. The underlying
+// audit Handler is the actual responder.
+func newAuditHandlerWithLastSeen(inner http.Handler, reg *mcpsrv.Registry) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			// Tee the body: read, decode for our side-effect, then
+			// replace r.Body so the inner handler can read it again.
+			body, err := io.ReadAll(r.Body)
+			r.Body.Close()
+			if err == nil {
+				var events []audit.Event
+				if json.Unmarshal(body, &events) == nil {
+					now := time.Now().UTC()
+					for _, e := range events {
+						ts := e.Timestamp
+						if ts.IsZero() {
+							ts = now
+						}
+						reg.SetLastSeen(e.AgentID, ts)
+					}
+				}
+				r.Body = newBytesReadCloser(body)
+			}
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+// newBytesReadCloser returns an io.ReadCloser that hands out the
+// supplied bytes. Used to restore r.Body after we read it for the
+// audit tee.
+func newBytesReadCloser(body []byte) io.ReadCloser {
+	return &bytesReadCloser{r: strings.NewReader(string(body))}
+}
+
+type bytesReadCloser struct{ r *strings.Reader }
+
+func (b *bytesReadCloser) Read(p []byte) (int, error) { return b.r.Read(p) }
+func (b *bytesReadCloser) Close() error               { return nil }
 
 func writeTempYAML(body string) (string, error) {
 	f, err := os.CreateTemp("", "teem-register-*.yaml")

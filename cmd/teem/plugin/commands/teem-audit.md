@@ -1,5 +1,5 @@
 ---
-description: Read the Teem audit log. Usage: /audit [agent-id]
+description: Read the Teem audit log. Usage: /teem-audit [agent-id]
 ---
 
 Use the `query_audit` MCP tool to fetch recent events from the audit log.

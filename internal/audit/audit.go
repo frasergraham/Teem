@@ -39,6 +39,11 @@ const (
 	KindJobComplete Kind = "job_complete"
 	KindJobError    Kind = "job_error"
 	KindNote        Kind = "note"
+	// KindHeartbeat is emitted on a fixed interval by workers so the
+	// leader can prove liveness (worker is alive and idle) and so the
+	// registry can compute a LastSeen per agent. Meta carries in_flight
+	// and uptime_s.
+	KindHeartbeat Kind = "heartbeat"
 )
 
 // Event is one entry on the audit channel. Meta is a free-form bag for

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
 	"github.com/frasergraham/teem/internal/executor"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
@@ -62,6 +63,10 @@ type Config struct {
 	// "persistent". When set, the spawner reconciles persistent agents
 	// at startup and skips teardown for them on Stop.
 	StateStore *state.Store
+	// AuditSink is the team's audit log. When set, Spawner.JobStatus
+	// falls back to the audit log on cache misses so leaders can
+	// recall results across daemon restarts.
+	AuditSink audit.Sink
 }
 
 // GitConfig is the source-control configuration the leader hands to
@@ -79,17 +84,30 @@ type GitConfig struct {
 
 // Spawner satisfies mcp.Spawner. It owns the workers it spawns and the
 // outstanding job table.
+//
+// baseCtx is the long-lived context all worker goroutines are tied to.
+// Without this, workers would die the instant an MCP request returns
+// (request contexts are cancelled by the framework on response). Set at
+// construction; cancelled on Stop.
 type Spawner struct {
 	team     *team.Team
 	bus      bus.Bus
 	registry *mcpsrv.Registry
 	cfg      Config
 
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
+
 	mu          sync.Mutex
 	workers     map[string]*Worker
 	jobs        map[string]*jobRecord
 	subs        map[string]context.CancelFunc
 	provisioned map[string]provisionedAgent
+	// archetypeSeq is a monotonic counter per archetype role; the next
+	// auto-generated id is `<role>-<seq+1>`. IDs are never reused so
+	// audit history stays coherent — `worker-3` always refers to one
+	// historical worker even after it stopped.
+	archetypeSeq map[string]int
 }
 
 type provisionedAgent struct {
@@ -97,17 +115,27 @@ type provisionedAgent struct {
 	agent       *provisioner.Agent
 }
 
-// NewSpawner constructs a Spawner. Call Stop to tear it down.
-func NewSpawner(t *team.Team, b bus.Bus, r *mcpsrv.Registry, cfg Config) *Spawner {
+// NewSpawner constructs a Spawner. baseCtx scopes the lifetime of every
+// worker goroutine this spawner manages — pass the daemon's lifetime
+// ctx so workers survive past the MCP request that triggered them.
+// Call Stop to tear it down.
+func NewSpawner(baseCtx context.Context, t *team.Team, b bus.Bus, r *mcpsrv.Registry, cfg Config) *Spawner {
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(baseCtx)
 	return &Spawner{
 		team:        t,
 		bus:         b,
 		registry:    r,
 		cfg:         cfg,
-		workers:     map[string]*Worker{},
-		jobs:        map[string]*jobRecord{},
-		subs:        map[string]context.CancelFunc{},
-		provisioned: map[string]provisionedAgent{},
+		baseCtx:     ctx,
+		baseCancel:  cancel,
+		workers:      map[string]*Worker{},
+		jobs:         map[string]*jobRecord{},
+		subs:         map[string]context.CancelFunc{},
+		provisioned:  map[string]provisionedAgent{},
+		archetypeSeq: map[string]int{},
 	}
 }
 
@@ -119,77 +147,126 @@ func NewSpawner(t *team.Team, b bus.Bus, r *mcpsrv.Registry, cfg Config) *Spawne
 //
 // Errors from a single agent never abort the loop — reconcile is
 // best-effort. Returns the number of agents successfully reconnected.
+//
+// For each persistent archetype, walk instance slots teem-<role>-1
+// through teem-<role>-N (where N = MaxConcurrent) and probe /healthz.
+// Each that answers gets registered as a running worker.
 func (s *Spawner) Reconcile(ctx context.Context) int {
 	if s.cfg.HTTPClient == nil || s.cfg.WorkerToken == "" {
 		return 0
 	}
 	connected := 0
-	for _, spec := range s.team.Agents {
-		if spec.LifecycleOrDefault() != "persistent" {
+	for _, arch := range s.team.SnapshotArchetypes() {
+		if arch.LifecycleOrDefault() != "persistent" {
 			continue
 		}
-		host, ok := s.reconcileHostFor(spec)
-		if !ok {
-			continue
+		backend := provisioner.Backend("local")
+		switch {
+		case arch.Placement == "fargate":
+			backend = provisioner.BackendFargate
+		case len(arch.Placement) > 4 && arch.Placement[:4] == "ssh:":
+			backend = provisioner.BackendSSH
 		}
-		exec := executor.NewHTTP(s.cfg.HTTPClient, "http://"+host+":7780", s.cfg.WorkerToken)
-		hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		err := exec.CheckHealth(hctx)
-		cancel()
-		if err != nil {
-			continue
+		for n := 1; n <= arch.MaxConcurrent; n++ {
+			id := fmt.Sprintf("%s-%d", arch.Role, n)
+			host := "teem-" + id
+			exec := executor.NewHTTP(s.cfg.HTTPClient, "http://"+host+":7780", s.cfg.WorkerToken)
+			hctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			err := exec.CheckHealth(hctx)
+			cancel()
+			if err != nil {
+				continue
+			}
+			a := &provisioner.Agent{
+				ID:          id,
+				Role:        arch.Role,
+				Backend:     backend,
+				Lifecycle:   "persistent",
+				TailnetHost: host,
+				MCPs:        arch.MCPs,
+			}
+			if err := s.startWorker(noopTeardownProvisioner{}, a); err != nil {
+				s.publishLog(id, fmt.Sprintf("reconcile start failed: %v", err))
+				continue
+			}
+			// Bump the per-role counter so future ad-hoc spawns don't
+			// collide with the reconciled id.
+			s.mu.Lock()
+			if s.archetypeSeq[arch.Role] < n {
+				s.archetypeSeq[arch.Role] = n
+			}
+			s.mu.Unlock()
+			connected++
+			s.publishLog(id, "reconciled — persistent worker reused")
 		}
-		a := &provisioner.Agent{
-			ID:          spec.ID,
-			Role:        spec.Role,
-			Backend:     provisioner.Backend(s.backendOf(spec)),
-			Lifecycle:   "persistent",
-			TailnetHost: host,
-			MCPs:        spec.MCPs,
-		}
-		if err := s.startWorker(ctx, noopTeardownProvisioner{}, a); err != nil {
-			s.publishLog(ctx, spec.ID, fmt.Sprintf("reconcile start failed: %v", err))
-			continue
-		}
-		connected++
-		s.publishLog(ctx, spec.ID, "reconciled — persistent worker reused")
 	}
 	return connected
 }
 
-// reconcileHostFor returns the tailnet hostname Reconcile should probe
-// for an agent. For local persistent agents the hostname is just
-// teem-<id>. For fargate persistent agents we also consult the state
-// store; if the prior task ARN is recorded but no longer alive we drop
-// the record so the next spawn launches a fresh task. The bool is false
-// when we shouldn't attempt reconcile (e.g. ssh placement).
-func (s *Spawner) reconcileHostFor(spec team.AgentSpec) (string, bool) {
-	switch {
-	case spec.Local:
-		return "teem-" + spec.ID, true
-	case spec.Backend == "fargate":
-		// Could optionally validate against state.Load + DescribeTasks
-		// here. The FargateProvisioner already does that lazily inside
-		// Provision; reusing it during reconcile means we trust the
-		// tailnet host to remain teem-<id> even if the task ARN
-		// changed. For v1 the assumption is correct because we always
-		// set hostname=teem-<id> at RunTask time.
-		return "teem-" + spec.ID, true
-	default:
-		return "", false
+// specForRole resolves a role to a concrete team.AgentSpec by spawning
+// a fresh instance from the matching archetype. Returns an error if
+// the role has no archetype or the archetype is at its concurrency
+// cap.
+func (s *Spawner) specForRole(role string) (*team.AgentSpec, bool, error) {
+	arch := s.team.FindArchetypeByRole(role)
+	if arch == nil {
+		return nil, false, fmt.Errorf("no archetype with role %q", role)
 	}
+	active := s.countActiveByRole(role)
+	if active >= arch.MaxConcurrent {
+		return nil, false, fmt.Errorf("archetype %q is at capacity (%d/%d running)", role, active, arch.MaxConcurrent)
+	}
+	id := s.nextArchetypeID(role)
+	spec := s.specFromArchetype(*arch, id)
+	return &spec, true, nil
 }
 
-func (s *Spawner) backendOf(spec team.AgentSpec) string {
-	switch {
-	case spec.Backend != "":
-		return spec.Backend
-	case spec.Local:
-		return "local"
-	case spec.SSHTarget != "":
-		return "ssh"
+// countActiveByRole walks current workers and counts those whose role
+// matches. Used to enforce archetype MaxConcurrent.
+func (s *Spawner) countActiveByRole(role string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, pa := range s.provisioned {
+		if pa.agent != nil && pa.agent.Role == role {
+			n++
+		}
 	}
-	return "local"
+	return n
+}
+
+// nextArchetypeID returns the next monotonic id for an archetype role.
+// Counter never decrements: even after a stopped worker frees a slot,
+// the next spawn gets a fresh number so audit history isn't ambiguous.
+func (s *Spawner) nextArchetypeID(role string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.archetypeSeq[role]++
+	return fmt.Sprintf("%s-%d", role, s.archetypeSeq[role])
+}
+
+// specFromArchetype materialises a concrete team.AgentSpec from an
+// archetype template plus a freshly-minted id. Placement strings are
+// expanded back into Local/SSHTarget/Backend fields. The instance
+// inherits the archetype's lifecycle.
+func (s *Spawner) specFromArchetype(arch team.ArchetypeSpec, id string) team.AgentSpec {
+	spec := team.AgentSpec{
+		ID:          id,
+		Role:        arch.Role,
+		Description: arch.Description,
+		WorkingDir:  arch.WorkingDir,
+		Lifecycle:   arch.Lifecycle,
+		MCPs:        arch.MCPs,
+	}
+	switch {
+	case arch.Placement == "local":
+		spec.Local = true
+	case arch.Placement == "fargate":
+		spec.Backend = "fargate"
+	case len(arch.Placement) > 4 && arch.Placement[:4] == "ssh:":
+		spec.SSHTarget = arch.Placement[4:]
+	}
+	return spec
 }
 
 // noopTeardownProvisioner is the placeholder provisioner attached to
@@ -205,10 +282,20 @@ func (noopTeardownProvisioner) Provision(context.Context, provisioner.AgentSpec)
 func (noopTeardownProvisioner) Teardown(context.Context, *provisioner.Agent) error { return nil }
 
 // SpawnByRole provisions a worker for the role and starts its loop.
+//
+// Lookup precedence:
+//  1. team.Agents with this role and not currently running (specific
+//     IDs declared by the operator, typically persistent or otherwise
+//     identity-bound).
+//  2. team.Archetypes with this role: if the current count of running
+//     instances < MaxConcurrent, generate the next sequential id
+//     (<role>-<N>) and provision from the archetype template.
+//
+// Returns an error if neither matches or the archetype is at its cap.
 func (s *Spawner) SpawnByRole(ctx context.Context, role string) (string, error) {
-	spec := s.team.FindAgentByRole(role)
-	if spec == nil {
-		return "", fmt.Errorf("no agent with role %q", role)
+	spec, fromArchetype, err := s.specForRole(role)
+	if err != nil {
+		return "", err
 	}
 	if err := EnsureDir(spec.WorkingDir); err != nil {
 		return "", err
@@ -218,6 +305,7 @@ func (s *Spawner) SpawnByRole(ctx context.Context, role string) (string, error) 
 	if err != nil {
 		return "", err
 	}
+	_ = fromArchetype // currently no per-source behavior; kept for future logging
 
 	// For cloud backends, register the agent immediately with state
 	// "provisioning" and finish provisioning + worker startup in the
@@ -232,7 +320,7 @@ func (s *Spawner) SpawnByRole(ctx context.Context, role string) (string, error) 
 			StartedAt: time.Now(),
 		}
 		s.registry.Add(entry)
-		go s.provisionAndStart(ctx, p, pSpec)
+		go s.provisionAndStart(p, pSpec)
 		return spec.ID, nil
 	}
 
@@ -240,40 +328,49 @@ func (s *Spawner) SpawnByRole(ctx context.Context, role string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	if err := s.startWorker(ctx, p, a); err != nil {
+	if err := s.startWorker(p, a); err != nil {
 		return "", err
 	}
 	return a.ID, nil
 }
 
-// provisionAndStart runs the slow cloud provisioner in the background and
-// flips the registry entry to running once the worker is healthy.
-func (s *Spawner) provisionAndStart(ctx context.Context, p provisioner.Provisioner, spec provisioner.AgentSpec) {
-	a, err := p.Provision(ctx, spec)
+// provisionAndStart runs the slow cloud provisioner in the background
+// and flips the registry entry to running once the worker is healthy.
+// The provisioning step uses s.baseCtx so a long Fargate cold start
+// isn't cancelled by the MCP request returning early.
+func (s *Spawner) provisionAndStart(p provisioner.Provisioner, spec provisioner.AgentSpec) {
+	a, err := p.Provision(s.baseCtx, spec)
 	if err != nil {
 		_ = s.registry.SetState(spec.ID, mcpsrv.StateError)
-		s.publishLog(ctx, spec.ID, fmt.Sprintf("provision failed: %v", err))
+		s.publishLog(spec.ID, fmt.Sprintf("provision failed: %v", err))
 		return
 	}
-	if err := s.startWorker(ctx, p, a); err != nil {
+	if err := s.startWorker(p, a); err != nil {
 		_ = s.registry.SetState(spec.ID, mcpsrv.StateError)
-		s.publishLog(ctx, spec.ID, fmt.Sprintf("worker start failed: %v", err))
+		s.publishLog(spec.ID, fmt.Sprintf("worker start failed: %v", err))
 		_ = p.Teardown(context.Background(), a)
 		return
 	}
-	s.publishLog(ctx, a.ID, "agent ready")
+	s.publishLog(a.ID, "agent ready")
 }
 
 // startWorker is the shared half of SpawnByRole and provisionAndStart: it
 // builds the executor, kicks off the worker loop, subscribes results, and
 // updates the registry entry.
-func (s *Spawner) startWorker(ctx context.Context, p provisioner.Provisioner, a *provisioner.Agent) error {
+//
+// All long-lived goroutines (worker job loop, result subscriber,
+// liveness watcher) are scoped to s.baseCtx — NOT the caller's ctx,
+// which for MCP-triggered spawns is the request context that the MCP
+// framework cancels the moment the tool returns. Tying goroutines to
+// the request ctx made jobs sit forever in early multi-tenant builds;
+// don't reintroduce.
+func (s *Spawner) startWorker(p provisioner.Provisioner, a *provisioner.Agent) error {
 	exec, err := s.executorFor(a)
 	if err != nil {
 		return err
 	}
 	w := &Worker{Agent: a, Bus: s.bus, Executor: exec}
-	if err := w.Start(ctx); err != nil {
+	if err := w.Start(s.baseCtx); err != nil {
 		return err
 	}
 
@@ -289,7 +386,7 @@ func (s *Spawner) startWorker(ctx context.Context, p provisioner.Provisioner, a 
 		StartedAt:   time.Now(),
 	})
 
-	s.subscribeResults(ctx, a.ID)
+	s.subscribeResults(a.ID)
 
 	s.mu.Lock()
 	s.workers[a.ID] = w
@@ -297,16 +394,16 @@ func (s *Spawner) startWorker(ctx context.Context, p provisioner.Provisioner, a 
 	s.mu.Unlock()
 
 	if watcher, ok := p.(provisioner.Watcher); ok {
-		s.startLivenessWatch(ctx, watcher, a)
+		s.startLivenessWatch(watcher, a)
 	}
 	return nil
 }
 
 // startLivenessWatch polls the backend every 15s. On ErrAgentStopped it
 // flips the registry to StateStopped and fails any outstanding jobs for
-// this agent via the bus (so existing leader-side wiring picks them up).
-func (s *Spawner) startLivenessWatch(ctx context.Context, w provisioner.Watcher, a *provisioner.Agent) {
-	subCtx, cancel := context.WithCancel(ctx)
+// this agent via the bus. Lives for s.baseCtx (daemon lifetime).
+func (s *Spawner) startLivenessWatch(w provisioner.Watcher, a *provisioner.Agent) {
+	subCtx, cancel := context.WithCancel(s.baseCtx)
 	s.mu.Lock()
 	prev := s.subs["liveness:"+a.ID]
 	s.subs["liveness:"+a.ID] = cancel
@@ -332,13 +429,13 @@ func (s *Spawner) startLivenessWatch(ctx context.Context, w provisioner.Watcher,
 			if !errors.Is(err, provisioner.ErrAgentStopped) {
 				// Transient — log and keep polling. We don't have a logger
 				// plumbed; surface on the agent's log topic.
-				s.publishLog(subCtx, a.ID, fmt.Sprintf("liveness check error: %v", err))
+				s.publishLog(a.ID, fmt.Sprintf("liveness check error: %v", err))
 				continue
 			}
 			// Agent has stopped on the backend.
 			_ = s.registry.SetState(a.ID, mcpsrv.StateStopped)
 			s.failOutstandingJobs(subCtx, a.ID, "agent stopped")
-			s.publishLog(subCtx, a.ID, "agent stopped on backend; jobs failed")
+			s.publishLog(a.ID, "agent stopped on backend; jobs failed")
 			return
 		}
 	}()
@@ -386,8 +483,8 @@ func (s *Spawner) selectProvisioner(b provisioner.Backend) (provisioner.Provisio
 	}
 }
 
-func (s *Spawner) publishLog(ctx context.Context, agentID, line string) {
-	_ = s.bus.Publish(ctx, bus.Message{
+func (s *Spawner) publishLog(agentID, line string) {
+	_ = s.bus.Publish(s.baseCtx, bus.Message{
 		Topic:   LogsTopic(agentID),
 		Kind:    bus.KindLog,
 		From:    "spawner",
@@ -423,22 +520,41 @@ func (s *Spawner) AssignJob(ctx context.Context, agentID, prompt, contextNote st
 	return jobID, nil
 }
 
-// JobStatus implements mcp.Spawner.
+// JobStatus implements mcp.Spawner. Reads the in-memory jobs table
+// first; on a miss falls back to the audit log so jobs from earlier
+// daemon sessions are still recallable.
 func (s *Spawner) JobStatus(jobID string) (string, string, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	rec, ok := s.jobs[jobID]
+	s.mu.Unlock()
+	if ok {
+		return rec.status, rec.output, true
+	}
+	if s.cfg.AuditSink == nil {
+		return "", "", false
+	}
+	// The audit log isn't indexed by job_id; scan recent-ish events.
+	// 1000 is plenty for most teams and bounds the work.
+	events, err := s.cfg.AuditSink.Query("", time.Time{}, 1000)
+	if err != nil {
+		return "", "", false
+	}
+	job, ok := audit.MaterializeJob(events, jobID)
 	if !ok {
 		return "", "", false
 	}
-	return rec.status, rec.output, true
+	out := job.Output
+	if job.Status == "error" && out == "" {
+		out = job.Error
+	}
+	return job.Status, out, true
 }
 
 // subscribeResults wires a single goroutine per agent that translates
 // KindResult bus messages into the in-process job table the
-// get_results MCP tool reads from.
-func (s *Spawner) subscribeResults(ctx context.Context, agentID string) {
-	subCtx, cancel := context.WithCancel(ctx)
+// get_results MCP tool reads from. Subscription lifetime is s.baseCtx.
+func (s *Spawner) subscribeResults(agentID string) {
+	subCtx, cancel := context.WithCancel(s.baseCtx)
 	ch, err := s.bus.Subscribe(subCtx, ResultsTopic(agentID))
 	if err != nil {
 		cancel()
@@ -541,9 +657,28 @@ func (s *Spawner) IsRunning(agentID string) bool {
 	return ok
 }
 
+// AnyRunningWithRole reports whether at least one instance of an
+// archetype role is currently running. The MCP remove_archetype tool
+// uses this to refuse drops that would orphan workers.
+func (s *Spawner) AnyRunningWithRole(role string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, pa := range s.provisioned {
+		if pa.agent != nil && pa.agent.Role == role {
+			return true
+		}
+	}
+	return false
+}
+
 // Stop tears down all workers and result subscribers. For cloud-backed
 // agents this also calls Teardown so we don't leak running tasks.
+// Cancels the spawner's base context, which stops every long-lived
+// goroutine the spawner owns.
 func (s *Spawner) Stop() {
+	if s.baseCancel != nil {
+		s.baseCancel()
+	}
 	s.mu.Lock()
 	subs := s.subs
 	provisioned := s.provisioned

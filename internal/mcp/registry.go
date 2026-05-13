@@ -26,6 +26,11 @@ type AgentEntry struct {
 	Backend     string     `json:"backend"`
 	TailnetHost string     `json:"tailnet_host,omitempty"`
 	StartedAt   time.Time  `json:"started_at"`
+	// LastSeen is the timestamp of the most recent audit event from
+	// this agent (heartbeat, job lifecycle, anything). Zero when the
+	// agent has never reported in. The leader uses this to spot
+	// stalled or unreachable workers.
+	LastSeen time.Time `json:"last_seen,omitempty"`
 }
 
 // Registry tracks active agents in-process. Thread-safe.
@@ -64,6 +69,17 @@ func (r *Registry) SetState(id string, s AgentState) error {
 	}
 	e.State = s
 	return nil
+}
+
+// SetLastSeen updates the agent's LastSeen timestamp. No-op if the
+// agent isn't registered (avoid creating a phantom entry from a
+// stray audit event).
+func (r *Registry) SetLastSeen(id string, ts time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.agents[id]; ok {
+		e.LastSeen = ts
+	}
 }
 
 func (r *Registry) Get(id string) (AgentEntry, bool) {

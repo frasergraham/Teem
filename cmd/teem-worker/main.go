@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -216,6 +217,12 @@ func run() error {
 	ob.Start(ctx)
 	_ = ob.Emit(audit.Event{Kind: "worker_started", Message: cfg.hostname, Meta: map[string]any{"role": cfg.role}})
 
+	// Heartbeat loop — proves liveness when no jobs are in flight, and
+	// gives the leader a "last_seen" signal on the registry.
+	if cfg.heartbeatInterval > 0 {
+		go w.runHeartbeat(ctx, cfg.heartbeatInterval)
+	}
+
 	srv := &http.Server{
 		Handler:           withAuth(cfg.token, mux),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -242,6 +249,10 @@ type config struct {
 	listenPort string
 	leaderURL  string
 
+	// heartbeatInterval is how often the worker emits a heartbeat
+	// audit event. Zero disables heartbeats.
+	heartbeatInterval time.Duration
+
 	// Git settings; cloning happens only when gitRepoURL is non-empty.
 	gitRepoURL      string
 	gitToken        string
@@ -260,7 +271,8 @@ func loadConfig(portFlag string) (*config, error) {
 		token:           os.Getenv("TEEM_WORKER_TOKEN"),
 		tsAuthKey:       os.Getenv("TS_AUTHKEY"),
 		workingDir:      os.Getenv("TEEM_WORKER_WORKDIR"),
-		leaderURL:       strings.TrimRight(os.Getenv("TEEM_LEADER_URL"), "/"),
+		leaderURL:         strings.TrimRight(os.Getenv("TEEM_LEADER_URL"), "/"),
+		heartbeatInterval: parseHeartbeatInterval(os.Getenv("TEEM_HEARTBEAT_INTERVAL"), 60*time.Second),
 		gitRepoURL:      os.Getenv("TEEM_GIT_REPO_URL"),
 		gitToken:        os.Getenv("TEEM_GIT_TOKEN"),
 		gitUsername:     os.Getenv("TEEM_GIT_USERNAME"),
@@ -385,7 +397,16 @@ func (w *worker) runJob(parent context.Context, req jobRequest, rec *jobRecord) 
 	rec.status = statusRunning
 	rec.mu.Unlock()
 
-	_ = w.outbox.Emit(audit.Event{JobID: req.JobID, Kind: audit.KindJobReceived})
+	cap := jobBodyCap()
+	_ = w.outbox.Emit(audit.Event{
+		JobID: req.JobID,
+		Kind:  audit.KindJobReceived,
+		Meta: map[string]any{
+			"prompt":       truncateString(req.Prompt, cap),
+			"prompt_bytes": len(req.Prompt),
+			"role":         w.role,
+		},
+	})
 
 	out, err := w.exec.Execute(ctx, executor.Job{
 		ID:      req.JobID,
@@ -400,10 +421,25 @@ func (w *worker) runJob(parent context.Context, req jobRequest, rec *jobRecord) 
 	rec.finish(out, errMsg)
 
 	if errMsg != "" {
-		_ = w.outbox.Emit(audit.Event{JobID: req.JobID, Kind: audit.KindJobError, Message: errMsg})
+		_ = w.outbox.Emit(audit.Event{
+			JobID:   req.JobID,
+			Kind:    audit.KindJobError,
+			Message: errMsg,
+			Meta: map[string]any{
+				"output":       truncateString(out, cap),
+				"output_bytes": len(out),
+			},
+		})
 		return
 	}
-	_ = w.outbox.Emit(audit.Event{JobID: req.JobID, Kind: audit.KindJobComplete, Meta: map[string]any{"output_bytes": len(out)}})
+	_ = w.outbox.Emit(audit.Event{
+		JobID: req.JobID,
+		Kind:  audit.KindJobComplete,
+		Meta: map[string]any{
+			"output":       truncateString(out, cap),
+			"output_bytes": len(out),
+		},
+	})
 
 	// Auto-push the agent's branch when configured. Failures are
 	// surfaced via audit but don't fail the job — a push retry is
@@ -473,6 +509,73 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// runHeartbeat ticks every interval and emits a heartbeat audit event.
+// Stops when ctx is cancelled (daemon shutdown). The event meta
+// includes in-flight job count and uptime so the leader can spot a
+// busy-but-not-progressing worker as well as a stalled one.
+func (w *worker) runHeartbeat(ctx context.Context, interval time.Duration) {
+	start := time.Now()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		_ = w.outbox.Emit(audit.Event{
+			Kind: audit.KindHeartbeat,
+			Meta: map[string]any{
+				"in_flight": w.inFlight.Load(),
+				"uptime_s":  int(time.Since(start).Seconds()),
+			},
+		})
+	}
+}
+
+// parseHeartbeatInterval reads a Go-duration string from env. "0",
+// "off", or "disabled" turn heartbeats off. An invalid value falls back
+// to def with a warning to stderr.
+func parseHeartbeatInterval(s string, def time.Duration) time.Duration {
+	s = strings.TrimSpace(strings.ToLower(s))
+	switch s {
+	case "":
+		return def
+	case "0", "off", "disabled", "false", "no":
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		fmt.Fprintf(os.Stderr, "[teem-worker] bad TEEM_HEARTBEAT_INTERVAL %q; using %s\n", s, def)
+		return def
+	}
+	return d
+}
+
+// jobBodyCap returns the maximum size of prompt / output strings that
+// get embedded in audit events. Reads TEEM_JOB_BODY_CAP_BYTES; default
+// 64 KiB. 0 or negative disables truncation (full body is logged).
+func jobBodyCap() int {
+	v := strings.TrimSpace(os.Getenv("TEEM_JOB_BODY_CAP_BYTES"))
+	if v == "" {
+		return 64 * 1024
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 64 * 1024
+	}
+	return n
+}
+
+// truncateString clamps s to cap bytes, appending a "<truncated>"
+// marker when it actually trimmed something. cap <= 0 disables.
+func truncateString(s string, cap int) string {
+	if cap <= 0 || len(s) <= cap {
+		return s
+	}
+	return s[:cap] + "\n…<truncated>"
 }
 
 // parseBool parses a permissive boolean (1/true/yes/on, 0/false/no/off,

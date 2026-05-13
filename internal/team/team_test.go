@@ -26,16 +26,15 @@ team:
     auth_key_env: TS_AUTHKEY
   leader:
     system_prompt: "Ship the MVP."
-  agents:
-    - id: be
-      role: backend
-      description: "Go services."
-      local: true
-      working_dir: /tmp/be
-    - id: fe
-      role: frontend
-      description: "React."
-      ssh_target: user@frontbox
+  archetypes:
+    - role: worker
+      description: "Implements features."
+      placement: local
+      max_concurrent: 5
+    - role: reviewer
+      description: "Reads diffs."
+      placement: local
+      max_concurrent: 3
 `)
 	team, err := Load(path)
 	if err != nil {
@@ -47,11 +46,11 @@ team:
 	if team.Tailnet.Hostname != "alpha-leader" {
 		t.Errorf("hostname: got %q", team.Tailnet.Hostname)
 	}
-	if len(team.Agents) != 2 {
-		t.Fatalf("agents: got %d", len(team.Agents))
+	if len(team.Archetypes) != 2 {
+		t.Fatalf("archetypes: got %d", len(team.Archetypes))
 	}
 	prompt := team.LeaderSystemPrompt()
-	for _, want := range []string{"backend", "frontend", "Ship the MVP."} {
+	for _, want := range []string{"worker", "reviewer", "Ship the MVP."} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("LeaderSystemPrompt missing %q", want)
 		}
@@ -64,6 +63,10 @@ team:
   name: "Big Cats!"
   leader:
     system_prompt: "x"
+  archetypes:
+    - role: worker
+      placement: local
+      max_concurrent: 1
 `)
 	team, err := Load(path)
 	if err != nil {
@@ -79,60 +82,69 @@ func TestValidate_Errors(t *testing.T) {
 		name, body, want string
 	}{
 		{
-			name: "duplicate id",
+			name: "no archetypes",
 			body: `
 team:
   name: x
   leader: {system_prompt: p}
-  agents:
-    - {id: a, role: r, local: true}
-    - {id: a, role: r, local: true}
 `,
-			want: "duplicate id",
+			want: "at least one archetype",
 		},
 		{
-			name: "no placement",
+			name: "duplicate role",
 			body: `
 team:
   name: x
   leader: {system_prompt: p}
-  agents:
-    - {id: a, role: r}
+  archetypes:
+    - {role: r, placement: local, max_concurrent: 1}
+    - {role: r, placement: local, max_concurrent: 1}
 `,
-			want: "must set exactly one",
+			want: "duplicate role",
 		},
 		{
-			name: "both placements",
+			name: "missing max_concurrent",
 			body: `
 team:
   name: x
   leader: {system_prompt: p}
-  agents:
-    - {id: a, role: r, local: true, ssh_target: u@h}
+  archetypes:
+    - {role: r, placement: local}
 `,
-			want: "set exactly one",
+			want: "max_concurrent must be > 0",
 		},
 		{
-			name: "unknown backend",
+			name: "unknown placement",
 			body: `
 team:
   name: x
   leader: {system_prompt: p}
-  agents:
-    - {id: a, role: r, backend: heroku}
+  archetypes:
+    - {role: r, placement: heroku, max_concurrent: 1}
 `,
-			want: "unknown backend",
+			want: "unknown placement",
 		},
 		{
-			name: "backend with ssh_target",
+			name: "ssh missing working_dir",
 			body: `
 team:
   name: x
   leader: {system_prompt: p}
-  agents:
-    - {id: a, role: r, backend: fargate, ssh_target: u@h}
+  archetypes:
+    - {role: r, placement: "ssh:u@h", max_concurrent: 1}
 `,
-			want: "set exactly one",
+			want: "ssh placement requires working_dir",
+		},
+		{
+			name: "unknown lifecycle",
+			body: `
+team:
+  name: x
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: r, placement: local, max_concurrent: 1, lifecycle: weird}
+`,
+			want: "unknown lifecycle",
 		},
 	}
 	for _, tc := range cases {
