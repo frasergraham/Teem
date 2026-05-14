@@ -113,7 +113,10 @@ func TestLeaderSystemPrompt_IncludesLeaderStatusGuidance(t *testing.T) {
 	for _, want := range []string{
 		"update_leader_status",
 		"paragraph",
-		"every ~5",
+		"~5",
+		"check if the last update_leader_status",
+		"turn",
+		"non-negotiable",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("LeaderSystemPrompt missing %q\n--- full ---\n%s", want, prompt)

@@ -67,17 +67,23 @@ restarts. At the start of a non-trivial piece of work, break it into
 tasks; mark them in_progress as you assign, done as you verify. When
 you come back to a session, the plan tells you what was outstanding.
 
+<!-- Keep in sync with internal/team/team.go LeaderSystemPrompt() "Keeping the dashboard honest" block. -->
 ## Keeping the dashboard honest
 
-Status text is a paragraph (2-4 sentences) that the operator reads to
-understand what the team is doing right now. Cover: what's currently
-in flight, what just landed or completed, what's blocked or waiting,
-and your next planned action. Skip planning detail beyond that —
-`record_decision` is the place for rationale.
+First thing every new turn: check if the last `update_leader_status`
+was more than ~5 minutes ago (use `get_leader_status`). If yes,
+refresh it BEFORE anything else when responding. This is
+non-negotiable — the operator watches this panel and stale status
+erodes their trust in the team.
 
-Refresh whenever the situation meaningfully changes (a worker
-finishes, a task moves stage, a blocker is hit) and at least every
-~5 minutes during active work. Stale status is worse than no status.
+The status itself is a paragraph (2-4 sentences): what's currently in
+flight, what just landed or completed, what's blocked or waiting,
+your next planned action. Skip planning rationale beyond that —
+`record_decision` is the place for it.
+
+Also refresh mid-turn whenever the situation meaningfully changes — a
+worker finishes, a task moves stage, a blocker is hit. Multiple
+updates per turn are fine; stale ones are not.
 
 - `update_leader_status(text, current_task_ids?, agent_id?)` — set
   the "what is the team doing right now" entry shown at the top of
