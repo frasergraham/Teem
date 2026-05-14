@@ -14,6 +14,7 @@ import (
 	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
+	"github.com/frasergraham/teem/internal/leaderstatus"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
 	"github.com/frasergraham/teem/internal/team"
@@ -45,6 +46,7 @@ type Server struct {
 	plan           *plan.Plan
 	notes          *notes.Inbox
 	archMem        *archmem.Store
+	leaderStatus   *leaderstatus.Store
 	transcriptsDir string
 }
 
@@ -72,6 +74,11 @@ type Config struct {
 	// read_archetype_memory / append_archetype_memory tools return
 	// an error explaining the feature is unconfigured.
 	ArchMem *archmem.Store
+	// LeaderStatus persists the "what is each leader-tier agent
+	// doing right now" entries shown at the top of the dashboard.
+	// When nil the update_leader_status / get_leader_status tools
+	// return a clear error.
+	LeaderStatus *leaderstatus.Store
 }
 
 // New builds an orchestrator MCP server. Call Serve to start serving on a
@@ -95,6 +102,7 @@ func New(cfg Config) (*Server, error) {
 		plan:           cfg.Plan,
 		notes:          cfg.Notes,
 		archMem:        cfg.ArchMem,
+		leaderStatus:   cfg.LeaderStatus,
 		transcriptsDir: cfg.TranscriptsDir,
 	}
 	s.registerTools()
@@ -237,7 +245,7 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("update_task",
-			mcpgo.WithDescription("Mutate a task. Any subset of fields can be supplied; omitted fields are left as-is. Add evidence (job_ids that worked on this task) via add_evidence."),
+			mcpgo.WithDescription("Mutate a task's status, assignee, notes, depends_on, or evidence. Any subset of fields can be supplied; omitted fields are left as-is. To change the pipeline stage (proposed/specced/building/in_review/merging/verified/blocked/abandoned), use set_task_stage instead — it enforces the transitions matrix."),
 			mcpgo.WithString("id", mcpgo.Required(), mcpgo.Description("Task id.")),
 			mcpgo.WithString("status", mcpgo.Description("New status: pending, in_progress, blocked, done, abandoned.")),
 			mcpgo.WithString("assigned_to", mcpgo.Description("Agent id currently working on this task.")),
@@ -249,8 +257,9 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("list_tasks",
-			mcpgo.WithDescription("List tasks in the plan, optionally filtered. Returns the materialised view (title, status, assigned_to, depends_on, evidence, timestamps)."),
+			mcpgo.WithDescription("List tasks in the plan, optionally filtered. Returns the materialised view (title, status, stage, stage_entered_at, assigned_to, depends_on, evidence, timestamps)."),
 			mcpgo.WithString("status", mcpgo.Description("Restrict to one status.")),
+			mcpgo.WithString("stage", mcpgo.Description("Restrict to one stage (proposed/specced/building/in_review/merging/verified/blocked/abandoned).")),
 			mcpgo.WithString("parent_id", mcpgo.Description("Only direct children of this task.")),
 			mcpgo.WithString("open_only", mcpgo.Description("If 'true', skip done/abandoned tasks.")),
 		),
@@ -295,5 +304,44 @@ func (s *Server) registerTools() {
 			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Note body. One or more lines of markdown.")),
 		),
 		s.handleWriteUserNote,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("update_leader_status",
+			mcpgo.WithDescription("Set the short, human-readable \"what am I doing right now\" line shown at the top of the dashboard. Keep ≤120 chars; answer the right-now question (\"Reviewing T1+T6 diff\", \"Spawning reviewer-7 for T4\"). Planning detail belongs in record_decision. agent_id defaults to 'leader' for the Leader; PM-style workers should pass their own id."),
+			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Status line text. One sentence.")),
+			mcpgo.WithString("current_task_ids", mcpgo.Description("Optional comma-separated task ids being actively worked.")),
+			mcpgo.WithString("agent_id", mcpgo.Description("Optional. Defaults to 'leader'.")),
+		),
+		s.handleUpdateLeaderStatus,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("get_leader_status",
+			mcpgo.WithDescription("Read back the per-agent status board. Returns the map of agent_id → {text, updated_at, current_task_ids}."),
+		),
+		s.handleGetLeaderStatus,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("set_task_stage",
+			mcpgo.WithDescription("Move a task to a new pipeline stage: proposed, specced, building, in_review, merging, verified, blocked, abandoned. Stage is the lifecycle marker the dashboard pipeline view uses; Status (open/done) is separate. Invalid transitions (e.g. verified → proposed) return an error."),
+			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id.")),
+			mcpgo.WithString("stage", mcpgo.Required(), mcpgo.Description("Target stage.")),
+		),
+		s.handleSetTaskStage,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("record_decision",
+			mcpgo.WithDescription("Record a non-trivial decision against a task: the \"why\" behind a choice that wouldn't be obvious from the diff alone. Persisted to the audit log under decision_note and rendered in the task's flow view. Use this for design choices, trade-offs picked, vendored deps, etc."),
+			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id this decision attaches to.")),
+			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Decision text — markdown allowed.")),
+		),
+		s.handleRecordDecision,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("record_blocker",
+			mcpgo.WithDescription("Record a blocker against a task. Atomic effect: the task moves to Stage='blocked' AND Status='blocked', and a blocker_note event lands in audit. Use when a worker reports unblockable issues that need leader or human action."),
+			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id being blocked.")),
+			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("What's blocking and what's needed to unblock.")),
+		),
+		s.handleRecordBlocker,
 	)
 }

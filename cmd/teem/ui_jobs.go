@@ -101,8 +101,8 @@ func (d *daemon) renderAgentJobs(w http.ResponseWriter, _ *http.Request, rt *reg
 					StartedAgo:    agoShort(j.StartedAt),
 					StartedShort:  timeShort(j.StartedAt),
 					Duration:      durShort(j.Duration()),
-					Prompt:        truncateMid(j.Prompt, 120),
-					Summary:       truncateMid(j.Summary, 200),
+					Prompt:        j.Prompt,
+					Summary:       j.Summary,
 					JobURL:        fmt.Sprintf("/teams/%s/jobs/%s", rt.team.Name, j.JobID),
 					HasTranscript: j.TranscriptBytes > 0,
 				})

@@ -25,6 +25,7 @@ import (
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
 	"github.com/frasergraham/teem/internal/inflight"
+	"github.com/frasergraham/teem/internal/leaderstatus"
 	"github.com/frasergraham/teem/internal/llm"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/notes"
@@ -285,6 +286,7 @@ type registeredTeam struct {
 	registry      *mcpsrv.Registry
 	archMem       *archmem.Store
 	archMemCancel context.CancelFunc
+	leaderStatus  *leaderstatus.Store
 	leaderURL     string
 	registered    time.Time
 	// transcriptsDir is the leader-side mirror root for worker
@@ -733,6 +735,14 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		return nil, fmt.Errorf("notes: %w", err)
 	}
 
+	leaderStatusStore, err := leaderstatus.Open(defaultLeaderStatusPath(t.Name))
+	if err != nil {
+		_ = auditSink.Close()
+		_ = planStore.Close()
+		_ = notesInbox.Close()
+		return nil, fmt.Errorf("leader_status: %w", err)
+	}
+
 	// In-flight log for durability. Opened before reconcile so the
 	// next steps can both (a) emit job_interrupted for orphans and
 	// (b) hand it to the spawner for future jobs.
@@ -810,6 +820,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		Notes:          notesInbox,
 		TranscriptsDir: transcriptsDir,
 		ArchMem:        archMemStore,
+		LeaderStatus:   leaderStatusStore,
 	})
 	if err != nil {
 		_ = auditSink.Close()
@@ -972,10 +983,17 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		registry:       reg,
 		archMem:        archMemStore,
 		archMemCancel:  archMemCancel,
+		leaderStatus:   leaderStatusStore,
 		leaderURL:      leaderURL,
 		registered:     time.Now(),
 		transcriptsDir: transcriptsDir,
 	}, nil
+}
+
+// defaultLeaderStatusPath returns the per-team leader-status board
+// file path, alongside plan.jsonl and notes.jsonl.
+func defaultLeaderStatusPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "leader_status.json")
 }
 
 // lookupRole returns the role for agentID from the registry, or ""
@@ -1130,6 +1148,10 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		// SSR jobs pages — unauth like the dashboard (tailnet boundary).
 		if agentID, ok := resolveAgentJobsRoute(suffix); ok {
 			d.renderAgentJobs(w, r, rt, agentID)
+			return
+		}
+		if taskID, ok := resolveTaskFlowRoute(suffix); ok {
+			d.renderTaskFlow(w, r, rt, taskID)
 			return
 		}
 		if jobID, ok := resolveJobDetailRoute(suffix); ok {
