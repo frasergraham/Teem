@@ -91,11 +91,11 @@ func TestSpawnAgent_NameReincarnates(t *testing.T) {
 	if err := sp.StopAgent(context.Background(), id1); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	// Branch survives the stop — that's what makes reincarnation
-	// meaningful.
-	if !branchExists(t, repo, "teem/worker-ada") {
-		t.Fatalf("branch teem/worker-ada should survive stop_agent (reincarnation depends on it)")
-	}
+	// Auto-cleanup on retire deletes the branch when its tip is
+	// fully merged into main (the fresh-spawn case here: branch tip
+	// equals main HEAD, so it's trivially merged). Reincarnation
+	// still works — the second Spawn recreates the branch from main
+	// under the same name, see EnsureWorktree.
 
 	id2, err := sp.Spawn(context.Background(), "worker", "ada")
 	if err != nil {

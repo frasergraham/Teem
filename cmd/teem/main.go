@@ -53,6 +53,8 @@ func main() {
 		err = runPulse(args)
 	case "agent":
 		err = runAgent(args)
+	case "prune-branches":
+		err = runPruneBranches(args)
 	case "version":
 		fmt.Println(versionString())
 	case "-h", "--help", "help":
@@ -80,6 +82,7 @@ Usage:
   teem audit   [--agent ID] [--since RFC3339] [--limit 50] [--follow]
   teem pulse   <start|stop|pause|resume|tick|status> [--team t] [--interval 5m]
   teem agent   <list|show|update> [<archetype>] [--prompt|--memory] [--team t]
+  teem prune-branches [--team t] [--yes] [--force] [--retired-age 7d]
   teem version
 
 Run 'teem <subcommand> -h' for flags.

@@ -413,6 +413,14 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		safeGo("peeraware.loop", func() { d.runPeerAware(peerInterval) })
 	}
 
+	// Branch cleanup: sweep dead teem/* branches every 12h by default.
+	// Set TEEM_PRUNE_INTERVAL=0 to disable. Default is on with logging
+	// so operators don't accumulate hundreds of stale branches.
+	if pruneInterval := pruneSweepConfig(); pruneInterval > 0 {
+		fmt.Fprintf(os.Stderr, "[teemd] prune-branches: interval=%s\n", pruneInterval)
+		safeGo("prune.sweep", func() { d.runPruneSweep(pruneInterval) })
+	}
+
 	serverErr := make(chan error, 1)
 	go func() {
 		err := httpSrv.Serve(listener)
@@ -1074,11 +1082,10 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	}
 
 	// Wake hook: publish on the in-process leader.wake bus topic
-	// whenever a worker emits a job-terminal event. Pulse already
-	// debounces via NudgeFromAudit (called by the same handler hook);
-	// this is the additive T6 signal future chat clients can subscribe
-	// to. Today no chat client consumes it because runChat exec()s
-	// directly into claude.
+	// whenever a worker emits a job-terminal event. Today no chat
+	// client consumes it because runChat exec()s directly into claude;
+	// kept as an additive T6 signal future chat clients can subscribe
+	// to.
 	wakeHook := func(events []audit.Event) {
 		for _, e := range events {
 			if !isWakeKind(e.Kind) {
@@ -1187,11 +1194,13 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		spawner:   spawner,
 		auditSink: auditSink,
 		// Audit handler fans every POST out to: write to disk, bump
-		// the agent's LastSeen, nudge Pulse (debounced tick), AND
-		// publish on bus topic "leader.wake" for terminal worker
-		// events. Note the double-publish: NudgeFromAudit + wakeHook
-		// run on every accepted POST.
-		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(pulseInst.NudgeFromAudit, wakeHook, stopHook, archMemHook, channelHook)),
+		// the agent's LastSeen, publish on bus topic "leader.wake" for
+		// terminal worker events, reconcile worker_stopped, append to
+		// archetype memory, and push channel notifications to any
+		// connected leader chat. Pulse no longer subscribes here —
+		// channels handle event-driven wakes for connected leaders;
+		// pulse handles disconnected timer wakes.
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook)),
 		plan:           planStore,
 		notes:          notesInbox,
 		pulse:          pulseInst,
@@ -1243,9 +1252,8 @@ func shortSummary(s string) string {
 }
 
 // isWakeKind decides whether a worker event should fire a leader.wake
-// publish. Mirrors pulse.isInterestingKind but is intentionally
-// independent — different consumers (a future chat banner) may want
-// different signals.
+// publish. Different consumers (a future chat banner) may want
+// different signals than channels uses.
 func isWakeKind(k audit.Kind) bool {
 	switch k {
 	case audit.KindJobComplete, audit.KindJobError, audit.KindJobTranscriptReady, audit.KindWorkerStopped:

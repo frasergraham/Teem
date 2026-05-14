@@ -159,6 +159,7 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 		}
 		if branch != "" {
 			a.Cloud = &CloudPlacement{TaskARN: workDir}
+			a.WorktreeBranch = branch
 		}
 		return a, nil
 	}
@@ -245,6 +246,7 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 		// reuse it rather than introduce another struct for a single
 		// string.
 		a.Cloud = &CloudPlacement{TaskARN: workDir}
+		a.WorktreeBranch = branch
 	}
 	return a, nil
 }

@@ -59,6 +59,12 @@ type Agent struct {
 	MCPs      []team.MCPRef
 	// Cloud holds backend-specific identifiers needed for Teardown.
 	Cloud *CloudPlacement
+	// WorktreeBranch, when non-empty, names the local branch the
+	// LocalProvisioner created for this agent's worktree (always
+	// `teem/<id>`). Used by spawner cleanup hooks to delete the branch
+	// when the worker stops; empty for backends that don't own a
+	// per-agent local branch (Fargate, SSH, persistent local).
+	WorktreeBranch string
 	// Stopped is true when the worker has already terminated under
 	// its own steam (typically the self-exit-after-idle path). The
 	// LocalProvisioner uses this to skip the /shutdown POST and

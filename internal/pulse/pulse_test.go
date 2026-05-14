@@ -275,43 +275,6 @@ func TestPulse_IdleBackoffMultipliesInterval(t *testing.T) {
 	}
 }
 
-func TestPulse_NudgeTriggersTick(t *testing.T) {
-	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
-	p.cfg.Interval = 10 * time.Second // long enough that the timer doesn't fire during test
-	p.cfg.DebounceWindow = 50 * time.Millisecond
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	p.Start(ctx)
-	defer p.Stop()
-
-	// Drain the immediate startup tick before checking nudge behavior.
-	time.Sleep(200 * time.Millisecond)
-	startEvents, _ := sink.Query("leader", time.Time{}, 0)
-	startCount := len(startEvents)
-
-	// Now nudge — should produce one more tick after the debounce.
-	p.NudgeFromAudit([]audit.Event{
-		{Kind: audit.KindJobComplete, AgentID: "worker-1", JobID: "j7"},
-	})
-	time.Sleep(300 * time.Millisecond)
-	events, _ := sink.Query("leader", time.Time{}, 0)
-	if len(events) <= startCount {
-		t.Errorf("nudge did not produce a tick; events before=%d after=%d", startCount, len(events))
-	}
-}
-
-func TestPulse_NudgeIgnoredIfNotRunning(t *testing.T) {
-	p, _ := newTestPulse(t, writeFakeClaude(t, "ack"), true)
-	// NudgeFromAudit should be a no-op when Pulse hasn't been Started.
-	p.NudgeFromAudit([]audit.Event{{Kind: audit.KindJobComplete, AgentID: "w"}})
-	// If it didn't panic and didn't tick (no audit), we're good. The
-	// real check: TickCount didn't move.
-	if p.TickCount() != 0 {
-		t.Errorf("nudge while stopped should not tick; got TickCount=%d", p.TickCount())
-	}
-}
-
 func TestPulse_RunningFlagFile(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{
@@ -366,15 +329,3 @@ func TestPulse_RunningFlagFile(t *testing.T) {
 	}
 }
 
-func TestPulse_IsInterestingKind(t *testing.T) {
-	for _, k := range []audit.Kind{audit.KindJobComplete, audit.KindJobError, audit.KindNote} {
-		if !isInterestingKind(k) {
-			t.Errorf("%q should be interesting", k)
-		}
-	}
-	for _, k := range []audit.Kind{audit.KindHeartbeat, audit.KindJobReceived, "pulse_tick"} {
-		if isInterestingKind(k) {
-			t.Errorf("%q should NOT be interesting (causes feedback loop)", k)
-		}
-	}
-}

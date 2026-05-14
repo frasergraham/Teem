@@ -18,6 +18,7 @@ import (
 	"github.com/frasergraham/teem/internal/inflight"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/provisioner"
+	"github.com/frasergraham/teem/internal/pruner"
 	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/team"
@@ -946,8 +947,36 @@ func (s *Spawner) StopAgent(ctx context.Context, agentID string) error {
 		if err := pa.provisioner.Teardown(tdCtx, pa.agent); err != nil {
 			return fmt.Errorf("teardown %s: %w", agentID, err)
 		}
+		s.cleanupMergedBranch(ctx, agentID, pa.agent)
 	}
 	return nil
+}
+
+// cleanupMergedBranch removes the worktree branch the local
+// provisioner created for this agent, but only if it is fully merged
+// into main. Skipped entirely for backends that do not own a per-agent
+// local branch (Fargate, SSH, persistent local agents, or workers
+// with an explicit working_dir): `a.WorktreeBranch` is empty in those
+// cases. Unmerged branches are retained — they'll either be cleaned
+// up by a follow-up `teem prune-branches --force` or by an integrator
+// merging the work later. Best-effort: errors log on the agent's bus.
+func (s *Spawner) cleanupMergedBranch(ctx context.Context, agentID string, a *provisioner.Agent) {
+	if s.cfg.RepoRoot == "" {
+		return
+	}
+	if a == nil || a.WorktreeBranch == "" {
+		return
+	}
+	branch := a.WorktreeBranch
+	if !pruner.IsMerged(ctx, s.cfg.RepoRoot, branch, "main") {
+		s.publishLog(agentID, fmt.Sprintf("retained branch %s: unmerged work", branch))
+		return
+	}
+	if err := pruner.DeleteBranch(ctx, s.cfg.RepoRoot, branch, false); err != nil {
+		s.publishLog(agentID, fmt.Sprintf("auto-cleanup branch %s: %v", branch, err))
+		return
+	}
+	s.publishLog(agentID, fmt.Sprintf("auto-cleanup: deleted merged branch %s", branch))
 }
 
 // HandleWorkerStopped reconciles leader state with a worker that
@@ -996,6 +1025,9 @@ func (s *Spawner) HandleWorkerStopped(ctx context.Context, agentID string) {
 	defer cancel()
 	if err := pa.provisioner.Teardown(tdCtx, pa.agent); err != nil {
 		s.publishLog(agentID, fmt.Sprintf("post-stop teardown: %v", err))
+	}
+	if !pa.agent.IsPersistent() {
+		s.cleanupMergedBranch(ctx, agentID, pa.agent)
 	}
 }
 
