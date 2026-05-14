@@ -8,6 +8,7 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/frasergraham/teem/internal/bus"
+	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/team"
 )
 
@@ -17,10 +18,23 @@ import (
 type fakeSpawner struct {
 	running map[string]bool
 	roles   map[string]string // agent_id → role
+	roster  []roster.Entry
 }
 
-func (f *fakeSpawner) SpawnByRole(ctx context.Context, role string) (string, error) {
+func (f *fakeSpawner) Spawn(ctx context.Context, role, name string) (string, error) {
 	return "", nil
+}
+func (f *fakeSpawner) RosterSnapshot(role string) []roster.Entry {
+	if role == "" {
+		return f.roster
+	}
+	out := make([]roster.Entry, 0, len(f.roster))
+	for _, e := range f.roster {
+		if e.Role == role {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 func (f *fakeSpawner) AssignJob(ctx context.Context, agentID, prompt, contextNote string) (string, error) {
 	return "", nil
@@ -73,6 +87,8 @@ func callTool(t *testing.T, srv *Server, name string, args map[string]any) *mcpg
 		res, err = srv.handleStopAgent(context.Background(), req)
 	case "read_team":
 		res, err = srv.handleReadTeam(context.Background(), req)
+	case "list_roster":
+		res, err = srv.handleListRoster(context.Background(), req)
 	default:
 		t.Fatalf("no test dispatch for tool %q", name)
 	}

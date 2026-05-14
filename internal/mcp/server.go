@@ -17,18 +17,27 @@ import (
 	"github.com/frasergraham/teem/internal/leaderstatus"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
+	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/team"
 )
 
 // Spawner is the abstraction the spawn_agent MCP tool calls into.
 // Implemented in internal/agent to avoid an import cycle.
+//
+// Spawn takes an optional operator-supplied name. When name == ""
+// the allocator picks an id from the role's wordlist (current
+// behavior). When name is set the worker is spawned under that
+// exact id — reincarnating a prior worker if the name was already
+// retired, idempotently returning the existing id if it's already
+// live, or rejecting if the name belongs to a different role.
 type Spawner interface {
-	SpawnByRole(ctx context.Context, role string) (string, error)
+	Spawn(ctx context.Context, role, name string) (string, error)
 	AssignJob(ctx context.Context, agentID, prompt, contextNote string) (string, error)
 	JobStatus(jobID string) (status string, output string, found bool)
 	StopAgent(ctx context.Context, agentID string) error
 	IsRunning(agentID string) bool
 	AnyRunningWithRole(role string) bool
+	RosterSnapshot(role string) []roster.Entry
 }
 
 // Server bundles the MCP server, its handler, and the dependencies its
@@ -140,10 +149,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) registerTools() {
 	s.core.AddTool(
 		mcpgo.NewTool("spawn_agent",
-			mcpgo.WithDescription("Spawn a worker agent of the given role from the team roster."),
+			mcpgo.WithDescription("Spawn a worker agent of the given role from the team roster. Pass `name` to choose the worker's identity: a previously-retired name reincarnates the same worker (its branch teem/<name> and roster history come back); a name already in use returns idempotently; an unknown name is registered. Omit `name` to let the daemon pick from the wordlist."),
 			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Role name as declared in the team YAML.")),
+			mcpgo.WithString("name", mcpgo.Description("Optional. Spawn under this exact name. Must match ^[a-z][a-z0-9]{0,30}$. Reincarnates a prior worker with the same name, idempotently returns an already-live id, or registers a fresh entry.")),
 		),
 		s.handleSpawnAgent,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("list_roster",
+			mcpgo.WithDescription("Return the persistent roster of named workers for this team. Use this before spawn_agent to choose a previously-used name (reincarnation) or see what names are taken. Each entry includes {name, role, first_seen, last_seen, in_use, source} where source is one of 'wordlist' (allocator-picked), 'named' (operator-supplied), 'legacy' (migrated pre-T9 id)."),
+			mcpgo.WithString("role", mcpgo.Description("Optional. Restrict the result to one role.")),
+		),
+		s.handleListRoster,
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("assign_job",
@@ -211,7 +228,7 @@ func (s *Server) registerTools() {
 	s.core.AddTool(
 		mcpgo.NewTool("stop_agent",
 			mcpgo.WithDescription("Tear down a running worker instance. Cancels its result subscriber and calls Teardown on the provisioner (unless the archetype is persistent). The archetype stays in the roster."),
-			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the running instance, e.g. worker-3.")),
+			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the running instance, e.g. worker-ada.")),
 		),
 		s.handleStopAgent,
 	)
@@ -307,7 +324,7 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("update_leader_status",
-			mcpgo.WithDescription("Set the short, human-readable \"what am I doing right now\" line shown at the top of the dashboard. Keep ≤120 chars; answer the right-now question (\"Reviewing T1+T6 diff\", \"Spawning reviewer-7 for T4\"). Planning detail belongs in record_decision. agent_id defaults to 'leader' for the Leader; PM-style workers should pass their own id."),
+			mcpgo.WithDescription("Set the short, human-readable \"what am I doing right now\" line shown at the top of the dashboard. Keep ≤120 chars; answer the right-now question (\"Reviewing T1+T6 diff\", \"Spawning reviewer-blake for T4\"). Planning detail belongs in record_decision. agent_id defaults to 'leader' for the Leader; PM-style workers should pass their own id."),
 			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Status line text. One sentence.")),
 			mcpgo.WithString("current_task_ids", mcpgo.Description("Optional comma-separated task ids being actively worked.")),
 			mcpgo.WithString("agent_id", mcpgo.Description("Optional. Defaults to 'leader'.")),

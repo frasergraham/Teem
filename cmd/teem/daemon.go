@@ -31,6 +31,7 @@ import (
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
 	"github.com/frasergraham/teem/internal/pulse"
+	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/tailnet"
 	"github.com/frasergraham/teem/internal/team"
@@ -793,6 +794,34 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	})
 	archMemStore.SweepTmp()
 
+	transcriptsDir := filepath.Join(defaultStateDir(t.Name), "transcripts")
+
+	// Roster: per-team worker-name allocator. On first open after the
+	// T9 rollout (no existing roster.json), migrate legacy
+	// `<role>-N` ids from the previous archetype-seq.json counter
+	// and any historical transcripts subdirs so they participate in
+	// reincarnation. The legacy file is left in place — we no longer
+	// read it, but keeping it makes a downgrade non-destructive.
+	rosterPath := defaultRosterPath(t.Name)
+	rost, err := roster.Open(rosterPath)
+	if err != nil {
+		_ = auditSink.Close()
+		_ = planStore.Close()
+		_ = notesInbox.Close()
+		return nil, fmt.Errorf("roster: %w", err)
+	}
+	roleList := func() []string {
+		archs := t.SnapshotArchetypes()
+		roles := make([]string, 0, len(archs))
+		for _, a := range archs {
+			roles = append(roles, a.Role)
+		}
+		return roles
+	}()
+	if n := rost.MigrateLegacy(defaultArchetypeSeqPath(t.Name), transcriptsDir, roleList, nil); n > 0 {
+		fmt.Fprintf(os.Stderr, "[teemd] %s: migrated %d legacy worker id(s) into the roster\n", t.Name, n)
+	}
+
 	spawner := agent.NewSpawner(d.baseCtx, t, bs, reg, agent.Config{
 		HTTPClient:          d.httpClient,
 		WorkerToken:         d.token,
@@ -802,13 +831,11 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		LeaderURL:           leaderURL,
 		StateStore:          stateStore,
 		AuditSink:           auditSink,
-		ArchetypeSeqPath:    defaultArchetypeSeqPath(t.Name),
+		Roster:              rost,
 		InFlight:            inFlightLog,
 		SocketDir:           defaultSocketDir(t.Name),
 		LoadArchetypeMemory: archMemStore.Load,
 	})
-
-	transcriptsDir := filepath.Join(defaultStateDir(t.Name), "transcripts")
 
 	srv, err := mcpsrv.New(mcpsrv.Config{
 		Bus:            bs,

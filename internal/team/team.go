@@ -24,15 +24,16 @@ type Team struct {
 
 // ArchetypeSpec is a template for spawning worker instances of a given
 // role. The leader decides how many to spawn, up to MaxConcurrent.
-// Auto-generated instance IDs are `<role>-<N>` where N is a monotonic
-// counter (IDs never reused — audit history stays unambiguous).
+// Auto-generated instance IDs are `<role>-<name>` where <name> comes
+// from the wordlist allocator (internal/roster). Names persist across
+// the worker's lifetime and are returned to the pool on stop.
 type ArchetypeSpec struct {
 	Role        string `yaml:"role"`
 	Description string `yaml:"description,omitempty"`
 	// Placement is one of: "local", "fargate", "ssh:user@host".
-	Placement     string   `yaml:"placement"`
-	WorkingDir    string   `yaml:"working_dir,omitempty"`
-	MaxConcurrent int      `yaml:"max_concurrent"`
+	Placement     string `yaml:"placement"`
+	WorkingDir    string `yaml:"working_dir,omitempty"`
+	MaxConcurrent int    `yaml:"max_concurrent"`
 	// Lifecycle is "ephemeral" (default) or "persistent". Persistent
 	// archetypes survive a daemon restart: instances are reconciled
 	// from probing teem-<role>-1..N on the tailnet. Persistent + local
@@ -62,11 +63,11 @@ type LeaderSpec struct {
 }
 
 type AgentSpec struct {
-	ID          string   `yaml:"id"`
-	Role        string   `yaml:"role"`
-	Description string   `yaml:"description"`
-	SSHTarget   string   `yaml:"ssh_target,omitempty"`
-	Local       bool     `yaml:"local,omitempty"`
+	ID          string `yaml:"id"`
+	Role        string `yaml:"role"`
+	Description string `yaml:"description"`
+	SSHTarget   string `yaml:"ssh_target,omitempty"`
+	Local       bool   `yaml:"local,omitempty"`
 	// Backend names a cloud placement strategy (currently "fargate"). Mutually
 	// exclusive with Local and SSHTarget. WorkingDir is ignored for cloud
 	// backends.
@@ -84,8 +85,8 @@ type AgentSpec struct {
 	// Persistent local agents require the operator to run `teem-worker`
 	// themselves at hostname teem-<id>; persistent cloud agents are
 	// launched the first time and reused thereafter.
-	Lifecycle  string   `yaml:"lifecycle,omitempty"`
-	MCPs       []MCPRef `yaml:"mcps,omitempty"`
+	Lifecycle string   `yaml:"lifecycle,omitempty"`
+	MCPs      []MCPRef `yaml:"mcps,omitempty"`
 }
 
 // SupportedBackends is the set of cloud backend strings accepted in
@@ -248,7 +249,7 @@ func (t *Team) LeaderSystemPrompt() string {
 		lc := a.LifecycleOrDefault()
 		fmt.Fprintf(&b, "  - %s (up to %d, %s, %s): %s\n", a.Role, a.MaxConcurrent, a.Placement, lc, a.Description)
 	}
-	b.WriteString("\nWhen you spawn from an archetype you get an auto-numbered instance id like worker-1, worker-2, … (never reused).\n")
+	b.WriteString("\nWhen you spawn from an archetype you get an instance id with a wordlist name (e.g. worker-ada, reviewer-blake). Names persist across the worker's lifetime; once retired they return to the pool and may be reincarnated when the wordlist runs out of fresh entries.\n")
 	b.WriteString("\n--- Project brief ---\n")
 	b.WriteString(strings.TrimSpace(t.Leader.SystemPrompt))
 	b.WriteString("\n")
@@ -379,4 +380,3 @@ func validateArchetypePlacement(a ArchetypeSpec) error {
 		return fmt.Errorf("unknown placement %q (supported: local, ssh:user@host, fargate)", a.Placement)
 	}
 }
-
