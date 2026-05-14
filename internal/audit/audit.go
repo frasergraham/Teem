@@ -50,6 +50,13 @@ const (
 	// claude" from "the daemon killed it mid-execution." Meta carries
 	// prompt_preview + started_at.
 	KindJobInterrupted Kind = "job_interrupted"
+	// KindJobTranscriptReady is emitted by the worker after it has
+	// pushed a job's full stream-json transcript to the leader. Meta
+	// carries {path, bytes, event_count, summary}.
+	KindJobTranscriptReady Kind = "job_transcript_ready"
+	// KindWorkerStopped is emitted when a worker subprocess terminates
+	// (clean shutdown or otherwise). Used as a leader-wake signal.
+	KindWorkerStopped Kind = "worker_stopped"
 )
 
 // Event is one entry on the audit channel. Meta is a free-form bag for
