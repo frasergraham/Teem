@@ -105,7 +105,6 @@ internal/mcp/             orchestrator MCP server (mark3labs/mcp-go)
 internal/transport/       Local + SSH process transports
 internal/executor/        ProcessExecutor (local/ssh) + HTTPExecutor (cloud)
 internal/provisioner/     local / ssh / fargate backends
-internal/llm/             Anthropic SDK wrapper (for utility code paths)
 internal/agent/           Worker + Spawner glue
 internal/leader/          Leader runtime (transport-pluggable)
 Dockerfile                Builds the teem-worker container image

@@ -1,27 +1,35 @@
 package archmem
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"runtime/debug"
 	"strings"
 	"time"
-
-	"github.com/frasergraham/teem/internal/llm"
 )
+
+// Completer is the LLM call shape the summarizer needs: text in, text
+// out. Default implementation shells out to `claude -p`; tests inject
+// a stub. A nil Completer means "skip the LLM call" — the summarizer
+// still prunes entries by retention window.
+type Completer func(ctx context.Context, prompt string) (string, error)
 
 // Summarizer periodically regenerates each role's "# Digest" and prunes
 // the "Recent entries" list to the retention window. Owned by the
 // daemon; one per team.
 type Summarizer struct {
 	Store           *Store
-	Client          llm.Client
+	Complete        Completer
 	Roles           RolesFunc
 	RetentionWindow time.Duration // entries older than this are dropped at digest time (default 14d)
 	Interval        time.Duration // ticker cadence (default 24h)
 	InitialDelay    time.Duration // first run after Start (default 30s)
-	Model           string        // optional model override
 	LogPrefix       string        // stderr log prefix (default "[archmem]")
 	// MaxEntriesPerDigest caps how many recent entries are sent to the
 	// LLM in one prompt. Zero = no cap.
@@ -67,7 +75,7 @@ func (s *Summarizer) Run(ctx context.Context) error {
 
 // runOnce summarises every current role. Errors are logged and not
 // fatal — the next tick retries. Each role is wrapped in a recover so
-// a panic on one role (e.g. an LLM client misbehaving) does not kill
+// a panic on one role (e.g. a Completer misbehaving) does not kill
 // the summarizer goroutine — the next tick still happens.
 func (s *Summarizer) runOnce(ctx context.Context) {
 	roles := []string{}
@@ -116,8 +124,11 @@ func (s *Summarizer) summarizeRole(ctx context.Context, role string) error {
 	// 2. LLM call happens outside the lock so AppendEntry isn't blocked.
 	digest := prevDigest
 	llmRan := false
-	if s.Client != nil && len(snapKept) > 0 {
-		d, err := s.callLLM(ctx, role, snapKept, prevDigest)
+	if s.Complete != nil && len(snapKept) > 0 {
+		prompt := buildDigestPrompt(s.cappedEntries(snapKept), prevDigest)
+		ctx2, cancel := context.WithTimeout(ctx, s.LLMTimeout)
+		d, err := s.Complete(ctx2, prompt)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("llm: %w", err)
 		}
@@ -151,6 +162,16 @@ func (s *Summarizer) summarizeRole(ctx context.Context, role string) error {
 	})
 }
 
+// cappedEntries returns the most recent MaxEntriesPerDigest entries
+// (or all of them when the cap is zero). Input must already be sorted
+// oldest-first.
+func (s *Summarizer) cappedEntries(es []Entry) []Entry {
+	if s.MaxEntriesPerDigest > 0 && len(es) > s.MaxEntriesPerDigest {
+		return es[len(es)-s.MaxEntriesPerDigest:]
+	}
+	return es
+}
+
 // mergeEntries returns the union of a and b, deduping by
 // (Timestamp, AgentID, JobID).
 func mergeEntries(a, b []Entry) []Entry {
@@ -175,36 +196,123 @@ func mergeEntries(a, b []Entry) []Entry {
 	return out
 }
 
-// callLLM asks the configured client for a 6-line-ish digest summarising
-// the supplied entries plus the prior digest.
-func (s *Summarizer) callLLM(ctx context.Context, role string, entries []Entry, prevDigest string) (string, error) {
-	es := entries
-	if s.MaxEntriesPerDigest > 0 && len(es) > s.MaxEntriesPerDigest {
-		es = es[len(es)-s.MaxEntriesPerDigest:]
-	}
+// buildDigestPrompt assembles the one-shot prompt that the Completer
+// receives. Kept pure (no I/O, no time.Now) so it's trivially testable
+// from the input/output contract: entries + prevDigest → prompt string.
+func buildDigestPrompt(entries []Entry, prevDigest string) string {
 	var b strings.Builder
+	b.WriteString("You distill activity logs for a Teem archetype role into a short, factual digest used as long-term memory for that role's next spawned worker.\n\n")
 	if prevDigest != "" {
 		b.WriteString("Previous digest (may be stale):\n")
 		b.WriteString(prevDigest)
 		b.WriteString("\n\n")
 	}
 	b.WriteString("Recent entries (oldest first):\n")
-	for _, e := range es {
+	for _, e := range entries {
 		b.WriteString(formatEntry(e))
 		b.WriteString("\n")
 	}
 	b.WriteString("\nProduce a 4-6 line markdown digest of what this archetype has been doing — concrete files, recurring themes, open follow-ups. No preamble, no bullets longer than one line.")
+	return b.String()
+}
 
-	ctx2, cancel := context.WithTimeout(ctx, s.LLMTimeout)
-	defer cancel()
-	resp, err := s.Client.Complete(ctx2, llm.CompletionRequest{
-		Model:     s.Model,
-		System:    "You distill activity logs for a Teem archetype role into a short, factual digest used as long-term memory for that role's next spawned worker.",
-		Messages:  []llm.Message{{Role: llm.RoleUser, Content: b.String()}},
-		MaxTokens: 600,
-	})
-	if err != nil {
-		return "", err
+// NewClaudeSubprocessCompleter returns a Completer that runs
+// `claude -p` as a subprocess to produce a digest. claudePath may be
+// empty to look up "claude" on PATH at call time. repoRoot becomes the
+// subprocess CWD (claude inherits the team's repo for any contextual
+// reads). Output is parsed from stream-json, mirroring the pattern in
+// internal/pulse — we use stream-json (not plain text) so a verbose
+// CLI that emits status banners on stdout doesn't leak into the digest.
+func NewClaudeSubprocessCompleter(claudePath, repoRoot string) Completer {
+	return func(ctx context.Context, prompt string) (string, error) {
+		path := claudePath
+		if path == "" {
+			p, err := exec.LookPath("claude")
+			if err != nil {
+				return "", fmt.Errorf("claude CLI not on PATH: %w", err)
+			}
+			path = p
+		}
+		// One-shot: no --resume, no --mcp-config. stream-json + --verbose
+		// gives us a clean assistant `result` event we can pluck the
+		// digest from regardless of any chrome the CLI emits.
+		args := []string{
+			"-p",
+			"--output-format", "stream-json",
+			"--verbose",
+			"--dangerously-skip-permissions",
+			prompt,
+		}
+		cmd := exec.CommandContext(ctx, path, args...)
+		if repoRoot != "" {
+			cmd.Dir = repoRoot
+		}
+		cmd.Stdin = nil
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return "", err
+		}
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Start(); err != nil {
+			return "", fmt.Errorf("start claude: %w", err)
+		}
+		text, parseErr := parseDigestStream(stdout)
+		if waitErr := cmd.Wait(); waitErr != nil {
+			return "", fmt.Errorf("claude exit: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
+		}
+		if parseErr != nil {
+			return "", parseErr
+		}
+		return text, nil
 	}
-	return resp.Content, nil
+}
+
+// parseDigestStream consumes Claude Code's stream-json output and
+// returns the final assistant text. Prefers the `result` event when
+// present; falls back to the last assistant text block otherwise.
+func parseDigestStream(r io.Reader) (string, error) {
+	type contentBlock struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	type assistantMsg struct {
+		Content []contentBlock `json:"content"`
+	}
+	type ev struct {
+		Type    string       `json:"type"`
+		Result  string       `json:"result"`
+		Message assistantMsg `json:"message"`
+	}
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var (
+		text   string
+		result string
+	)
+	for sc.Scan() {
+		var e ev
+		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			continue
+		}
+		switch e.Type {
+		case "assistant":
+			for _, c := range e.Message.Content {
+				if c.Type == "text" && c.Text != "" {
+					text = c.Text
+				}
+			}
+		case "result":
+			if e.Result != "" {
+				result = e.Result
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return "", fmt.Errorf("read stream: %w", err)
+	}
+	if result != "" {
+		return result, nil
+	}
+	return text, nil
 }

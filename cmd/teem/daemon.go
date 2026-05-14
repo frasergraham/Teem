@@ -27,7 +27,6 @@ import (
 	"github.com/frasergraham/teem/internal/channelbus"
 	"github.com/frasergraham/teem/internal/inflight"
 	"github.com/frasergraham/teem/internal/leaderstatus"
-	"github.com/frasergraham/teem/internal/llm"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
@@ -1411,25 +1410,20 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 
 	// Summarizer goroutine: rolling digest + retention pruning per
 	// role. Best-effort — failures log to stderr and the next tick
-	// retries. Skipped when ANTHROPIC_API_KEY is unset since the
-	// digest needs the LLM; appends still happen so the file isn't
-	// silently empty.
+	// retries. Uses the operator's Claude Code auth via `claude -p`
+	// subprocess; if the binary isn't on PATH we still run the loop
+	// so retention pruning happens, just without an LLM digest.
 	archMemCtx, archMemCancel := context.WithCancel(d.baseCtx)
-	// Important: NewAnthropic returns a *typed* nil when the key is unset.
-	// Assigning that directly to llm.Client (interface) yields a non-nil
-	// interface holding a nil pointer — `s.Client != nil` then passes and
-	// any method call panics. Keep llm.Client nil unless construction
-	// actually succeeded.
-	var sumClient llm.Client
-	if c, err := llm.NewAnthropic(""); err == nil {
-		sumClient = c
+	var completer archmem.Completer
+	if path, err := exec.LookPath("claude"); err == nil {
+		completer = archmem.NewClaudeSubprocessCompleter(path, repoRoot)
 	} else {
-		fmt.Fprintf(os.Stderr, "[archmem] LLM unavailable, digest will be skipped: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[archmem] claude CLI not on PATH; digest will be skipped: %v\n", err)
 	}
 	summarizer := &archmem.Summarizer{
-		Store:  archMemStore,
-		Client: sumClient,
-		Roles:  leaderAwareRoles(t),
+		Store:    archMemStore,
+		Complete: completer,
+		Roles:    leaderAwareRoles(t),
 	}
 	safeGo("archmem.summarizer:"+t.ID, func() { _ = summarizer.Run(archMemCtx) })
 

@@ -2,14 +2,13 @@ package archmem
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/frasergraham/teem/internal/llm"
 )
 
 func newStore(t *testing.T, roles ...string) *Store {
@@ -210,7 +209,7 @@ func TestSummarizerLeaderRole(t *testing.T) {
 	stub := &stubLLM{out: "Leader has been triaging T1."}
 	sm := &Summarizer{
 		Store:           s,
-		Client:          stub,
+		Complete:        stub.Complete,
 		Roles:           func() []string { return []string{"worker", LeaderRole} },
 		RetentionWindow: 7 * 24 * time.Hour,
 	}
@@ -259,12 +258,12 @@ func TestSweepTmp(t *testing.T) {
 type stubLLM struct {
 	out         string
 	reply       string // alias for out; either field works in tests
-	req         llm.CompletionRequest
+	prompt      string
 	beforeReply func() // fires just before returning a response — for race tests
 }
 
-func (c *stubLLM) Complete(_ context.Context, req llm.CompletionRequest) (llm.CompletionResponse, error) {
-	c.req = req
+func (c *stubLLM) Complete(_ context.Context, prompt string) (string, error) {
+	c.prompt = prompt
 	if c.beforeReply != nil {
 		c.beforeReply()
 	}
@@ -272,11 +271,7 @@ func (c *stubLLM) Complete(_ context.Context, req llm.CompletionRequest) (llm.Co
 	if content == "" {
 		content = c.reply
 	}
-	return llm.CompletionResponse{Model: "stub", Content: content}, nil
-}
-
-func (c *stubLLM) Stream(context.Context, llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
-	return nil, nil
+	return content, nil
 }
 
 func TestSummarizerStubLLM(t *testing.T) {
@@ -290,7 +285,7 @@ func TestSummarizerStubLLM(t *testing.T) {
 	stub := &stubLLM{out: "Digest: the worker pattern is X."}
 	sm := &Summarizer{
 		Store:           s,
-		Client:          stub,
+		Complete:        stub.Complete,
 		Roles:           func() []string { return []string{"worker"} },
 		RetentionWindow: 7 * 24 * time.Hour,
 	}
@@ -314,8 +309,8 @@ func TestSummarizerStubLLM(t *testing.T) {
 	if fm.DigestWindowDays != 7 {
 		t.Errorf("digest_window_days = %d, want 7", fm.DigestWindowDays)
 	}
-	if !strings.Contains(stub.req.Messages[0].Content, "recent A") {
-		t.Errorf("LLM prompt should include recent entries; got:\n%s", stub.req.Messages[0].Content)
+	if !strings.Contains(stub.prompt, "recent A") {
+		t.Errorf("LLM prompt should include recent entries; got:\n%s", stub.prompt)
 	}
 }
 
@@ -352,7 +347,7 @@ func TestSummarizerPreservesConcurrentAppends(t *testing.T) {
 	sum := &Summarizer{
 		Store:           s,
 		Roles:           func() []string { return []string{"worker"} },
-		Client:          stub,
+		Complete:        stub.Complete,
 		RetentionWindow: 24 * time.Hour,
 	}
 	if err := sum.summarizeRole(context.Background(), "worker"); err != nil {
@@ -371,49 +366,62 @@ func TestSummarizerPreservesConcurrentAppends(t *testing.T) {
 	}
 }
 
-// TestSummarizer_NilClientIsTolerated locks in the fix for a daemon
-// crash: when the LLM client is genuinely nil (key unset), summarizeRole
-// must skip the LLM call and not panic. Earlier we passed a typed-nil
-// *AnthropicClient via interface, which made `s.Client != nil` true and
-// triggered a nil-deref on the next call.
-func TestSummarizer_NilClientIsTolerated(t *testing.T) {
+// TestSummarizer_NilCompleterIsTolerated locks in the fix for a daemon
+// crash: when no Completer is configured (e.g. claude CLI unavailable),
+// summarizeRole must skip the LLM call and not panic.
+func TestSummarizer_NilCompleterIsTolerated(t *testing.T) {
 	s := newStore(t, "worker")
 	now := time.Now().UTC()
 	_ = s.AppendEntry("worker", Entry{Timestamp: now.Add(-1 * time.Hour), AgentID: "worker-1", JobID: "a", Status: "done", Summary: "recent"})
 	sm := &Summarizer{
 		Store:           s,
-		Client:          nil,
+		Complete:        nil,
 		Roles:           func() []string { return []string{"worker"} },
 		RetentionWindow: 7 * 24 * time.Hour,
 	}
 	if err := sm.summarizeRole(context.Background(), "worker"); err != nil {
-		t.Fatalf("summarize with nil client should be a no-op, got: %v", err)
+		t.Fatalf("summarize with nil completer should be a no-op, got: %v", err)
 	}
 }
 
-// panicLLM unconditionally panics — proves the per-role recover keeps
-// the summarizer loop alive even if a client misbehaves catastrophically.
-type panicLLM struct{}
-
-func (panicLLM) Complete(context.Context, llm.CompletionRequest) (llm.CompletionResponse, error) {
-	panic("LLM exploded")
-}
-func (panicLLM) Stream(context.Context, llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
+// panicCompleter unconditionally panics — proves the per-role recover
+// keeps the summarizer loop alive even if a completer misbehaves
+// catastrophically.
+func panicCompleter(context.Context, string) (string, error) {
 	panic("LLM exploded")
 }
 
-func TestSummarizer_RecoversFromClientPanic(t *testing.T) {
+func TestSummarizer_RecoversFromCompleterPanic(t *testing.T) {
 	s := newStore(t, "worker")
 	now := time.Now().UTC()
 	_ = s.AppendEntry("worker", Entry{Timestamp: now.Add(-1 * time.Hour), AgentID: "worker-1", JobID: "a", Status: "done", Summary: "x"})
 	sm := &Summarizer{
 		Store:           s,
-		Client:          panicLLM{},
+		Complete:        panicCompleter,
 		Roles:           func() []string { return []string{"worker"} },
 		RetentionWindow: 7 * 24 * time.Hour,
 	}
 	// runOnce must NOT propagate the panic. If it did, this test would
 	// crash the test binary instead of failing cleanly.
+	sm.runOnce(context.Background())
+}
+
+// errCompleter always errors — used to confirm errors propagate as
+// log lines rather than crashing the loop.
+func errCompleter(context.Context, string) (string, error) {
+	return "", errors.New("simulated failure")
+}
+
+func TestSummarizer_CompleterErrorDoesNotPanic(t *testing.T) {
+	s := newStore(t, "worker")
+	now := time.Now().UTC()
+	_ = s.AppendEntry("worker", Entry{Timestamp: now.Add(-1 * time.Hour), AgentID: "worker-1", JobID: "a", Status: "done", Summary: "x"})
+	sm := &Summarizer{
+		Store:           s,
+		Complete:        errCompleter,
+		Roles:           func() []string { return []string{"worker"} },
+		RetentionWindow: 7 * 24 * time.Hour,
+	}
 	sm.runOnce(context.Background())
 }
 
