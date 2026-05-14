@@ -869,6 +869,14 @@ func (w *worker) fireDrain() {
 // skip /shutdown POST during teardown. If the listener went away first
 // the leader would have to fall back to the slower liveness watch.
 func (w *worker) runExitSequence() {
+	// If shutdownCh is already closed, an external trigger (e.g. an
+	// operator /shutdown POST) is already winding the worker down —
+	// suppress a redundant worker_stopped emit + drain.
+	select {
+	case <-w.shutdownCh:
+		return
+	default:
+	}
 	w.mu.Lock()
 	hooks := append([]func(context.Context) error(nil), w.preExitHooks...)
 	w.mu.Unlock()
