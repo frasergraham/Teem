@@ -103,10 +103,10 @@ func TestArchetypeSeq_AuditFallback(t *testing.T) {
 
 func TestParseInstanceID(t *testing.T) {
 	cases := []struct {
-		in       string
-		role     string
-		n        int
-		ok       bool
+		in   string
+		role string
+		n    int
+		ok   bool
 	}{
 		{"worker-1", "worker", 1, true},
 		{"reviewer-12", "reviewer", 12, true},

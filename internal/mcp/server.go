@@ -11,6 +11,7 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpsrv "github.com/mark3labs/mcp-go/server"
 
+	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
 	"github.com/frasergraham/teem/internal/notes"
@@ -43,6 +44,7 @@ type Server struct {
 	audit          audit.Sink
 	plan           *plan.Plan
 	notes          *notes.Inbox
+	archMem        *archmem.Store
 	transcriptsDir string
 }
 
@@ -66,6 +68,10 @@ type Config struct {
 	// empty, the get_job_transcript tool returns an error explaining
 	// transcripts aren't configured.
 	TranscriptsDir string
+	// ArchMem is the per-archetype memory store. When nil the
+	// read_archetype_memory / append_archetype_memory tools return
+	// an error explaining the feature is unconfigured.
+	ArchMem *archmem.Store
 }
 
 // New builds an orchestrator MCP server. Call Serve to start serving on a
@@ -88,6 +94,7 @@ func New(cfg Config) (*Server, error) {
 		audit:          cfg.Audit,
 		plan:           cfg.Plan,
 		notes:          cfg.Notes,
+		archMem:        cfg.ArchMem,
 		transcriptsDir: cfg.TranscriptsDir,
 	}
 	s.registerTools()
@@ -266,6 +273,21 @@ func (s *Server) registerTools() {
 			mcpgo.WithString("format", mcpgo.Description("'raw' (NDJSON verbatim) or 'text' (flat role/text rendering). Default 'text'.")),
 		),
 		s.handleGetJobTranscript,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("read_archetype_memory",
+			mcpgo.WithDescription("Return the persisted long-term memory for an archetype role: the rolling LLM digest plus the recent-entries list every freshly-spawned worker of that role inherits as baseline context. Use when triaging an agent's behavior or before adjusting how a role should work."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Archetype role (e.g. worker, reviewer).")),
+		),
+		s.handleReadArchetypeMemory,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("append_archetype_memory",
+			mcpgo.WithDescription("Append an operator-authored note to an archetype's memory file. Use sparingly — every line shows up as baseline context in future worker spawns. Good for one-off corrections (\"this role should always X\") that the LLM-generated digest hasn't picked up yet."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Archetype role to write under.")),
+			mcpgo.WithString("note", mcpgo.Required(), mcpgo.Description("The note text — one line, no markdown headers.")),
+		),
+		s.handleAppendArchetypeMemory,
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("write_user_note",

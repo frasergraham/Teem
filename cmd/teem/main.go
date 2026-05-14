@@ -301,7 +301,6 @@ func writeClaudeMCPConfig(path, url string) error {
 	return atomicWrite(path, body)
 }
 
-
 // teamSearchPaths lists the file names `teem chat` searches for a team
 // when --team is unset, in priority order. The wizard writes to the first
 // entry.
@@ -411,6 +410,12 @@ func defaultInFlightPath(teamName string) string {
 // path is socketDir/<agent-id>.sock with a sibling .pid file.
 func defaultSocketDir(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "sockets")
+}
+
+// defaultMemoryDir returns the directory holding per-archetype memory
+// markdown files for the team. One file per role: <dir>/<role>.md.
+func defaultMemoryDir(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "memory")
 }
 
 // drainTimeout returns the configured drain window for graceful

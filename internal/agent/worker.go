@@ -53,6 +53,12 @@ type Worker struct {
 	HeartbeatInterval time.Duration // 0 disables; spawner picks 60s default
 	BodyCap           int           // truncation cap for prompt/output meta (default 64 KiB)
 
+	// BaselineContext is the archetype-memory markdown the spawner
+	// snapshot at construction time. When non-empty it's prepended to
+	// each job's Context so the worker carries "what this role has
+	// been doing" into every Claude run.
+	BaselineContext string
+
 	jobsTopic   string
 	resultTopic string
 	logTopic    string
@@ -125,10 +131,18 @@ func (w *Worker) runJob(ctx context.Context, job jobMessage) {
 		},
 	})
 
+	jobCtx := job.Context
+	if w.BaselineContext != "" {
+		if jobCtx != "" {
+			jobCtx = w.BaselineContext + "\n\n---\n\n" + jobCtx
+		} else {
+			jobCtx = w.BaselineContext
+		}
+	}
 	output, err := w.Executor.Execute(ctx, executor.Job{
 		ID:      job.JobID,
 		Prompt:  job.Prompt,
-		Context: job.Context,
+		Context: jobCtx,
 		MCPs:    w.Agent.MCPs,
 	})
 	res := resultMessage{JobID: job.JobID, Output: output}

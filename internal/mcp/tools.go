@@ -10,6 +10,7 @@ import (
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
@@ -209,6 +210,56 @@ func (s *Server) handleUpdateArchetype(_ context.Context, req mcpgo.CallToolRequ
 		}
 	}
 	out, _ := json.Marshal(map[string]string{"updated": role})
+	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+// --- archetype memory handlers --------------------------------------------
+
+func (s *Server) handleReadArchetypeMemory(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.archMem == nil {
+		return mcpgo.NewToolResultError("archetype memory is not configured"), nil
+	}
+	role, err := req.RequireString("role")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if s.team != nil && s.team.FindArchetypeByRole(role) == nil {
+		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
+	}
+	body, err := s.archMem.Load(role)
+	if err != nil {
+		return mcpgo.NewToolResultErrorFromErr("read_archetype_memory", err), nil
+	}
+	out, _ := json.Marshal(map[string]string{"role": role, "body": body})
+	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+func (s *Server) handleAppendArchetypeMemory(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.archMem == nil {
+		return mcpgo.NewToolResultError("archetype memory is not configured"), nil
+	}
+	role, err := req.RequireString("role")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	note, err := req.RequireString("note")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if s.team != nil && s.team.FindArchetypeByRole(role) == nil {
+		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
+	}
+	entry := archmem.Entry{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "leader",
+		JobID:     "",
+		Status:    "note",
+		Summary:   note,
+	}
+	if err := s.archMem.AppendEntry(role, entry); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("append_archetype_memory", err), nil
+	}
+	out, _ := json.Marshal(map[string]string{"appended": role})
 	return mcpgo.NewToolResultText(string(out)), nil
 }
 
@@ -426,4 +477,3 @@ func (s *Server) handleQueryAudit(_ context.Context, req mcpgo.CallToolRequest) 
 	}
 	return mcpgo.NewToolResultText(string(body)), nil
 }
-

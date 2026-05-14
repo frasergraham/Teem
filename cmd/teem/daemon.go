@@ -21,9 +21,11 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/agent"
+	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
 	"github.com/frasergraham/teem/internal/inflight"
+	"github.com/frasergraham/teem/internal/llm"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
@@ -271,18 +273,20 @@ type daemon struct {
 }
 
 type registeredTeam struct {
-	team       *team.Team
-	mcp        *mcpsrv.Server
-	spawner    *agent.Spawner
-	auditSink  *audit.FileSink
-	auditH     http.Handler
-	plan       *plan.Plan
-	notes      *notes.Inbox
-	pulse      *pulse.Pulse
-	inFlight   *inflight.Log
-	registry   *mcpsrv.Registry
-	leaderURL  string
-	registered time.Time
+	team          *team.Team
+	mcp           *mcpsrv.Server
+	spawner       *agent.Spawner
+	auditSink     *audit.FileSink
+	auditH        http.Handler
+	plan          *plan.Plan
+	notes         *notes.Inbox
+	pulse         *pulse.Pulse
+	inFlight      *inflight.Log
+	registry      *mcpsrv.Registry
+	archMem       *archmem.Store
+	archMemCancel context.CancelFunc
+	leaderURL     string
+	registered    time.Time
 	// transcriptsDir is the leader-side mirror root for worker
 	// transcript files: <stateDir>/transcripts/<agent>/<job>.jsonl.
 	transcriptsDir string
@@ -398,6 +402,9 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 			_ = rt.auditSink.Close()
 			_ = rt.plan.Close()
 			_ = rt.notes.Close()
+			if rt.archMemCancel != nil {
+				rt.archMemCancel()
+			}
 			if rt.inFlight != nil {
 				_ = rt.inFlight.Close()
 			}
@@ -515,6 +522,9 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		_ = rt.auditSink.Close()
 		_ = rt.plan.Close()
 		_ = rt.notes.Close()
+		if rt.archMemCancel != nil {
+			rt.archMemCancel()
+		}
 		if rt.inFlight != nil {
 			_ = rt.inFlight.Close()
 		}
@@ -757,18 +767,35 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 
 	bs := bus.NewMemBus()
 	reg := mcpsrv.NewRegistry()
+
+	// Archetype memory store: per-team directory of per-role markdown
+	// files the leader injects as baseline context for every freshly
+	// spawned worker. Created up-front so the spawner can read from
+	// it and the audit hook can append to it.
+	archMemDir := defaultMemoryDir(t.Name)
+	archMemStore := archmem.New(archMemDir, func() []string {
+		archs := t.SnapshotArchetypes()
+		roles := make([]string, 0, len(archs))
+		for _, a := range archs {
+			roles = append(roles, a.Role)
+		}
+		return roles
+	})
+	archMemStore.SweepTmp()
+
 	spawner := agent.NewSpawner(d.baseCtx, t, bs, reg, agent.Config{
-		HTTPClient:       d.httpClient,
-		WorkerToken:      d.token,
-		CloudProvisioner: cloudProvisionerFactory(d.token, leaderURL, gitCfg, stateStore),
-		RepoRoot:         repoRoot,
-		WorktreeBase:     worktreeBase,
-		LeaderURL:        leaderURL,
-		StateStore:       stateStore,
-		AuditSink:        auditSink,
-		ArchetypeSeqPath: defaultArchetypeSeqPath(t.Name),
-		InFlight:         inFlightLog,
-		SocketDir:        defaultSocketDir(t.Name),
+		HTTPClient:          d.httpClient,
+		WorkerToken:         d.token,
+		CloudProvisioner:    cloudProvisionerFactory(d.token, leaderURL, gitCfg, stateStore),
+		RepoRoot:            repoRoot,
+		WorktreeBase:        worktreeBase,
+		LeaderURL:           leaderURL,
+		StateStore:          stateStore,
+		AuditSink:           auditSink,
+		ArchetypeSeqPath:    defaultArchetypeSeqPath(t.Name),
+		InFlight:            inFlightLog,
+		SocketDir:           defaultSocketDir(t.Name),
+		LoadArchetypeMemory: archMemStore.Load,
 	})
 
 	transcriptsDir := filepath.Join(defaultStateDir(t.Name), "transcripts")
@@ -782,6 +809,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		Plan:           planStore,
 		Notes:          notesInbox,
 		TranscriptsDir: transcriptsDir,
+		ArchMem:        archMemStore,
 	})
 	if err != nil {
 		_ = auditSink.Close()
@@ -868,6 +896,64 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		}
 	}
 
+	// Archmem hook: on every job-terminal event, append a one-line
+	// summary to the archetype's per-role memory file. The role is
+	// resolved from the registry; if the agent is gone we skip
+	// silently (audit fallback would need to scan history and isn't
+	// worth it for an append).
+	archMemHook := func(events []audit.Event) {
+		for _, e := range events {
+			if e.Kind != audit.KindJobComplete && e.Kind != audit.KindJobError {
+				continue
+			}
+			role := lookupRole(reg, e.AgentID)
+			if role == "" {
+				continue
+			}
+			status := "done"
+			summary, _ := e.Meta["output"].(string)
+			if e.Kind == audit.KindJobError {
+				status = "error"
+				if summary == "" {
+					summary = e.Message
+				}
+			}
+			entry := archmem.Entry{
+				Timestamp: e.Timestamp,
+				AgentID:   e.AgentID,
+				JobID:     e.JobID,
+				Status:    status,
+				Summary:   shortSummary(summary),
+			}
+			if err := archMemStore.AppendEntry(role, entry); err != nil && !errors.Is(err, archmem.ErrUnknownRole) {
+				fmt.Fprintf(os.Stderr, "[archmem] append %q: %v\n", role, err)
+			}
+		}
+	}
+
+	// Summarizer goroutine: rolling digest + retention pruning per
+	// role. Best-effort — failures log to stderr and the next tick
+	// retries. Skipped when ANTHROPIC_API_KEY is unset since the
+	// digest needs the LLM; appends still happen so the file isn't
+	// silently empty.
+	archMemCtx, archMemCancel := context.WithCancel(d.baseCtx)
+	llmClient, llmErr := llm.NewAnthropic("")
+	if llmErr != nil {
+		fmt.Fprintf(os.Stderr, "[archmem] LLM unavailable, digest will be skipped: %v\n", llmErr)
+	}
+	go (&archmem.Summarizer{
+		Store:  archMemStore,
+		Client: llmClient,
+		Roles: func() []string {
+			archs := t.SnapshotArchetypes()
+			roles := make([]string, 0, len(archs))
+			for _, a := range archs {
+				roles = append(roles, a.Role)
+			}
+			return roles
+		},
+	}).Run(archMemCtx)
+
 	return &registeredTeam{
 		team:      t,
 		mcp:       srv,
@@ -878,16 +964,46 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		// publish on bus topic "leader.wake" for terminal worker
 		// events. Note the double-publish: NudgeFromAudit + wakeHook
 		// run on every accepted POST.
-		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(pulseInst.NudgeFromAudit, combineHooks(wakeHook, stopHook))),
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(pulseInst.NudgeFromAudit, combineHooks(wakeHook, combineHooks(stopHook, archMemHook)))),
 		plan:           planStore,
 		notes:          notesInbox,
 		pulse:          pulseInst,
 		inFlight:       inFlightLog,
 		registry:       reg,
+		archMem:        archMemStore,
+		archMemCancel:  archMemCancel,
 		leaderURL:      leaderURL,
 		registered:     time.Now(),
 		transcriptsDir: transcriptsDir,
 	}, nil
+}
+
+// lookupRole returns the role for agentID from the registry, or ""
+// when the agent isn't currently tracked. Falls back to parsing the
+// instance suffix off the id ("<role>-<N>") because the registry can
+// race a worker_stopped reconcile.
+func lookupRole(reg *mcpsrv.Registry, agentID string) string {
+	if e, ok := reg.Get(agentID); ok && e.Role != "" {
+		return e.Role
+	}
+	if i := strings.LastIndexByte(agentID, '-'); i > 0 {
+		return agentID[:i]
+	}
+	return ""
+}
+
+// shortSummary clamps an output string to a single-line preview safe
+// for the recent-entries section. Newlines are flattened; the result
+// is truncated to 200 bytes.
+func shortSummary(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.TrimSpace(s)
+	const cap = 200
+	if len(s) > cap {
+		s = s[:cap] + "…"
+	}
+	return s
 }
 
 // isWakeKind decides whether a worker event should fire a leader.wake

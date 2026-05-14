@@ -95,6 +95,12 @@ type Config struct {
 	// written for each job. Used by the daemon's restart-reconcile
 	// path to emit job_interrupted audit events for orphans.
 	InFlight *inflight.Log
+	// LoadArchetypeMemory, when non-nil, is called at worker
+	// construction to fetch the role's persisted memory markdown.
+	// Returned body is snapshot once onto Worker.BaselineContext so
+	// every job the worker runs carries the same long-term context.
+	// Errors are logged and treated as empty.
+	LoadArchetypeMemory func(role string) (string, error)
 }
 
 // GitConfig is the source-control configuration the leader hands to
@@ -618,6 +624,17 @@ func (s *Spawner) startWorker(p provisioner.Provisioner, a *provisioner.Agent) e
 		w.HeartbeatInterval = s.heartbeatInterval()
 		w.BodyCap = s.cfg.JobBodyCap
 		w.InFlight = s.cfg.InFlight
+	}
+	// Archetype memory snapshot: bake the role's long-term context
+	// into the Worker at construction so it rides along with every
+	// job the leader assigns. Best-effort — a load failure leaves
+	// BaselineContext empty.
+	if s.cfg.LoadArchetypeMemory != nil && a.Role != "" {
+		if body, err := s.cfg.LoadArchetypeMemory(a.Role); err == nil {
+			w.BaselineContext = body
+		} else {
+			fmt.Fprintf(os.Stderr, "[spawner] load archmem for %q: %v\n", a.Role, err)
+		}
 	}
 	if err := w.Start(s.baseCtx); err != nil {
 		return err

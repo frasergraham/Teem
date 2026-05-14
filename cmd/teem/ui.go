@@ -21,20 +21,20 @@ var dashboardHTML string
 // nil-safe getter at access time so the daemon can wire the handler
 // before init() ordering matters.
 var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
-	"agoShort":     agoShort,
-	"timeShort":    timeShort,
-	"truncate200":  func(s string) string { return truncateMid(s, 200) },
-	"capitalize":   capitalize,
-	"toTitleCase":  capitalize,
+	"agoShort":    agoShort,
+	"timeShort":   timeShort,
+	"truncate200": func(s string) string { return truncateMid(s, 200) },
+	"capitalize":  capitalize,
+	"toTitleCase": capitalize,
 }).Parse(dashboardHTML))
 
 // dashboardSnapshot is the data the template renders. Computed fresh
 // on every GET so the page doesn't have to lie about state.
 type dashboardSnapshot struct {
-	Endpoint   string
-	StartedAt  time.Time
-	UptimeAgo  string
-	Teams      []dashboardTeam
+	Endpoint     string
+	StartedAt    time.Time
+	UptimeAgo    string
+	Teams        []dashboardTeam
 	NowFormatted string
 }
 
