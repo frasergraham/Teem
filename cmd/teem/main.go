@@ -426,6 +426,13 @@ func defaultMemoryDir(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "memory")
 }
 
+// defaultRegistrationPath returns the file the daemon writes on each
+// /control/teams registration so the team can be rebuilt after a
+// restart. Holds the YAML the operator submitted plus repo metadata.
+func defaultRegistrationPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "registration.json")
+}
+
 // drainTimeout returns the configured drain window for graceful
 // daemon shutdown. Defaults to 30s. 0 disables drain. Read every time
 // so it can be tuned without restarting.

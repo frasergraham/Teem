@@ -247,6 +247,30 @@ func writeDaemonStateFile(s daemonStateFile) error {
 func clearDaemonState() {
 	_ = os.Remove(daemonPIDPath())
 	_ = os.Remove(daemonJSONPath())
+	// The persistent worker_token file is intentionally NOT removed
+	// here so the token survives `teem stop`/`teem start`.
+}
+
+// workerTokenPath returns the persistent token file location.
+func workerTokenPath() string { return filepath.Join(daemonHomeDir(), "worker_token") }
+
+// loadOrCreateWorkerToken reads the persistent worker token file or
+// generates+writes a fresh one. The token is shared between the leader
+// (this process) and every worker it spawns; stable across daemon
+// restarts so workers don't all get 401'd after a bounce. To rotate,
+// stop the daemon, remove ~/.teem/worker_token, then start again.
+func loadOrCreateWorkerToken() string {
+	if body, err := os.ReadFile(workerTokenPath()); err == nil {
+		t := strings.TrimSpace(string(body))
+		if t != "" {
+			return t
+		}
+	}
+	t := randomToken()
+	if err := os.MkdirAll(daemonHomeDir(), 0o700); err == nil {
+		_ = os.WriteFile(workerTokenPath(), []byte(t+"\n"), 0o600)
+	}
+	return t
 }
 
 func atomicWrite(path string, body []byte) error {
@@ -339,7 +363,14 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 	d.endpoint = fmt.Sprintf("http://%s%s", mcpHost, normalizePort(df.listenAddr))
 	d.token = os.Getenv("TEEM_WORKER_TOKEN")
 	if d.token == "" {
-		d.token = randomToken()
+		// Persistent worker token: stored in its own file so it
+		// survives across daemon stop/start cycles. Workers spawned
+		// by an earlier daemon hold this token in their environment;
+		// rotating it on every start orphans every in-flight worker
+		// behind a 401 wall and renders the "workers survive a daemon
+		// bounce" guarantee aspirational. Rotation is now opt-in via
+		// `rm ~/.teem/worker_token`.
+		d.token = loadOrCreateWorkerToken()
 	}
 
 	if err := writeDaemonStateFile(daemonStateFile{
@@ -353,6 +384,13 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 	defer clearDaemonState()
 
 	fmt.Fprintf(os.Stderr, "[teemd] endpoint: %s\n", d.endpoint)
+
+	// Restore every team that has a registration.json on disk. Done
+	// before HTTP starts serving so the first inbound request sees a
+	// fully-rehydrated daemon (pulses auto-resumed, workers
+	// reattached). Best-effort: bad rows are logged and skipped.
+	d.restoreTeams()
+
 	fmt.Fprintf(os.Stderr, "[teemd] ready. Stop with `teem stop` or kill %d\n", os.Getpid())
 
 	httpSrv := &http.Server{
@@ -473,6 +511,111 @@ type registerRequest struct {
 	WorktreeBase string `json:"worktree_base,omitempty"`
 }
 
+// teamRegistration is the on-disk snapshot the daemon uses to rebuild
+// a team after a restart. Lives at ~/.teem/state/<team>/registration.json.
+type teamRegistration struct {
+	TeamYAML     string    `json:"team_yaml"`
+	RepoRoot     string    `json:"repo_root,omitempty"`
+	WorktreeBase string    `json:"worktree_base,omitempty"`
+	RegisteredAt time.Time `json:"registered_at"`
+}
+
+func writeTeamRegistration(name string, reg teamRegistration) error {
+	path := defaultRegistrationPath(name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, body, 0o600)
+}
+
+func removeTeamRegistration(name string) {
+	_ = os.Remove(defaultRegistrationPath(name))
+}
+
+// restoreTeams rebuilds every team that has a registration.json on
+// disk. Best-effort: a corrupt file or a YAML that no longer parses
+// logs and continues — we'd rather serve N-1 teams than refuse to
+// start. Called once at daemon boot, before serving HTTP.
+func (d *daemon) restoreTeams() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	stateRoot := filepath.Join(home, ".teem", "state")
+	entries, err := os.ReadDir(stateRoot)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		regPath := filepath.Join(stateRoot, e.Name(), "registration.json")
+		body, err := os.ReadFile(regPath)
+		if err != nil {
+			continue
+		}
+		var reg teamRegistration
+		if err := json.Unmarshal(body, &reg); err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] skip %s: bad registration.json: %v\n", e.Name(), err)
+			continue
+		}
+		tmpFile, err := writeTempYAML(reg.TeamYAML)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] skip %s: temp yaml: %v\n", e.Name(), err)
+			continue
+		}
+		t, err := team.Load(tmpFile)
+		_ = os.Remove(tmpFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] skip %s: invalid yaml: %v\n", e.Name(), err)
+			continue
+		}
+		rt, err := d.buildTeamServices(t, reg.RepoRoot, reg.WorktreeBase)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] skip %s: build services: %v\n", e.Name(), err)
+			continue
+		}
+		// Preserve the original registration time so the dashboard
+		// doesn't show "registered just now" after every restart.
+		if !reg.RegisteredAt.IsZero() {
+			rt.registered = reg.RegisteredAt
+		}
+		d.mu.Lock()
+		d.teams[t.Name] = rt
+		d.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "[teemd] restored team %q (pulse %s)\n", t.Name, pulseStateLabel(rt))
+		// Reconcile workers and persistent agents asynchronously so a
+		// slow Fargate API call doesn't block boot.
+		go func(rt *registeredTeam) {
+			if n := rt.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: reattached %d local worker(s)\n", rt.team.Name, n)
+			}
+			if n := rt.spawner.Reconcile(context.Background()); n > 0 {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: reconciled %d persistent agent(s)\n", rt.team.Name, n)
+			}
+		}(rt)
+	}
+	d.persistStateSnapshot()
+}
+
+func pulseStateLabel(rt *registeredTeam) string {
+	if rt.pulse == nil {
+		return "—"
+	}
+	if rt.pulse.Running() {
+		if rt.pulse.Paused() {
+			return "paused"
+		}
+		return "running"
+	}
+	return "off"
+}
+
 type registerResponse struct {
 	Team     string `json:"team"`
 	MCPURL   string `json:"mcp_url"`
@@ -531,6 +674,7 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		if rt.inFlight != nil {
 			_ = rt.inFlight.Close()
 		}
+		removeTeamRegistration(name)
 		d.persistStateSnapshot()
 		w.WriteHeader(http.StatusNoContent)
 	case "pulse":
@@ -680,6 +824,14 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	d.teams[t.Name] = rt
 	d.mu.Unlock()
+	if err := writeTeamRegistration(t.Name, teamRegistration{
+		TeamYAML:     req.TeamYAML,
+		RepoRoot:     req.RepoRoot,
+		WorktreeBase: req.WorktreeBase,
+		RegisteredAt: rt.registered,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "[teemd] warning: persist registration for %q: %v\n", t.Name, err)
+	}
 	d.persistStateSnapshot()
 
 	// Best-effort reconcile in two passes:
