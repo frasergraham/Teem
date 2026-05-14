@@ -71,7 +71,7 @@ Usage:
   teem start   [--foreground] [--listen :7777]         start the orchestrator daemon (headless by default)
   teem stop                                            stop the daemon
   teem status                                          report daemon state + registered teams
-  teem chat    [--team teem.yaml]                      register the current team with the daemon, launch Claude
+  teem chat    [--team teem.yaml] [--new-session]      register the current team with the daemon, launch Claude
   teem audit   [--agent ID] [--since RFC3339] [--limit 50] [--follow]
   teem pulse   <start|stop|pause|resume|tick|status> [--team t] [--interval 5m]
   teem version
@@ -95,6 +95,7 @@ func runChat(args []string) error {
 	teamPath := fs.String("team", "", "team YAML (default: ./teem.yaml or ./config/team.example.yaml)")
 	useTailnet := fs.Bool("tailnet", true, "join the tailnet (used only when auto-starting the daemon)")
 	listenAddr := fs.String("listen", ":7777", "daemon listen address (used only when auto-starting)")
+	newSession := fs.Bool("new-session", false, "discard the saved leader session and start a fresh one")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -150,6 +151,12 @@ func runChat(args []string) error {
 	//    First chat for a team creates the session id (--session-id);
 	//    every subsequent chat resumes the same conversation
 	//    (--resume <uuid>). Pulse will use the same id in phase 3.
+	if *newSession {
+		if err := os.Remove(leaderSessionPath(t.Name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("clear leader session: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "[teem] --new-session: cleared saved leader session for %q\n", t.Name)
+	}
 	sessFlags, err := claudeSessionFlags(t.Name)
 	if err != nil {
 		return fmt.Errorf("leader session: %w", err)
@@ -175,13 +182,24 @@ func runChat(args []string) error {
 // whether a session record already exists. The state file is written
 // before the flag is returned so a successful first chat persists the
 // id even if the user Ctrl-Cs out before claude finishes.
+//
+// Edge case: we may have saved a UUID but claude never actually
+// materialised the conversation (first chat exited before claude
+// flushed its session JSONL). In that case --resume fails with
+// "No conversation found with session ID". Detect that by probing
+// claude's session storage and fall back to --session-id with the same
+// UUID so the next chat realises it for real.
 func claudeSessionFlags(teamName string) ([]string, error) {
 	sess, ok, err := loadLeaderSession(teamName)
 	if err != nil {
 		return nil, err
 	}
 	if ok {
-		return []string{"--resume", sess.SessionID}, nil
+		if claudeSessionExists(sess.SessionID) {
+			return []string{"--resume", sess.SessionID}, nil
+		}
+		fmt.Fprintf(os.Stderr, "[teem] saved leader session %s not present in ~/.claude — recreating it under the same id\n", sess.SessionID)
+		return []string{"--session-id", sess.SessionID}, nil
 	}
 	uuid, err := newSessionUUID()
 	if err != nil {
@@ -195,6 +213,29 @@ func claudeSessionFlags(teamName string) ([]string, error) {
 	}
 	fmt.Fprintf(os.Stderr, "[teem] new leader session %s for team %q\n", uuid, teamName)
 	return []string{"--session-id", uuid}, nil
+}
+
+// claudeSessionExists checks whether Claude Code has a JSONL on disk
+// for the given session id, scoped to the current working directory's
+// project folder. Claude stores transcripts at
+// ~/.claude/projects/<cwd-with-slashes-as-dashes>/<uuid>.jsonl.
+// A missing file means --resume will fail; the caller should downgrade
+// to --session-id with the same uuid so claude creates the conversation.
+func claudeSessionExists(uuid string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return false
+	}
+	// Claude's path encoding: replace every `/` with `-`. Leading slash
+	// becomes a leading dash. No other transformations.
+	encoded := strings.ReplaceAll(cwd, "/", "-")
+	path := filepath.Join(home, ".claude", "projects", encoded, uuid+".jsonl")
+	_, err = os.Stat(path)
+	return err == nil
 }
 
 // ensureDaemon starts the daemon detached if missing and waits for
