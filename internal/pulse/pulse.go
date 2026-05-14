@@ -39,7 +39,11 @@ type SessionLoader func() (sessionID string, ok bool, err error)
 
 // Config bundles everything one team's Pulse needs.
 type Config struct {
+	// TeamName is for display / log lines only. TeamID is the canonical
+	// id used for state-dir paths and (since T33) for the teem-channel
+	// shim's --team flag.
 	TeamName    string
+	TeamID      string
 	LoadSession SessionLoader // returns the session id or (false) if no chat has run yet
 	PauseFile   string        // path; presence skips ticks
 	RunningFile string        // path; presence signals daemon to auto-resume on restart
@@ -681,11 +685,12 @@ func roundDuration(d time.Duration) string {
 // claude. Pulse needs the same MCP config the human chat uses, with
 // two servers registered: the HTTP "teem" orchestrator (tools), and a
 // stdio "teem-channel" shim that forwards channel notifications from
-// the daemon's SSE endpoint into the claude subprocess. teamName +
-// daemonEndpoint drive the shim's argv. shimPath is the absolute path
-// to the teem-channel binary, or empty to fall back to a bare
-// "teem-channel" lookup on PATH.
-func WriteMCPConfig(path, mcpURL, teamName, daemonEndpoint, shimPath string) error {
+// the daemon's SSE endpoint into the claude subprocess. teamID +
+// daemonEndpoint drive the shim's argv (the shim's --team value
+// becomes the URL path segment for the SSE endpoint). shimPath is the
+// absolute path to the teem-channel binary, or empty to fall back to
+// a bare "teem-channel" lookup on PATH.
+func WriteMCPConfig(path, mcpURL, teamID, daemonEndpoint, shimPath string) error {
 	if shimPath == "" {
 		shimPath = "teem-channel"
 	}
@@ -698,7 +703,7 @@ func WriteMCPConfig(path, mcpURL, teamName, daemonEndpoint, shimPath string) err
 			"teem-channel": map[string]any{
 				"type":    "stdio",
 				"command": shimPath,
-				"args":    []string{"--team", teamName, "--endpoint", daemonEndpoint},
+				"args":    []string{"--team", teamID, "--endpoint", daemonEndpoint},
 			},
 		},
 	}

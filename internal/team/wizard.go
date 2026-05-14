@@ -57,7 +57,7 @@ func (z *Wizard) Run() (*Team, []byte, error) {
 		}
 	}
 
-	t := &Team{Name: name}
+	t := &Team{ID: NewID(), Name: name}
 
 	// Default archetypes.
 	z.println("")
@@ -337,6 +337,9 @@ func indent(s, prefix string) string {
 func Summary(t *Team) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Team: %s\n", t.Name)
+	if t.ID != "" {
+		fmt.Fprintf(&b, "Team id: %s\n", t.ID)
+	}
 	first := strings.SplitN(strings.TrimSpace(t.Leader.SystemPrompt), "\n", 2)[0]
 	if len(first) > 80 {
 		first = first[:77] + "..."

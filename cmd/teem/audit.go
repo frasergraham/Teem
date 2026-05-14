@@ -46,7 +46,7 @@ func runAudit(args []string) error {
 		if err != nil {
 			return fmt.Errorf("load team: %w", err)
 		}
-		path = defaultAuditPath(t.Name)
+		path = defaultAuditPath(t.ID)
 	}
 
 	var since time.Time

@@ -1,6 +1,9 @@
 package team
 
 import (
+	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"regexp"
@@ -10,7 +13,34 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// IDPrefix is prepended to the random hex when minting a team_id.
+const IDPrefix = "t-"
+
+// idRE accepts canonical team ids — `t-` followed by 8+ lowercase hex
+// chars. Used to keep migration code from re-minting an already-minted
+// directory and to gate filesystem path safety.
+var idRE = regexp.MustCompile(`^t-[a-f0-9]{8,}$`)
+
+// IsCanonicalID reports whether s looks like a generated team id.
+func IsCanonicalID(s string) bool { return idRE.MatchString(s) }
+
+// NewID mints a fresh team id (`t-` + 16 hex chars / 8 random bytes).
+// Used by `teem init` to seed the YAML and by the daemon's startup
+// migration to back-fill ids onto pre-T33 state dirs.
+func NewID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("team: read random: " + err.Error())
+	}
+	return IDPrefix + hex.EncodeToString(b[:])
+}
+
 type Team struct {
+	// ID is the stable filesystem / routing key for the team. Renaming
+	// `name` is now free; ID is what every per-team path is built from.
+	// Auto-minted by `teem init` (and back-filled by Load on first read
+	// of a pre-T33 yaml).
+	ID         string          `yaml:"id,omitempty"`
 	Name       string          `yaml:"name"`
 	Tailnet    TailnetSpec     `yaml:"tailnet,omitempty"`
 	Leader     LeaderSpec      `yaml:"leader"`
@@ -132,6 +162,7 @@ type marshalWrapper struct {
 }
 
 type marshalShape struct {
+	ID         string          `yaml:"id,omitempty"`
 	Name       string          `yaml:"name"`
 	Tailnet    TailnetSpec     `yaml:"tailnet,omitempty"`
 	Leader     LeaderSpec      `yaml:"leader"`
@@ -145,6 +176,7 @@ func (t *Team) MarshalYAML() ([]byte, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return yaml.Marshal(marshalWrapper{Team: marshalShape{
+		ID:         t.ID,
 		Name:       t.Name,
 		Tailnet:    t.Tailnet,
 		Leader:     t.Leader,
@@ -168,7 +200,145 @@ func Load(path string) (*Team, error) {
 	if t.Tailnet.Hostname == "" {
 		t.Tailnet.Hostname = sanitizeHostname(t.Name)
 	}
+	// Back-fill the team_id when missing, write it back to the YAML
+	// in-place using the Node API so existing comments/order survive.
+	// Best-effort: a write failure (read-only fs, permissions) only
+	// keeps the minted id in memory so this Load still succeeds.
+	if t.ID == "" {
+		id, werr := EnsureIDFile(path)
+		if werr == nil {
+			t.ID = id
+		} else {
+			t.ID = NewID()
+			fmt.Fprintf(os.Stderr, "[teem] could not write team id back to %s: %v (using %s for this run)\n", path, werr, t.ID)
+		}
+	}
 	return t, nil
+}
+
+// SetIDFile writes the given id into the YAML's top-level `team:`
+// mapping. If an `id:` key already exists with a different value, it
+// is overwritten. Same comment-preserving Node API as EnsureIDFile.
+// Used by the daemon's pre-T33 migration to back-fill the id it just
+// minted into the operator's teem.yaml so future Loads pick it up.
+func SetIDFile(path, id string) error {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(body, &root); err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return fmt.Errorf("unexpected yaml root kind=%d", root.Kind)
+	}
+	top := root.Content[0]
+	if top.Kind != yaml.MappingNode {
+		return fmt.Errorf("yaml top is not a mapping (kind=%d)", top.Kind)
+	}
+	var teamMap *yaml.Node
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		if top.Content[i].Value == "team" {
+			teamMap = top.Content[i+1]
+			break
+		}
+	}
+	if teamMap == nil || teamMap.Kind != yaml.MappingNode {
+		return fmt.Errorf("yaml missing top-level 'team:' mapping")
+	}
+	for i := 0; i+1 < len(teamMap.Content); i += 2 {
+		if teamMap.Content[i].Value == "id" {
+			teamMap.Content[i+1].Value = id
+			return writeYAMLNode(path, &root)
+		}
+	}
+	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "id"}
+	valNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: id}
+	teamMap.Content = append([]*yaml.Node{keyNode, valNode}, teamMap.Content...)
+	return writeYAMLNode(path, &root)
+}
+
+// EnsureIDFile reads the team YAML at path; if it lacks an `id:` key
+// under the top-level `team:` mapping, mints one and writes the file
+// back. Returns the existing or newly-minted id.
+//
+// Implementation uses yaml.v3's Node API so comments, key order, and
+// formatting in the operator's hand-edited YAML survive the rewrite.
+// The write is atomic (temp + rename) so a crash mid-write can't leave
+// a half-written teem.yaml.
+func EnsureIDFile(path string) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(body, &root); err != nil {
+		return "", fmt.Errorf("parse: %w", err)
+	}
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return "", fmt.Errorf("unexpected yaml root kind=%d", root.Kind)
+	}
+	top := root.Content[0]
+	if top.Kind != yaml.MappingNode {
+		return "", fmt.Errorf("yaml top is not a mapping (kind=%d)", top.Kind)
+	}
+	var teamMap *yaml.Node
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		if top.Content[i].Value == "team" {
+			teamMap = top.Content[i+1]
+			break
+		}
+	}
+	if teamMap == nil || teamMap.Kind != yaml.MappingNode {
+		return "", fmt.Errorf("yaml missing top-level 'team:' mapping")
+	}
+	for i := 0; i+1 < len(teamMap.Content); i += 2 {
+		if teamMap.Content[i].Value == "id" {
+			val := teamMap.Content[i+1].Value
+			if val == "" {
+				// id key present but empty — back-fill in place.
+				id := NewID()
+				teamMap.Content[i+1].Value = id
+				if err := writeYAMLNode(path, &root); err != nil {
+					return "", err
+				}
+				return id, nil
+			}
+			return val, nil
+		}
+	}
+	id := NewID()
+	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "id"}
+	valNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: id}
+	teamMap.Content = append([]*yaml.Node{keyNode, valNode}, teamMap.Content...)
+	if err := writeYAMLNode(path, &root); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func writeYAMLNode(path string, root *yaml.Node) error {
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	// Preserve the existing file's mode. The operator's teem.yaml is
+	// typically 0o600; rewriting at 0o644 would silently downgrade it.
+	mode := os.FileMode(0o600)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out.Bytes(), mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 var hostnameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)

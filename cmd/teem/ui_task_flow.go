@@ -135,7 +135,7 @@ func (d *daemon) renderTaskFlow(w http.ResponseWriter, _ *http.Request, rt *regi
 					view.Timeline = append(view.Timeline, taskFlowJob{
 						JobID:  jid,
 						Status: "unknown",
-						JobURL: fmt.Sprintf("/teams/%s/jobs/%s", rt.team.Name, jid),
+						JobURL: fmt.Sprintf("/teams/%s/jobs/%s", rt.team.ID, jid),
 					})
 					continue
 				}
@@ -149,7 +149,7 @@ func (d *daemon) renderTaskFlow(w http.ResponseWriter, _ *http.Request, rt *regi
 					Status:       j.Status,
 					Prompt:       j.Prompt,
 					Summary:      j.Summary,
-					JobURL:       fmt.Sprintf("/teams/%s/jobs/%s", rt.team.Name, j.JobID),
+					JobURL:       fmt.Sprintf("/teams/%s/jobs/%s", rt.team.ID, j.JobID),
 				})
 			}
 			// Sort by absolute timestamp so a timeline spanning midnight

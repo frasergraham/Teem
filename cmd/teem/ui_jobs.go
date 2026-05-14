@@ -103,7 +103,7 @@ func (d *daemon) renderAgentJobs(w http.ResponseWriter, _ *http.Request, rt *reg
 					Duration:      durShort(j.Duration()),
 					Prompt:        j.Prompt,
 					Summary:       j.Summary,
-					JobURL:        fmt.Sprintf("/teams/%s/jobs/%s", rt.team.Name, j.JobID),
+					JobURL:        fmt.Sprintf("/teams/%s/jobs/%s", rt.team.ID, j.JobID),
 					HasTranscript: j.TranscriptBytes > 0,
 				})
 			}
@@ -148,7 +148,7 @@ func (d *daemon) renderJobDetail(w http.ResponseWriter, _ *http.Request, rt *reg
 		Duration:     durShort(job.Duration()),
 	}
 	if job.AgentID != "" {
-		view.JobsBackURL = fmt.Sprintf("/teams/%s/agents/%s/jobs", rt.team.Name, job.AgentID)
+		view.JobsBackURL = fmt.Sprintf("/teams/%s/agents/%s/jobs", rt.team.ID, job.AgentID)
 	}
 
 	// Try to load the on-disk transcript. If absent, the template

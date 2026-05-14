@@ -27,7 +27,9 @@ func newTestTeam(t *testing.T, name string) *registeredTeam {
 	}
 	t.Cleanup(func() { _ = sink.Close() })
 	return &registeredTeam{
-		team:           &team.Team{Name: name},
+		// id == name for the test so URL assertions like
+		// `/teams/alpha/...` keep matching.
+		team:           &team.Team{ID: name, Name: name},
 		auditSink:      sink,
 		registry:       mcpsrv.NewRegistry(),
 		transcriptsDir: filepath.Join(tmp, "transcripts"),

@@ -145,8 +145,8 @@ func runChat(args []string) error {
 	}
 
 	// 4. Write the MCP config Claude Code consumes.
-	mcpCfgPath := filepath.Join(defaultStateDir(t.Name), "claude-mcp.json")
-	if err := writeClaudeMCPConfig(mcpCfgPath, regResp.MCPURL, t.Name, ds.Endpoint); err != nil {
+	mcpCfgPath := filepath.Join(defaultStateDir(t.ID), "claude-mcp.json")
+	if err := writeClaudeMCPConfig(mcpCfgPath, regResp.MCPURL, t.ID, ds.Endpoint); err != nil {
 		return fmt.Errorf("write claude mcp config: %w", err)
 	}
 
@@ -157,22 +157,22 @@ func runChat(args []string) error {
 	//    then prepends accumulated leader memory (per-team digest of
 	//    prior sessions) so both compose into the final --append-
 	//    system-prompt the leader subprocess receives at chat-start.
-	pb := prompts.New(t, defaultPromptOverrideDir(t.Name))
-	brief := assembleLeaderBrief(pb.Leader(), defaultMemoryDir(t.Name))
+	pb := prompts.New(t, defaultPromptOverrideDir(t.ID))
+	brief := assembleLeaderBrief(pb.Leader(), defaultMemoryDir(t.ID))
 	quietEnsurePlugin()
-	showUnreadNotes(t.Name)
+	showUnreadNotes(t.ID)
 
 	// 6. Resolve or create the leader's persistent Claude Code session.
 	//    First chat for a team creates the session id (--session-id);
 	//    every subsequent chat resumes the same conversation
 	//    (--resume <uuid>). Pulse will use the same id in phase 3.
 	if *newSession {
-		if err := os.Remove(leaderSessionPath(t.Name)); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(leaderSessionPath(t.ID)); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("clear leader session: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "[teem] --new-session: cleared saved leader session for %q\n", t.Name)
 	}
-	sessFlags, err := claudeSessionFlags(t.Name)
+	sessFlags, err := claudeSessionFlags(t.ID)
 	if err != nil {
 		return fmt.Errorf("leader session: %w", err)
 	}
@@ -234,8 +234,8 @@ func assembleLeaderBrief(base, memDir string) string {
 // "No conversation found with session ID". Detect that by probing
 // claude's session storage and fall back to --session-id with the same
 // UUID so the next chat realises it for real.
-func claudeSessionFlags(teamName string) ([]string, error) {
-	sess, ok, err := loadLeaderSession(teamName)
+func claudeSessionFlags(teamID string) ([]string, error) {
+	sess, ok, err := loadLeaderSession(teamID)
 	if err != nil {
 		return nil, err
 	}
@@ -250,13 +250,13 @@ func claudeSessionFlags(teamName string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate session uuid: %w", err)
 	}
-	if err := saveLeaderSession(teamName, leaderSession{
+	if err := saveLeaderSession(teamID, leaderSession{
 		SessionID: uuid,
 		CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(os.Stderr, "[teem] new leader session %s for team %q\n", uuid, teamName)
+	fmt.Fprintf(os.Stderr, "[teem] new leader session %s for team %q (id %s)\n", uuid, teamID, teamID)
 	return []string{"--session-id", uuid}, nil
 }
 
@@ -367,7 +367,7 @@ func registerWithDaemon(ds daemonStateFile, yamlBody, repoRoot string) (*registe
 //     the path that actually wakes the leader — the HTTP server's
 //     PushChannel notifications go into the void because Claude Code
 //     only fires channel listeners on stdio servers it spawned.
-func writeClaudeMCPConfig(path, mcpURL, teamName, daemonEndpoint string) error {
+func writeClaudeMCPConfig(path, mcpURL, teamID, daemonEndpoint string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -387,7 +387,7 @@ func writeClaudeMCPConfig(path, mcpURL, teamName, daemonEndpoint string) error {
 			"teem-channel": map[string]any{
 				"type":    "stdio",
 				"command": shimPath,
-				"args":    []string{"--team", teamName, "--endpoint", daemonEndpoint},
+				"args":    []string{"--team", teamID, "--endpoint", daemonEndpoint},
 			},
 		},
 	}, "", "  ")
@@ -435,22 +435,22 @@ func newRootHandler(mcp http.Handler, audit http.Handler) http.Handler {
 }
 
 // defaultStateDir returns the directory holding persistent-agent state
-// files for the team. Lives alongside the audit log and worktrees so
-// everything Teem persists is under ~/.teem.
-func defaultStateDir(teamName string) string {
+// files for the team. Keyed by the team's stable id (t-<hex>) so renaming
+// `team.name` in teem.yaml doesn't strand the on-disk state.
+func defaultStateDir(teamID string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(".teem", "state")
 	}
-	return filepath.Join(home, ".teem", "state", slug(teamName))
+	return filepath.Join(home, ".teem", "state", teamID)
 }
 
 // showUnreadNotes prints any leader-written notes accumulated since
 // the user's last chat, then advances the read cursor so the same
 // notes don't reappear. Failure is best-effort — we never abort the
 // chat over a notes problem.
-func showUnreadNotes(teamName string) {
-	inbox, err := notes.Open(defaultNotesPath(teamName))
+func showUnreadNotes(teamID string) {
+	inbox, err := notes.Open(defaultNotesPath(teamID))
 	if err != nil {
 		return
 	}
@@ -469,71 +469,71 @@ func showUnreadNotes(teamName string) {
 
 // defaultPlanPath returns the JSONL plan log path for a team. Lives
 // under the team's state dir alongside the persistent-agent records.
-func defaultPlanPath(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "plan.jsonl")
+func defaultPlanPath(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "plan.jsonl")
 }
 
 // defaultNotesPath returns the JSONL notes inbox path for a team.
 // The user-facing "messages from the leader since you were away"
 // channel.
-func defaultNotesPath(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "notes.jsonl")
+func defaultNotesPath(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "notes.jsonl")
 }
 
 // defaultArchetypeSeqPath returns the JSON file produced by the
 // pre-T9 per-role instance-id counter. The current allocator
 // (internal/roster) reads this file once on first boot for
 // migration, then ignores it.
-func defaultArchetypeSeqPath(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "archetype-seq.json")
+func defaultArchetypeSeqPath(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "archetype-seq.json")
 }
 
 // defaultRosterPath returns the JSON file persisting the roster of
 // worker names (wordlist allocations + reincarnation candidates).
 // Replaces archetype-seq.json from T9 onward.
-func defaultRosterPath(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "roster.json")
+func defaultRosterPath(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "roster.json")
 }
 
 // defaultPulseRunningFlag returns the file path used to persist
 // Pulse's "running" state. Presence at daemon startup means
 // auto-resume.
-func defaultPulseRunningFlag(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "pulse.running")
+func defaultPulseRunningFlag(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "pulse.running")
 }
 
 // defaultInFlightPath returns the JSONL log path the spawner uses to
 // record start/end pairs for every job a worker is handed. Consulted
 // on next daemon startup to emit job_interrupted for orphans.
-func defaultInFlightPath(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "in-flight.jsonl")
+func defaultInFlightPath(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "in-flight.jsonl")
 }
 
 // defaultSocketDir returns the directory under which per-agent unix
 // sockets live for the subprocess local-worker model. Each socket
 // path is socketDir/<agent-id>.sock with a sibling .pid file.
-func defaultSocketDir(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "sockets")
+func defaultSocketDir(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "sockets")
 }
 
 // defaultMemoryDir returns the directory holding per-archetype memory
 // markdown files for the team. One file per role: <dir>/<role>.md.
-func defaultMemoryDir(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "memory")
+func defaultMemoryDir(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "memory")
 }
 
 // defaultPromptOverrideDir returns the directory holding operator-
 // authored prompt-override files for the team. One file per role
 // (including the synthetic "leader"): <dir>/<role>.md.
-func defaultPromptOverrideDir(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "prompt-overrides")
+func defaultPromptOverrideDir(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "prompt-overrides")
 }
 
 // defaultRegistrationPath returns the file the daemon writes on each
 // /control/teams registration so the team can be rebuilt after a
 // restart. Holds the YAML the operator submitted plus repo metadata.
-func defaultRegistrationPath(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "registration.json")
+func defaultRegistrationPath(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "registration.json")
 }
 
 // drainTimeout returns the configured drain window for graceful
@@ -555,48 +555,24 @@ func drainTimeout() time.Duration {
 }
 
 // defaultAuditPath returns the on-disk audit log path for a team.
-// Lives alongside the other ~/.teem state so it's predictable across
-// sessions. Team name is slugged so YAML can't escape the path.
-func defaultAuditPath(teamName string) string {
+// Keyed by team_id so renames don't strand audit history.
+func defaultAuditPath(teamID string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(".teem", "audit", "audit.jsonl")
 	}
-	return filepath.Join(home, ".teem", "audit", slug(teamName), "audit.jsonl")
-}
-
-// slug normalises an arbitrary name to a path-safe slug. Shared by
-// defaultAuditPath and defaultWorktreeBase.
-func slug(s string) string {
-	out := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			return r
-		case r >= 'A' && r <= 'Z':
-			return r + 32
-		case r == ' ' || r == '_' || r == '-':
-			return '-'
-		}
-		return -1
-	}, s)
-	out = strings.Trim(out, "-")
-	if out == "" {
-		return "default"
-	}
-	return out
+	return filepath.Join(home, ".teem", "audit", teamID, "audit.jsonl")
 }
 
 // defaultWorktreeBase returns the directory under which local agent
-// worktrees are placed for this team. Lives under ~/.teem alongside the
-// tsnet state so it's predictable across sessions. The team name is
-// slugged (lowercase, ascii-and-dash) so an arbitrary team.Name in the
-// YAML can't escape into the path.
-func defaultWorktreeBase(teamName string) string {
+// worktrees are placed for this team. Keyed by team_id so renaming
+// `team.name` doesn't strand existing worktrees.
+func defaultWorktreeBase(teamID string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".teem", "worktrees", slug(teamName))
+	return filepath.Join(home, ".teem", "worktrees", teamID)
 }
 
 // randomToken returns a 24-byte hex token used as the leader↔worker bearer

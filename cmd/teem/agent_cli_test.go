@@ -30,7 +30,9 @@ team:
 `
 
 // agentCLIFixture sets up a temp HOME and a team yaml in cwd so the
-// CLI's defaults land under the test's scratch directory.
+// CLI's defaults land under the test's scratch directory. The state
+// dir component is now <t.ID> (not the team name), so we Load the
+// team here to auto-mint and return the same id the runtime will see.
 func agentCLIFixture(t *testing.T) (yamlPath, stateDir string) {
 	t.Helper()
 	home := t.TempDir()
@@ -48,7 +50,13 @@ func agentCLIFixture(t *testing.T) (yamlPath, stateDir string) {
 	if err := os.WriteFile(yamlPath, []byte(agentCLITestYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	stateDir = filepath.Join(home, ".teem", "state", "agentcli")
+	// Loading once mints + persists the id; subsequent loads (in the
+	// CLI under test) read it back, so this id matches the runtime.
+	tm, err := team.Load(yamlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir = filepath.Join(home, ".teem", "state", tm.ID)
 	return yamlPath, stateDir
 }
 

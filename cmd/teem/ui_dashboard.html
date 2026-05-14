@@ -2,7 +2,7 @@
   This file defines two SSR pages for the dashboard:
 
     - "summary"     — GET /, the per-team tile index (entry point).
-    - "team_detail" — GET /teams/<slug>, the deep view for one team.
+    - "team_detail" — GET /teams/<id>, the deep view for one team.
 
   Both share the CSS block below via the "ui_styles" sub-template so
   edits to colour tokens / mobile breakpoints stay in one place.
@@ -402,7 +402,7 @@
 {{ end }}
 
 
-{{/* ============= PER-TEAM DETAIL (/teams/<slug>) ============= */}}
+{{/* ============= PER-TEAM DETAIL (/teams/<id>) ============= */}}
 {{ define "team_detail" }}
 <!doctype html>
 <html lang="en">

@@ -36,12 +36,13 @@ type dashboardBranch struct {
 }
 
 // listTeemBranches enumerates refs/heads/teem/* in repoRoot and maps
-// each to its current agent registry entry (when present).
+// each to its current agent registry entry (when present). teamID is
+// the canonical routing key used to build per-agent jobs links.
 //
 // Errors are intentionally swallowed → empty slice. A dashboard page
 // must never 500 because the working tree has gone missing or git is
 // unavailable; a one-line note to stderr is enough.
-func listTeemBranches(repoRoot string, reg *mcpsrv.Registry, teamName string) []dashboardBranch {
+func listTeemBranches(repoRoot string, reg *mcpsrv.Registry, teamID string) []dashboardBranch {
 	if repoRoot == "" {
 		return nil
 	}
@@ -92,7 +93,7 @@ func listTeemBranches(repoRoot string, reg *mcpsrv.Registry, teamName string) []
 		}
 		if _, ok := reg.Get(agentID); ok {
 			b.Live = true
-			b.JobsURL = fmt.Sprintf("/teams/%s/agents/%s/jobs", teamName, agentID)
+			b.JobsURL = fmt.Sprintf("/teams/%s/agents/%s/jobs", teamID, agentID)
 		}
 		collected = append(collected, row{b: b, stamp: stamp})
 	}

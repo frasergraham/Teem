@@ -250,7 +250,7 @@ See `README.md` for the full ECS setup checklist.
 ~/.teem/
 ├── daemon.{pid,json,log}                 # the daemon itself
 ├── state/
-│   └── <team-slug>/
+│   └── <team-id>/
 │       ├── leader-session.json           # Claude session UUID
 │       ├── plan.jsonl                    # tasks
 │       ├── notes.jsonl                   # leader → user messages
@@ -258,9 +258,9 @@ See `README.md` for the full ECS setup checklist.
 │       ├── pulse.paused                  # flag file (present when paused)
 │       └── <agent-id>.json               # persistent agent state (Fargate ARNs)
 ├── audit/
-│   └── <team-slug>/audit.jsonl           # every event
+│   └── <team-id>/audit.jsonl           # every event
 └── worktrees/
-    └── <team-slug>/<agent-id>/           # local worker checkouts
+    └── <team-id>/<agent-id>/           # local worker checkouts
 ```
 
 The plugin lives at `~/.claude/commands/teem-*.md` and
@@ -288,7 +288,7 @@ teem stop                          # shut down the daemon
 
 The leader and each archetype get a system prompt assembled from two
 layers: the team YAML and an operator-authored override on disk at
-`~/.teem/state/<team-slug>/prompt-overrides/<role>.md`. Use `teem
+`~/.teem/state/<team-id>/prompt-overrides/<role>.md`. Use `teem
 agent` to inspect or update either layer without editing YAML or
 restarting the daemon. Same data is available to the leader at runtime
 via the `read_prompt` / `append_prompt` MCP tools.
