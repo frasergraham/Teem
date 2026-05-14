@@ -59,6 +59,14 @@ type Worker struct {
 	// been doing" into every Claude run.
 	BaselineContext string
 
+	// ArchetypePrompt is the layered system-prompt assembly for the
+	// worker's role (YAML description + standing framing + operator
+	// override). Like BaselineContext, snapshot at construction and
+	// prepended to each job's Context — workers don't currently get a
+	// claude --append-system-prompt flag, so this is the injection
+	// path with the equivalent effect.
+	ArchetypePrompt string
+
 	jobsTopic   string
 	resultTopic string
 	logTopic    string
@@ -137,6 +145,25 @@ func (w *Worker) runJob(ctx context.Context, job jobMessage) {
 			jobCtx = w.BaselineContext + "\n\n---\n\n" + jobCtx
 		} else {
 			jobCtx = w.BaselineContext
+		}
+	}
+	// Workers receive the archetype prompt as job context rather than
+	// via claude's --append-system-prompt because the per-job claude
+	// invocation today only passes the prompt + context on stdin —
+	// there is no --append-system-prompt flag wired through the
+	// executor (HTTPExecutor → teem-worker daemon, or ProcessExecutor
+	// → `claude -p`). Folding the archetype prompt into the job
+	// context is the existing extension point with the equivalent
+	// effect. The leader is the inverse case: a single long-lived
+	// claude session that gets one shot of --append-system-prompt at
+	// chat start, so it uses that path instead. If workers ever grow
+	// a system-prompt flag, the ArchetypePrompt prepend should move
+	// out of jobCtx and into that flag's payload.
+	if w.ArchetypePrompt != "" {
+		if jobCtx != "" {
+			jobCtx = w.ArchetypePrompt + "\n\n---\n\n" + jobCtx
+		} else {
+			jobCtx = w.ArchetypePrompt
 		}
 	}
 	output, err := w.Executor.Execute(ctx, executor.Job{

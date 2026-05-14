@@ -16,6 +16,7 @@ import (
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
+	"github.com/frasergraham/teem/internal/prompts"
 	"github.com/frasergraham/teem/internal/team"
 )
 
@@ -329,6 +330,77 @@ func (s *Server) handleAppendArchetypeMemory(_ context.Context, req mcpgo.CallTo
 	}
 	out, _ := json.Marshal(map[string]string{"appended": role})
 	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+// --- prompt handlers ------------------------------------------------------
+
+// handleReadPrompt returns the assembled prompt for the role plus the
+// raw override text. role is either "leader" or an archetype role.
+// Unknown archetype roles error out (other than the synthetic leader).
+func (s *Server) handleReadPrompt(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.prompts == nil {
+		return mcpgo.NewToolResultError("prompt builder is not configured"), nil
+	}
+	role, err := req.RequireString("role")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if err := prompts.ValidateRole(role); err != nil {
+		return mcpgo.NewToolResultErrorf("invalid role %q", role), nil
+	}
+	if role != prompts.LeaderRole && s.team != nil && s.team.FindArchetypeByRole(role) == nil {
+		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
+	}
+	var assembled string
+	if role == prompts.LeaderRole {
+		assembled = s.prompts.Leader()
+	} else {
+		got, ok := s.prompts.Archetype(role)
+		if !ok {
+			return mcpgo.NewToolResultErrorf("role %q is not declared in the team's archetypes", role), nil
+		}
+		assembled = got
+	}
+	override, _, oerr := s.prompts.Override(role)
+	if oerr != nil {
+		return mcpgo.NewToolResultErrorFromErr("read_prompt: override", oerr), nil
+	}
+	out, _ := json.Marshal(map[string]string{
+		"role":      role,
+		"assembled": assembled,
+		"override":  override,
+	})
+	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+// handleAppendPrompt appends a timestamped block to the role's
+// override file via Builder.AppendOverride.
+func (s *Server) handleAppendPrompt(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.prompts == nil {
+		return mcpgo.NewToolResultError("prompt builder is not configured"), nil
+	}
+	role, err := req.RequireString("role")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	text, err := req.RequireString("text")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if err := prompts.ValidateRole(role); err != nil {
+		return mcpgo.NewToolResultErrorf("invalid role %q", role), nil
+	}
+	if role != prompts.LeaderRole && s.team != nil && s.team.FindArchetypeByRole(role) == nil {
+		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
+	}
+	if err := s.prompts.AppendOverride(role, text); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("append_prompt", err), nil
+	}
+	body, _ := json.Marshal(map[string]string{
+		"role": role,
+		"path": s.prompts.OverridePath(role),
+	})
+	return mcpgo.NewToolResultText(string(body)), nil
 }
 
 // --- notes handler --------------------------------------------------------

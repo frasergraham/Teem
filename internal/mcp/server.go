@@ -17,6 +17,7 @@ import (
 	"github.com/frasergraham/teem/internal/leaderstatus"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
+	"github.com/frasergraham/teem/internal/prompts"
 	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/team"
 )
@@ -56,6 +57,7 @@ type Server struct {
 	notes          *notes.Inbox
 	archMem        *archmem.Store
 	leaderStatus   *leaderstatus.Store
+	prompts        *prompts.Builder
 	transcriptsDir string
 }
 
@@ -88,6 +90,10 @@ type Config struct {
 	// When nil the update_leader_status / get_leader_status tools
 	// return a clear error.
 	LeaderStatus *leaderstatus.Store
+	// Prompts is the layered system-prompt builder used by the
+	// read_prompt / append_prompt tools. When nil those tools
+	// return an error explaining the feature is unconfigured.
+	Prompts *prompts.Builder
 }
 
 // New builds an orchestrator MCP server. Call Serve to start serving on a
@@ -118,6 +124,7 @@ func New(cfg Config) (*Server, error) {
 		notes:          cfg.Notes,
 		archMem:        cfg.ArchMem,
 		leaderStatus:   cfg.LeaderStatus,
+		prompts:        cfg.Prompts,
 		transcriptsDir: cfg.TranscriptsDir,
 	}
 	s.registerTools()
@@ -386,6 +393,21 @@ func (s *Server) registerTools() {
 			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Decision text — markdown allowed.")),
 		),
 		s.handleRecordDecision,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("read_prompt",
+			mcpgo.WithDescription("Return the assembled system prompt for a role: the YAML-derived base plus any operator override layer on disk. Use \"leader\" for the leader's prompt or any archetype role name. The response includes both the fully assembled prompt (`assembled`) and the raw override text (`override`, empty when no override exists) so a leader can see what's being injected on its own behalf and what archetypes will see when spawned."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("\"leader\" or an archetype role (worker, reviewer, …).")),
+		),
+		s.handleReadPrompt,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("append_prompt",
+			mcpgo.WithDescription("Append an operator-authored block to a role's prompt override file. Adds a timestamped `## Appended <UTC>` section preserving prior content; future leader chats / worker spawns of that role will see the new text after the standing system prompt. Use for durable behaviour tweaks (\"always run go vet before commit\"); use update_archetype instead for one-line description edits."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("\"leader\" or an archetype role.")),
+			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Markdown body to append.")),
+		),
+		s.handleAppendPrompt,
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("record_blocker",

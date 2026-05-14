@@ -146,7 +146,8 @@ func TestAssembleLeaderBrief_FoldsLeaderMemory(t *testing.T) {
 	}
 
 	// Empty case: brief is unchanged.
-	got := assembleLeaderBrief(tm, memDir)
+	base := tm.LeaderSystemPrompt()
+	got := assembleLeaderBrief(base, memDir)
 	if strings.Contains(got, "Leader memory") {
 		t.Errorf("empty leader memory should not inject section:\n%s", got)
 	}
@@ -158,7 +159,7 @@ func TestAssembleLeaderBrief_FoldsLeaderMemory(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	got = assembleLeaderBrief(tm, memDir)
+	got = assembleLeaderBrief(base, memDir)
 	if !strings.Contains(got, "# Leader memory (prior sessions)") {
 		t.Errorf("missing leader memory header:\n%s", got)
 	}

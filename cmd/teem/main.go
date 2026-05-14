@@ -22,6 +22,7 @@ import (
 	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/claudeflags"
 	"github.com/frasergraham/teem/internal/notes"
+	"github.com/frasergraham/teem/internal/prompts"
 	"github.com/frasergraham/teem/internal/provisioner"
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/team"
@@ -52,6 +53,8 @@ func main() {
 		err = runPulse(args)
 	case "memory":
 		err = runMemory(args)
+	case "prompt":
+		err = runPrompt(args)
 	case "version":
 		fmt.Println(versionString())
 	case "-h", "--help", "help":
@@ -79,6 +82,7 @@ Usage:
   teem audit   [--agent ID] [--since RFC3339] [--limit 50] [--follow]
   teem pulse   <start|stop|pause|resume|tick|status> [--team t] [--interval 5m]
   teem memory  <show|append|edit> --role X [--team t] [text]
+  teem prompt  <show|append|edit> [--role leader|<role>] [--team t]
   teem version
 
 Run 'teem <subcommand> -h' for flags.
@@ -147,9 +151,14 @@ func runChat(args []string) error {
 	}
 
 	// 5. Team brief + first-run plugin install + show any notes the
-	//    leader left while we were away. The brief carries any
-	//    accumulated leader memory (per-team digest of prior sessions).
-	brief := assembleLeaderBrief(t, defaultMemoryDir(t.Name))
+	//    leader left while we were away. The base prompt comes from
+	//    prompts.Builder.Leader() — team.LeaderSystemPrompt() folded
+	//    with the operator override layer on disk. assembleLeaderBrief
+	//    then prepends accumulated leader memory (per-team digest of
+	//    prior sessions) so both compose into the final --append-
+	//    system-prompt the leader subprocess receives at chat-start.
+	pb := prompts.New(t, defaultPromptOverrideDir(t.Name))
+	brief := assembleLeaderBrief(pb.Leader(), defaultMemoryDir(t.Name))
 	quietEnsurePlugin()
 	showUnreadNotes(t.Name)
 
@@ -184,13 +193,14 @@ func runChat(args []string) error {
 }
 
 // assembleLeaderBrief builds the system prompt the leader subprocess
-// is launched with. Loads any accumulated leader memory from memDir
-// and prepends it as a "# Leader memory (prior sessions)" block above
-// the team's standard brief. A freshly-initialised file with header-only
-// content (no digest text and no entries) is treated as empty so we
-// don't inject a meaningless "Leader memory" section into the brief.
-func assembleLeaderBrief(t *team.Team, memDir string) string {
-	base := t.LeaderSystemPrompt()
+// is launched with. base is the already-assembled prompt body (today
+// prompts.Builder.Leader(): team.LeaderSystemPrompt + operator
+// override layer). Loads any accumulated leader memory from memDir and
+// prepends it as a "# Leader memory (prior sessions)" block above the
+// base. A freshly-initialised file with header-only content (no digest
+// text and no entries) is treated as empty so we don't inject a
+// meaningless "Leader memory" section into the brief.
+func assembleLeaderBrief(base, memDir string) string {
 	store := archmem.New(memDir, nil)
 	digest, entries, err := store.LoadParsed(archmem.LeaderRole)
 	if err != nil {
@@ -489,6 +499,13 @@ func defaultSocketDir(teamName string) string {
 // markdown files for the team. One file per role: <dir>/<role>.md.
 func defaultMemoryDir(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "memory")
+}
+
+// defaultPromptOverrideDir returns the directory holding operator-
+// authored prompt-override files for the team. One file per role
+// (including the synthetic "leader"): <dir>/<role>.md.
+func defaultPromptOverrideDir(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "prompt-overrides")
 }
 
 // defaultRegistrationPath returns the file the daemon writes on each

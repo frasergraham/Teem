@@ -276,8 +276,30 @@ teem audit --agent worker-1 --follow
 teem pulse status                  # autonomy state for this team
 teem pulse pause                   # halt the autonomous loop
 teem pulse tick                    # force one autonomous turn now
+teem prompt show --role leader     # see the assembled leader prompt
+teem prompt show --role worker --raw   # see only the operator override
+teem prompt append --role worker "Always run go vet before commit"
+teem prompt edit --role reviewer   # opens $EDITOR on the override file
 teem stop                          # shut down the daemon
 ```
+
+## Customising the system prompts
+
+The leader and each archetype get a system prompt assembled from two
+layers: the team YAML and an operator-authored override on disk at
+`~/.teem/state/<team-slug>/prompt-overrides/<role>.md`. Use `teem
+prompt` to inspect or extend either layer without editing YAML or
+restarting the daemon. Same data is available to the leader at runtime
+via the `read_prompt` / `append_prompt` MCP tools.
+
+Operator prompt overrides assemble into the leader's brief at
+chat-start. A running leader session retains its existing prompt until
+you exit and re-launch with `teem chat --new-session`; subsequent
+Pulse ticks and plain `teem chat` invocations resume the prior session
+and reuse the prompt that was active when that session was first
+created. Worker prompts behave the same way per-spawn — an in-flight
+worker keeps the prompt it was given at spawn; the next spawn picks up
+the new override.
 
 ## Troubleshooting
 

@@ -30,6 +30,7 @@ import (
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
+	"github.com/frasergraham/teem/internal/prompts"
 	"github.com/frasergraham/teem/internal/pulse"
 	"github.com/frasergraham/teem/internal/retention"
 	"github.com/frasergraham/teem/internal/roster"
@@ -942,6 +943,12 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 
 	transcriptsDir := filepath.Join(defaultStateDir(t.Name), "transcripts")
 
+	// Prompt builder: layered assembly of the leader's and each
+	// archetype's system prompt with an operator-override layer on
+	// disk. Shared by the CLI, the MCP read_prompt/append_prompt
+	// tools, and the spawner's per-worker bake-in.
+	promptBuilder := prompts.New(t, defaultPromptOverrideDir(t.Name))
+
 	// Roster: per-team worker-name allocator. On first open after the
 	// T9 rollout (no existing roster.json), migrate legacy
 	// `<role>-N` ids from the previous archetype-seq.json counter
@@ -981,6 +988,14 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		InFlight:            inFlightLog,
 		SocketDir:           defaultSocketDir(t.Name),
 		LoadArchetypeMemory: archMemStore.Load,
+		// Spawner.LoadArchetypePrompt is (role) -> string; Builder.Archetype
+		// now signals "role not declared" via the bool. The spawner only
+		// reaches here for roles it just resolved from the team YAML, so
+		// an empty string on miss is a safe degenerate case.
+		LoadArchetypePrompt: func(role string) string {
+			s, _ := promptBuilder.Archetype(role)
+			return s
+		},
 	})
 
 	srv, err := mcpsrv.New(mcpsrv.Config{
@@ -994,6 +1009,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		TranscriptsDir: transcriptsDir,
 		ArchMem:        archMemStore,
 		LeaderStatus:   leaderStatusStore,
+		Prompts:        promptBuilder,
 	})
 	if err != nil {
 		_ = auditSink.Close()

@@ -167,6 +167,32 @@ overhead:
 - `update_archetype(role, description?, max_concurrent?)` — refine
   the description or bump/lower the cap.
 
+## Inspecting and tuning prompts
+
+The leader's system prompt and each archetype's system prompt are
+assembled by a layered builder: the YAML-derived base, plus an
+operator-authored override on disk at
+`~/.teem/state/<team>/prompt-overrides/<role>.md`. You can read your
+own assembled prompt and any archetype's prompt at runtime — useful
+when the user asks "why is the reviewer doing X?" or "what context do
+new workers have?".
+
+- `read_prompt(role)` — returns `{assembled, override}` for the role.
+  `role` is `"leader"` or any archetype role (`worker`, `reviewer`,
+  etc.). `assembled` is the full prompt as it would be passed to a
+  freshly-launched leader / spawned worker; `override` is just the
+  operator-authored layer (empty when no override file exists).
+- `append_prompt(role, text)` — append an operator-style block to the
+  override file (timestamped, preserves prior content). Use for
+  durable behaviour tweaks the leader or workers should always carry,
+  e.g. "always run go vet before commit". Prefer `update_archetype`
+  for short description edits; reserve `append_prompt` for multi-line
+  guidance or rules.
+
+The operator can also tune these from the CLI with
+`teem prompt show|append|edit --role <role>` — show with `--raw`
+prints just the override layer.
+
 ## When to delegate vs. do it yourself
 
 Delegate when:

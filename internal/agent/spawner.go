@@ -103,6 +103,12 @@ type Config struct {
 	// every job the worker runs carries the same long-term context.
 	// Errors are logged and treated as empty.
 	LoadArchetypeMemory func(role string) (string, error)
+	// LoadArchetypePrompt, when non-nil, is called at worker
+	// construction to fetch the role's assembled system prompt (the
+	// YAML-derived archetype framing plus any operator override).
+	// Snapshot once onto Worker.ArchetypePrompt so it rides along
+	// with every job. Errors are logged and treated as empty.
+	LoadArchetypePrompt func(role string) string
 }
 
 // GitConfig is the source-control configuration the leader hands to
@@ -612,6 +618,12 @@ func (s *Spawner) startWorker(p provisioner.Provisioner, a *provisioner.Agent) e
 		} else {
 			fmt.Fprintf(os.Stderr, "[spawner] load archmem for %q: %v\n", a.Role, err)
 		}
+	}
+	// Archetype prompt snapshot: same idea for the layered
+	// system-prompt assembly (YAML description + operator override).
+	// Stitched ahead of BaselineContext on every job.
+	if s.cfg.LoadArchetypePrompt != nil && a.Role != "" {
+		w.ArchetypePrompt = s.cfg.LoadArchetypePrompt(a.Role)
 	}
 	if err := w.Start(s.baseCtx); err != nil {
 		return err
