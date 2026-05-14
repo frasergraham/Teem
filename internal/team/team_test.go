@@ -273,3 +273,199 @@ team:
 		})
 	}
 }
+
+// TestNewID_FormatAndUniqueness exercises the id minter directly: every
+// minted id must match the canonical regex (`t-` + 16 lowercase hex
+// chars) and ten draws in a row must all differ. A regression that
+// e.g. dropped the prefix or shortened the hex would surface here.
+func TestNewID_FormatAndUniqueness(t *testing.T) {
+	seen := map[string]struct{}{}
+	for i := 0; i < 10; i++ {
+		id := NewID()
+		if !IsCanonicalID(id) {
+			t.Errorf("NewID()[%d] = %q, not canonical", i, id)
+		}
+		if len(id) != len(IDPrefix)+16 {
+			t.Errorf("NewID()[%d] = %q, want length %d", i, id, len(IDPrefix)+16)
+		}
+		if _, dup := seen[id]; dup {
+			t.Errorf("NewID()[%d] = %q, duplicate within 10 draws", i, id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestIsCanonicalID exercises the regex gate that keeps migration code
+// from re-minting an already-minted dir and gates filesystem path
+// safety. Both valid and invalid inputs are checked because tightening
+// the regex (e.g. requiring uppercase, or relaxing length) silently
+// breaks one path or the other.
+func TestIsCanonicalID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"t-deadbeef00112233", true},
+		{"t-abcdef0123456789", true},
+		{"t-12345678", true}, // 8 hex is the regex minimum
+		{"", false},
+		{"alpha", false},
+		{"t-", false},
+		{"T-DEADBEEF00112233", false}, // uppercase not allowed
+		{"t-DEADBEEF00112233", false}, // mixed case not allowed
+		{"t-1234567", false},          // 7 hex below minimum
+		{"t-zzzzzzzz", false},         // not hex
+		{"alpha-team", false},
+		{"t-deadbeef00112233-extra", false},
+	}
+	for _, c := range cases {
+		if got := IsCanonicalID(c.in); got != c.want {
+			t.Errorf("IsCanonicalID(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestEnsureIDFile_PreservesComments writes a teem.yaml with comments
+// + a non-id `team:` mapping, calls EnsureIDFile, then asserts the
+// returned id is canonical AND the file still carries the original
+// comments and key order. The point of the yaml.v3 Node API in
+// EnsureIDFile is exactly this — a naive yaml.Marshal would strip
+// comments and reorder keys, silently destroying the operator's
+// hand-edited file.
+func TestEnsureIDFile_PreservesComments(t *testing.T) {
+	body := `# This is the team manifest.
+team:
+  # The display name is shown in the dashboard.
+  name: alpha
+  # Leader is the orchestrator.
+  leader:
+    system_prompt: "Ship the MVP."
+  archetypes:
+    - role: worker
+      description: "Implements features."
+      placement: local
+      max_concurrent: 1
+`
+	path := writeTemp(t, body)
+	id, err := EnsureIDFile(path)
+	if err != nil {
+		t.Fatalf("EnsureIDFile: %v", err)
+	}
+	if !IsCanonicalID(id) {
+		t.Errorf("returned id %q not canonical", id)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	gotStr := string(got)
+	for _, want := range []string{
+		"# This is the team manifest.",
+		"# The display name is shown in the dashboard.",
+		"# Leader is the orchestrator.",
+		"id: " + id,
+		"name: alpha",
+	} {
+		if !strings.Contains(gotStr, want) {
+			t.Errorf("rewritten yaml missing %q\n--- got ---\n%s", want, gotStr)
+		}
+	}
+	// Key order: id should come before name (we prepend it), and name
+	// should come before leader. Anything else means yaml.Marshal
+	// reordered the file.
+	idIdx := strings.Index(gotStr, "id: ")
+	nameIdx := strings.Index(gotStr, "name: ")
+	leaderIdx := strings.Index(gotStr, "leader:")
+	if !(idIdx >= 0 && idIdx < nameIdx && nameIdx < leaderIdx) {
+		t.Errorf("key order disturbed: id@%d name@%d leader@%d\n%s", idIdx, nameIdx, leaderIdx, gotStr)
+	}
+}
+
+// TestEnsureIDFile_RespectsExistingID confirms idempotency: a yaml
+// that already has `id:` keeps its id. A regression that re-minted
+// every time would orphan the on-disk state dir keyed by the original
+// id.
+func TestEnsureIDFile_RespectsExistingID(t *testing.T) {
+	existing := "t-cafebabedeadbeef"
+	body := `team:
+  id: ` + existing + `
+  name: alpha
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: w, placement: local, max_concurrent: 1}
+`
+	path := writeTemp(t, body)
+	got, err := EnsureIDFile(path)
+	if err != nil {
+		t.Fatalf("EnsureIDFile: %v", err)
+	}
+	if got != existing {
+		t.Errorf("EnsureIDFile = %q, want existing %q (regression: re-mint)", got, existing)
+	}
+	// Second call must also be stable.
+	got2, err := EnsureIDFile(path)
+	if err != nil {
+		t.Fatalf("EnsureIDFile (2nd): %v", err)
+	}
+	if got2 != existing {
+		t.Errorf("EnsureIDFile (2nd) = %q, want %q", got2, existing)
+	}
+}
+
+// TestSetIDFile_AtomicWrite verifies SetIDFile writes the id back and
+// preserves file mode. Atomic-write (tmp + rename) means we never see
+// a half-written file mid-write; the visible-mode check confirms the
+// rename doesn't accidentally reset perms to 0644.
+func TestSetIDFile_AtomicWrite(t *testing.T) {
+	body := `team:
+  name: alpha
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: w, placement: local, max_concurrent: 1}
+`
+	path := writeTemp(t, body)
+	// writeTemp leaves the file at 0o600; capture the original mode.
+	beforeStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	beforeMode := beforeStat.Mode().Perm()
+
+	newID := "t-1122334455667788"
+	if err := SetIDFile(path, newID); err != nil {
+		t.Fatalf("SetIDFile: %v", err)
+	}
+
+	afterBody, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(afterBody), "id: "+newID) {
+		t.Errorf("file missing new id:\n%s", afterBody)
+	}
+	afterStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if afterStat.Mode().Perm() != beforeMode {
+		t.Errorf("perms changed: before=%v after=%v", beforeMode, afterStat.Mode().Perm())
+	}
+
+	// SetIDFile must OVERWRITE an existing id (unlike EnsureIDFile,
+	// which preserves it). This is what the daemon's migration relies
+	// on when back-filling a minted id into the operator's yaml.
+	newer := "t-aabbccddeeff0011"
+	if err := SetIDFile(path, newer); err != nil {
+		t.Fatalf("SetIDFile overwrite: %v", err)
+	}
+	afterBody, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back 2: %v", err)
+	}
+	if !strings.Contains(string(afterBody), "id: "+newer) {
+		t.Errorf("overwrite missing new id:\n%s", afterBody)
+	}
+	if strings.Contains(string(afterBody), "id: "+newID) {
+		t.Errorf("overwrite left old id behind:\n%s", afterBody)
+	}
+}

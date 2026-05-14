@@ -328,8 +328,14 @@ func writeYAMLNode(path string, root *yaml.Node) error {
 	if err := enc.Close(); err != nil {
 		return err
 	}
+	// Preserve the existing file's mode. The operator's teem.yaml is
+	// typically 0o600; rewriting at 0o644 would silently downgrade it.
+	mode := os.FileMode(0o600)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(tmp, out.Bytes(), mode); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

@@ -209,7 +209,7 @@ type dashboardEvent struct {
 }
 
 // renderDashboard composes the summary index — a tile per registered
-// team, each linking to /teams/<slug> for the deep view. Designed to
+// team, each linking to /teams/<id> for the deep view. Designed to
 // read at-a-glance across the room: counters in big bold numerals.
 func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 	d.mu.Lock()

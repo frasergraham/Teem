@@ -566,9 +566,26 @@ func removeTeamRegistration(teamID string) {
 // and the migration continues — the in-memory id still works for the
 // current run.
 func migrateLegacyTeamDirs(home string) {
-	stateRoot := filepath.Join(home, ".teem", "state")
-	auditRoot := filepath.Join(home, ".teem", "audit")
-	worktreesRoot := filepath.Join(home, ".teem", "worktrees")
+	migrateLegacyTeamDirsIn(filepath.Join(home, ".teem"))
+}
+
+// migrateLegacyTeamDirsIn is the testable form of migrateLegacyTeamDirs:
+// it walks state/audit/worktrees under an explicit base dir. The home
+// shim above just calls this with `<home>/.teem`.
+//
+// Partial-failure recovery: audit and worktrees rename first
+// (best-effort, log on failure but continue). State renames last and
+// is the canonical marker — if `state/<id>` exists, the team is
+// considered migrated. A failed audit/worktree rename strands those
+// dirs under the legacy slug, but the consumer paths (defaultAuditPath,
+// defaultWorktreeBase) are keyed by ID; the strand just means audit
+// history / worktrees aren't visible at the new id. We log a warning
+// rather than crash, so the daemon still boots; a re-run of the
+// migration will see `state/<id>` already canonical and skip.
+func migrateLegacyTeamDirsIn(base string) {
+	stateRoot := filepath.Join(base, "state")
+	auditRoot := filepath.Join(base, "audit")
+	worktreesRoot := filepath.Join(base, "worktrees")
 
 	entries, err := os.ReadDir(stateRoot)
 	if err != nil {
@@ -596,7 +613,9 @@ func migrateLegacyTeamDirs(home string) {
 
 		// Mint via EnsureIDFile against a temp copy so we can both
 		// (a) get the id, and (b) capture the rewritten YAML body to
-		// re-persist into registration.json.
+		// re-persist into registration.json. EnsureIDFile reuses an
+		// existing id in the YAML if present, so a yaml that already
+		// has `id:` doesn't get a fresh one.
 		tmpFile, err := writeTempYAML(reg.TeamYAML)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[teemd] migration: skip %s (temp yaml: %v)\n", oldName, err)
@@ -618,19 +637,17 @@ func migrateLegacyTeamDirs(home string) {
 			continue
 		}
 
-		// Rename state, audit, worktree dirs (each best-effort: a
-		// missing source is fine; a failed rename logs and continues).
-		if err := os.Rename(filepath.Join(stateRoot, oldName), newStateDir); err != nil {
-			fmt.Fprintf(os.Stderr, "[teemd] migration: rename state %s -> %s: %v\n", oldName, newID, err)
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "[teemd] migrated team to id %s: %s -> %s\n", newID, filepath.Join(stateRoot, oldName), newStateDir)
-
+		// Rename audit + worktrees FIRST (each best-effort: a missing
+		// source is fine; a failed rename logs a warning and continues
+		// rather than aborting — state's rename is the canonical
+		// migration marker). This ordering means a crash between the
+		// first two and the state rename leaves both legacy and the
+		// in-progress state dir intact, so a re-run can complete.
 		oldAudit := filepath.Join(auditRoot, oldName)
 		newAudit := filepath.Join(auditRoot, newID)
 		if _, err := os.Stat(oldAudit); err == nil {
 			if rerr := os.Rename(oldAudit, newAudit); rerr != nil {
-				fmt.Fprintf(os.Stderr, "[teemd] migration: rename audit %s -> %s: %v\n", oldName, newID, rerr)
+				fmt.Fprintf(os.Stderr, "[teemd] migration: rename audit %s -> %s: %v (stranded under legacy slug; not fatal)\n", oldName, newID, rerr)
 			} else {
 				fmt.Fprintf(os.Stderr, "[teemd] migrated audit dir: %s -> %s\n", oldAudit, newAudit)
 			}
@@ -640,11 +657,21 @@ func migrateLegacyTeamDirs(home string) {
 		newWT := filepath.Join(worktreesRoot, newID)
 		if _, err := os.Stat(oldWT); err == nil {
 			if rerr := os.Rename(oldWT, newWT); rerr != nil {
-				fmt.Fprintf(os.Stderr, "[teemd] migration: rename worktrees %s -> %s: %v\n", oldName, newID, rerr)
+				fmt.Fprintf(os.Stderr, "[teemd] migration: rename worktrees %s -> %s: %v (stranded under legacy slug; not fatal)\n", oldName, newID, rerr)
 			} else {
 				fmt.Fprintf(os.Stderr, "[teemd] migrated worktree dir: %s -> %s\n", oldWT, newWT)
 			}
 		}
+
+		// State LAST: this is the canonical marker — if this rename
+		// succeeds, the team is considered migrated and a re-run skips
+		// it. If it fails, audit/worktrees are still under the legacy
+		// slug AND state is too, so a future re-run starts fresh.
+		if err := os.Rename(filepath.Join(stateRoot, oldName), newStateDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] migration: rename state %s -> %s: %v (migration aborted for this team)\n", oldName, newID, err)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[teemd] migrated team to id %s: %s -> %s\n", newID, filepath.Join(stateRoot, oldName), newStateDir)
 
 		// Write the id-bearing YAML back into the new registration.json.
 		if werr := writeTeamRegistration(newID, reg); werr != nil {

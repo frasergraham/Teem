@@ -69,8 +69,8 @@ func loadAgentDeps(teamPath string) (*team.Team, *prompts.Builder, *archmem.Stor
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	b := prompts.New(t, defaultPromptOverrideDir(t.Name))
-	store := archmem.New(defaultMemoryDir(t.Name), func() []string {
+	b := prompts.New(t, defaultPromptOverrideDir(t.ID))
+	store := archmem.New(defaultMemoryDir(t.ID), func() []string {
 		archs := t.SnapshotArchetypes()
 		out := make([]string, 0, len(archs))
 		for _, a := range archs {
@@ -200,7 +200,7 @@ func runAgentUpdate(args []string) error {
 	if *editPrompt {
 		return editPromptOverride(b, archetype)
 	}
-	return editMemoryFile(store, t.Name, archetype, *force)
+	return editMemoryFile(store, t.ID, archetype, *force)
 }
 
 func printPrompt(b *prompts.Builder, role string) error {
@@ -275,8 +275,8 @@ func editPromptOverride(b *prompts.Builder, role string) error {
 // future appends — parse returns no entries, then AppendEntry tacks new
 // lines onto an unparseable file), we refuse a write that drops it
 // unless --force is set.
-func editMemoryFile(store *archmem.Store, teamName, role string, force bool) error {
-	memDir := defaultMemoryDir(teamName)
+func editMemoryFile(store *archmem.Store, teamID, role string, force bool) error {
+	memDir := defaultMemoryDir(teamID)
 	path := filepath.Join(memDir, role+".md")
 	current, err := store.Load(role)
 	if err != nil {

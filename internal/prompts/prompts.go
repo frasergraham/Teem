@@ -3,7 +3,7 @@
 //
 //  1. The team YAML (leader.system_prompt, archetype.description).
 //  2. Operator overrides on disk under
-//     ~/.teem/state/<team-slug>/prompt-overrides/<role>.md.
+//     ~/.teem/state/<team-id>/prompt-overrides/<role>.md.
 //  3. Standing system blocks the leader/worker always sees (the
 //     existing LeaderSystemPrompt preamble, the archetype framing).
 //

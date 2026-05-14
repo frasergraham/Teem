@@ -431,7 +431,7 @@ func TestSummaryIndex_RendersTilePerTeam(t *testing.T) {
 	}
 	body := w.Body.String()
 
-	// Each team has a tile that deep-links to /teams/<slug>.
+	// Each team has a tile that deep-links to /teams/<id>.
 	for _, want := range []string{
 		`href="/teams/alpha"`,
 		`href="/teams/beta"`,
@@ -513,11 +513,11 @@ func TestTeamDetail_RendersSingleTeam(t *testing.T) {
 		t.Errorf("other team leaked into detail page: %s", body)
 	}
 
-	// Unknown slug → 404.
+	// Unknown id → 404.
 	req2 := httptest.NewRequest(http.MethodGet, "/teams/nonesuch", nil)
 	w2 := httptest.NewRecorder()
 	d.handler().ServeHTTP(w2, req2)
 	if w2.Code != http.StatusNotFound {
-		t.Errorf("unknown slug should 404, got %d", w2.Code)
+		t.Errorf("unknown id should 404, got %d", w2.Code)
 	}
 }
