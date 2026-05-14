@@ -164,11 +164,27 @@ func TestGetJobTranscript_404OnMissing(t *testing.T) {
 
 func TestGetJobTranscript_RejectsBadIDs(t *testing.T) {
 	srv, _ := newTestServerWithTranscripts(t)
-	res := callGetJobTranscript(t, srv, map[string]any{
-		"agent_id": "../escape",
-		"job_id":   "j1",
-	})
-	if !res.IsError {
-		t.Fatal("expected error for path-traversal agent_id")
+	// Cover both the slash-bearing form (regex-rejected) and the
+	// dot-literal forms `.` and `..` that the character class would
+	// otherwise admit and which filepath.Join treats as escapes.
+	cases := []struct {
+		name, agent, job string
+	}{
+		{"slash_in_agent", "../escape", "j1"},
+		{"dotdot_agent", "..", "j1"},
+		{"dot_agent", ".", "j1"},
+		{"dotdot_job", "a1", ".."},
+		{"dot_job", "a1", "."},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := callGetJobTranscript(t, srv, map[string]any{
+				"agent_id": c.agent,
+				"job_id":   c.job,
+			})
+			if !res.IsError {
+				t.Fatalf("expected error for agent=%q job=%q", c.agent, c.job)
+			}
+		})
 	}
 }

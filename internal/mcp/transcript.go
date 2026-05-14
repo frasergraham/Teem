@@ -22,6 +22,13 @@ const transcriptBodyCap = 200 * 1024
 
 var transcriptIDRegexp = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// safeTranscriptID rejects the literal `.` and `..` ids that the
+// character class above would otherwise accept and that filepath.Join
+// resolves to a directory escape.
+func safeTranscriptID(s string) bool {
+	return transcriptIDRegexp.MatchString(s) && s != "." && s != ".."
+}
+
 func (s *Server) handleGetJobTranscript(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 	if s.transcriptsDir == "" {
 		return mcpgo.NewToolResultError("transcripts directory is not configured"), nil
@@ -34,8 +41,8 @@ func (s *Server) handleGetJobTranscript(_ context.Context, req mcpgo.CallToolReq
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	if !transcriptIDRegexp.MatchString(agentID) || !transcriptIDRegexp.MatchString(jobID) {
-		return mcpgo.NewToolResultError("agent_id and job_id must match [A-Za-z0-9._-]+"), nil
+	if !safeTranscriptID(agentID) || !safeTranscriptID(jobID) {
+		return mcpgo.NewToolResultError("agent_id and job_id must match [A-Za-z0-9._-]+ and not be . or .."), nil
 	}
 	format := strings.ToLower(req.GetString("format", "text"))
 	if format != "raw" && format != "text" {

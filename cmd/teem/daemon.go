@@ -881,7 +881,9 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 // different signals.
 func isWakeKind(k audit.Kind) bool {
 	switch k {
-	case audit.KindJobComplete, audit.KindJobError, audit.KindJobTranscriptReady, audit.KindWorkerStopped:
+	case audit.KindJobComplete, audit.KindJobError, audit.KindJobTranscriptReady:
+		// KindWorkerStopped is reserved for T4's self-termination flow
+		// and will be added here once a producer exists.
 		return true
 	}
 	return false
@@ -1003,8 +1005,15 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 // validIDRegexp matches the agent_id / job_id forms accepted on the
 // transcripts route. Restricted to letters, digits, and `.`/`_`/`-`
 // so URL handlers can't be tricked into writing outside the team's
-// transcripts directory.
+// transcripts directory. isSafeID layers on top of the regex to
+// reject the dot-only literals `.` and `..` which the character class
+// would otherwise accept and which filepath.Join resolves to a path
+// escape.
 var validIDRegexp = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+func isSafeID(s string) bool {
+	return validIDRegexp.MatchString(s) && s != "." && s != ".."
+}
 
 // handleTranscripts implements GET/POST /teams/<name>/transcripts/<agent>/<job>.
 // Bearer-auth gated (same shared token as /audit). POST writes the body
@@ -1021,8 +1030,8 @@ func (d *daemon) handleTranscripts(w http.ResponseWriter, r *http.Request, rt *r
 		return
 	}
 	agentID, jobID := rest[:slash], rest[slash+1:]
-	if !validIDRegexp.MatchString(agentID) || !validIDRegexp.MatchString(jobID) {
-		http.Error(w, "bad agent_id or job_id (must match [A-Za-z0-9._-]+)", http.StatusBadRequest)
+	if !isSafeID(agentID) || !isSafeID(jobID) {
+		http.Error(w, "bad agent_id or job_id (must match [A-Za-z0-9._-]+ and not be . or ..)", http.StatusBadRequest)
 		return
 	}
 	if rt.transcriptsDir == "" {
@@ -1036,8 +1045,17 @@ func (d *daemon) handleTranscripts(w http.ResponseWriter, r *http.Request, rt *r
 			http.Error(w, "mkdir: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024))
+		// MaxBytesReader (not LimitReader) — surfaces the cap as a
+		// returned error so we can 413 instead of silently truncating
+		// a too-large upload.
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024*1024)
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				http.Error(w, "transcript too large (>64 MiB)", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
