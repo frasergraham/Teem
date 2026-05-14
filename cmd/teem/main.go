@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -20,7 +19,6 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/agent"
-	"github.com/frasergraham/teem/internal/llm"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/provisioner"
 	"github.com/frasergraham/teem/internal/state"
@@ -48,14 +46,8 @@ func main() {
 		err = runStop(args)
 	case "status":
 		err = runStatus(args)
-	case "teams":
-		err = runTeams(args)
 	case "pulse":
 		err = runPulse(args)
-	case "install-plugin":
-		err = runInstallPlugin(args)
-	case "llm":
-		err = runLLM(args)
 	case "version":
 		fmt.Println(versionString())
 	case "-h", "--help", "help":
@@ -79,12 +71,9 @@ Usage:
   teem start   [--foreground] [--listen :7777]         start the orchestrator daemon (headless by default)
   teem stop                                            stop the daemon
   teem status                                          report daemon state + registered teams
-  teem teams                                           list teams the running daemon serves
   teem chat    [--team teem.yaml]                      register the current team with the daemon, launch Claude
   teem audit   [--agent ID] [--since RFC3339] [--limit 50] [--follow]
   teem pulse   <start|stop|pause|resume|tick|status> [--team t] [--interval 5m]
-  teem install-plugin [--force]                        install/refresh the ~/.claude/plugins/teem plugin
-  teem llm ping --prompt "say hi"
   teem version
 
 Run 'teem <subcommand> -h' for flags.
@@ -565,34 +554,3 @@ func normalizePort(addr string) string {
 	return addr
 }
 
-// runLLM is the `teem llm ...` subcommand group.
-func runLLM(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: teem llm ping --prompt \"...\"")
-	}
-	switch args[0] {
-	case "ping":
-		fs := flag.NewFlagSet("llm ping", flag.ExitOnError)
-		prompt := fs.String("prompt", "say hi", "prompt to send")
-		model := fs.String("model", "", "model id (default: claude-sonnet-4-6)")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		c, err := llm.NewAnthropic(*model)
-		if err != nil {
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		resp, err := c.Complete(ctx, llm.CompletionRequest{
-			Messages: []llm.Message{{Role: llm.RoleUser, Content: *prompt}},
-		})
-		if err != nil {
-			return err
-		}
-		fmt.Printf("[%s] %s\n", resp.Model, resp.Content)
-		return nil
-	default:
-		return fmt.Errorf("unknown llm subcommand: %s", args[0])
-	}
-}

@@ -212,7 +212,7 @@ cd ~/project-a && teem chat   # team: project-a
 cd ~/project-b && teem chat   # team: project-b
 ```
 
-`teem teams` lists everything the daemon is serving.
+`teem status` shows the running daemon and its registered teams.
 
 ## Cloud workers (AWS Fargate)
 
@@ -265,14 +265,13 @@ See `README.md` for the full ECS setup checklist.
 ```
 
 The plugin lives at `~/.claude/commands/teem-*.md` and
-`~/.claude/skills/teem-orchestration/SKILL.md`. Re-install with
-`teem install-plugin --force`.
+`~/.claude/skills/teem-orchestration/SKILL.md`. `teem init` and
+`teem chat` install/refresh them on first run.
 
 ## Common operations
 
 ```sh
 teem status                        # daemon running? endpoint? teams?
-teem teams                         # registered teams
 teem audit                         # last 50 audit events
 teem audit --agent worker-1 --follow
 teem pulse status                  # autonomy state for this team

@@ -3,6 +3,5 @@
 //
 // Agents themselves talk to Claude through the `claude` CLI; this package
 // is for everything else (small reasoning helpers, summaries, etc.). The
-// v1 ships an Anthropic implementation and is exercised through the
-// `teem llm ping` subcommand.
+// v1 ships an Anthropic implementation, used by the archmem summarizer.
 package llm

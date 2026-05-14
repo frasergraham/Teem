@@ -23,7 +23,7 @@ archetype builder, or edit the resulting `teem.yaml` directly afterwards.
 ## Quickstart
 
 ```sh
-export ANTHROPIC_API_KEY=...           # used by `teem llm ping` (Leader uses the CLI)
+export ANTHROPIC_API_KEY=...           # optional; enables archmem role digests
 export TS_AUTHKEY=tskey-...            # tailnet auth key (or skip; tsnet prints a login URL)
 
 go run ./cmd/teem chat --team config/team.example.yaml
@@ -335,9 +335,6 @@ the whole point.
 go vet ./...
 go build ./...
 go test ./...
-
-# Anthropic SDK round-trip
-ANTHROPIC_API_KEY=sk-... go run ./cmd/teem llm ping --prompt "say hi"
 
 # Full chat (joins your tailnet)
 TS_AUTHKEY=tskey-... go run ./cmd/teem chat --team config/team.example.yaml

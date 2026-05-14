@@ -143,44 +143,10 @@ func runStatus(args []string) error {
 	return nil
 }
 
-// runTeams prints the registered teams by querying the daemon's
-// /control/teams endpoint. Useful from any cwd.
-func runTeams(args []string) error {
-	fs := flag.NewFlagSet("teams", flag.ExitOnError)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	_, alive := readDaemonPID()
-	if !alive {
-		fmt.Println("daemon not running")
-		return nil
-	}
-	s, ok, err := readDaemonStateFile()
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return errors.New("daemon state file missing")
-	}
-	// Read live state from the daemon's control endpoint — survives
-	// staleness in the state file.
-	resp, err := http.Get(s.Endpoint + "/control/teams")
-	if err != nil {
-		return fmt.Errorf("contact daemon: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("daemon returned %s", resp.Status)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	fmt.Println(string(body))
-	return nil
-}
-
 // --- daemon process: top-level state file ---------------------------------
 
 // daemonStateFile is the on-disk endpoint discovery file at
-// ~/.teem/daemon.json. teem chat / teem status / teem teams read it.
+// ~/.teem/daemon.json. teem chat / teem status read it.
 type daemonStateFile struct {
 	PID       int       `json:"pid"`
 	Endpoint  string    `json:"endpoint"`        // http://<host>:<port>
