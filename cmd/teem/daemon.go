@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,13 +21,18 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/agent"
+	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
 	"github.com/frasergraham/teem/internal/inflight"
+	"github.com/frasergraham/teem/internal/leaderstatus"
+	"github.com/frasergraham/teem/internal/llm"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
 	"github.com/frasergraham/teem/internal/pulse"
+	"github.com/frasergraham/teem/internal/retention"
+	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/tailnet"
 	"github.com/frasergraham/teem/internal/team"
@@ -177,9 +183,9 @@ func runTeams(args []string) error {
 // ~/.teem/daemon.json. teem chat / teem status / teem teams read it.
 type daemonStateFile struct {
 	PID       int       `json:"pid"`
-	Endpoint  string    `json:"endpoint"`            // http://<host>:<port>
-	Token     string    `json:"worker_token"`        // shared bearer for /audit and /control
-	Teams     []string  `json:"teams,omitempty"`     // registered team names
+	Endpoint  string    `json:"endpoint"`        // http://<host>:<port>
+	Token     string    `json:"worker_token"`    // shared bearer for /audit and /control
+	Teams     []string  `json:"teams,omitempty"` // registered team names
 	StartedAt time.Time `json:"started_at"`
 }
 
@@ -191,9 +197,9 @@ func daemonHomeDir() string {
 	return filepath.Join(home, ".teem")
 }
 
-func daemonPIDPath() string     { return filepath.Join(daemonHomeDir(), "daemon.pid") }
-func daemonJSONPath() string    { return filepath.Join(daemonHomeDir(), "daemon.json") }
-func daemonLogPath() string     { return filepath.Join(daemonHomeDir(), "daemon.log") }
+func daemonPIDPath() string  { return filepath.Join(daemonHomeDir(), "daemon.pid") }
+func daemonJSONPath() string { return filepath.Join(daemonHomeDir(), "daemon.json") }
+func daemonLogPath() string  { return filepath.Join(daemonHomeDir(), "daemon.log") }
 
 func readDaemonPID() (int, bool) {
 	body, err := os.ReadFile(daemonPIDPath())
@@ -242,6 +248,30 @@ func writeDaemonStateFile(s daemonStateFile) error {
 func clearDaemonState() {
 	_ = os.Remove(daemonPIDPath())
 	_ = os.Remove(daemonJSONPath())
+	// The persistent worker_token file is intentionally NOT removed
+	// here so the token survives `teem stop`/`teem start`.
+}
+
+// workerTokenPath returns the persistent token file location.
+func workerTokenPath() string { return filepath.Join(daemonHomeDir(), "worker_token") }
+
+// loadOrCreateWorkerToken reads the persistent worker token file or
+// generates+writes a fresh one. The token is shared between the leader
+// (this process) and every worker it spawns; stable across daemon
+// restarts so workers don't all get 401'd after a bounce. To rotate,
+// stop the daemon, remove ~/.teem/worker_token, then start again.
+func loadOrCreateWorkerToken() string {
+	if body, err := os.ReadFile(workerTokenPath()); err == nil {
+		t := strings.TrimSpace(string(body))
+		if t != "" {
+			return t
+		}
+	}
+	t := randomToken()
+	if err := os.MkdirAll(daemonHomeDir(), 0o700); err == nil {
+		_ = os.WriteFile(workerTokenPath(), []byte(t+"\n"), 0o600)
+	}
+	return t
 }
 
 func atomicWrite(path string, body []byte) error {
@@ -270,18 +300,24 @@ type daemon struct {
 }
 
 type registeredTeam struct {
-	team       *team.Team
-	mcp        *mcpsrv.Server
-	spawner    *agent.Spawner
-	auditSink  *audit.FileSink
-	auditH     http.Handler
-	plan       *plan.Plan
-	notes      *notes.Inbox
-	pulse      *pulse.Pulse
-	inFlight   *inflight.Log
-	registry   *mcpsrv.Registry
-	leaderURL  string
-	registered time.Time
+	team          *team.Team
+	mcp           *mcpsrv.Server
+	spawner       *agent.Spawner
+	auditSink     *audit.FileSink
+	auditH        http.Handler
+	plan          *plan.Plan
+	notes         *notes.Inbox
+	pulse         *pulse.Pulse
+	inFlight      *inflight.Log
+	registry      *mcpsrv.Registry
+	archMem       *archmem.Store
+	archMemCancel context.CancelFunc
+	leaderStatus  *leaderstatus.Store
+	leaderURL     string
+	registered    time.Time
+	// transcriptsDir is the leader-side mirror root for worker
+	// transcript files: <stateDir>/transcripts/<agent>/<job>.jsonl.
+	transcriptsDir string
 }
 
 // serveDaemon runs the multi-tenant orchestrator until ctx is cancelled.
@@ -328,7 +364,14 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 	d.endpoint = fmt.Sprintf("http://%s%s", mcpHost, normalizePort(df.listenAddr))
 	d.token = os.Getenv("TEEM_WORKER_TOKEN")
 	if d.token == "" {
-		d.token = randomToken()
+		// Persistent worker token: stored in its own file so it
+		// survives across daemon stop/start cycles. Workers spawned
+		// by an earlier daemon hold this token in their environment;
+		// rotating it on every start orphans every in-flight worker
+		// behind a 401 wall and renders the "workers survive a daemon
+		// bounce" guarantee aspirational. Rotation is now opt-in via
+		// `rm ~/.teem/worker_token`.
+		d.token = loadOrCreateWorkerToken()
 	}
 
 	if err := writeDaemonStateFile(daemonStateFile{
@@ -342,11 +385,29 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 	defer clearDaemonState()
 
 	fmt.Fprintf(os.Stderr, "[teemd] endpoint: %s\n", d.endpoint)
+
+	// Restore every team that has a registration.json on disk. Done
+	// before HTTP starts serving so the first inbound request sees a
+	// fully-rehydrated daemon (pulses auto-resumed, workers
+	// reattached). Best-effort: bad rows are logged and skipped.
+	d.restoreTeams()
+
 	fmt.Fprintf(os.Stderr, "[teemd] ready. Stop with `teem stop` or kill %d\n", os.Getpid())
 
 	httpSrv := &http.Server{
 		Handler:           d.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// Retention GC: spawns only when an operator has explicitly
+	// configured one of the TTL knobs. Default is "never delete"; the
+	// daemon preserves all stopped-agent and transcript history
+	// indefinitely unless opted in.
+	retCfg := retention.LoadConfig()
+	if retCfg.Enabled() {
+		fmt.Fprintf(os.Stderr, "[teemd] retention: stopped_agent_ttl=%s transcript_ttl=%s sweep=%s\n",
+			retCfg.StoppedAgentTTL, retCfg.TranscriptTTL, retentionSweepInterval(retCfg))
+		go d.runRetentionGC(retCfg)
 	}
 
 	serverErr := make(chan error, 1)
@@ -394,6 +455,9 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 			_ = rt.auditSink.Close()
 			_ = rt.plan.Close()
 			_ = rt.notes.Close()
+			if rt.archMemCancel != nil {
+				rt.archMemCancel()
+			}
 			if rt.inFlight != nil {
 				_ = rt.inFlight.Close()
 			}
@@ -459,6 +523,111 @@ type registerRequest struct {
 	WorktreeBase string `json:"worktree_base,omitempty"`
 }
 
+// teamRegistration is the on-disk snapshot the daemon uses to rebuild
+// a team after a restart. Lives at ~/.teem/state/<team>/registration.json.
+type teamRegistration struct {
+	TeamYAML     string    `json:"team_yaml"`
+	RepoRoot     string    `json:"repo_root,omitempty"`
+	WorktreeBase string    `json:"worktree_base,omitempty"`
+	RegisteredAt time.Time `json:"registered_at"`
+}
+
+func writeTeamRegistration(name string, reg teamRegistration) error {
+	path := defaultRegistrationPath(name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, body, 0o600)
+}
+
+func removeTeamRegistration(name string) {
+	_ = os.Remove(defaultRegistrationPath(name))
+}
+
+// restoreTeams rebuilds every team that has a registration.json on
+// disk. Best-effort: a corrupt file or a YAML that no longer parses
+// logs and continues — we'd rather serve N-1 teams than refuse to
+// start. Called once at daemon boot, before serving HTTP.
+func (d *daemon) restoreTeams() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	stateRoot := filepath.Join(home, ".teem", "state")
+	entries, err := os.ReadDir(stateRoot)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		regPath := filepath.Join(stateRoot, e.Name(), "registration.json")
+		body, err := os.ReadFile(regPath)
+		if err != nil {
+			continue
+		}
+		var reg teamRegistration
+		if err := json.Unmarshal(body, &reg); err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] skip %s: bad registration.json: %v\n", e.Name(), err)
+			continue
+		}
+		tmpFile, err := writeTempYAML(reg.TeamYAML)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] skip %s: temp yaml: %v\n", e.Name(), err)
+			continue
+		}
+		t, err := team.Load(tmpFile)
+		_ = os.Remove(tmpFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] skip %s: invalid yaml: %v\n", e.Name(), err)
+			continue
+		}
+		rt, err := d.buildTeamServices(t, reg.RepoRoot, reg.WorktreeBase)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] skip %s: build services: %v\n", e.Name(), err)
+			continue
+		}
+		// Preserve the original registration time so the dashboard
+		// doesn't show "registered just now" after every restart.
+		if !reg.RegisteredAt.IsZero() {
+			rt.registered = reg.RegisteredAt
+		}
+		d.mu.Lock()
+		d.teams[t.Name] = rt
+		d.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "[teemd] restored team %q (pulse %s)\n", t.Name, pulseStateLabel(rt))
+		// Reconcile workers and persistent agents asynchronously so a
+		// slow Fargate API call doesn't block boot.
+		go func(rt *registeredTeam) {
+			if n := rt.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: reattached %d local worker(s)\n", rt.team.Name, n)
+			}
+			if n := rt.spawner.Reconcile(context.Background()); n > 0 {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: reconciled %d persistent agent(s)\n", rt.team.Name, n)
+			}
+		}(rt)
+	}
+	d.persistStateSnapshot()
+}
+
+func pulseStateLabel(rt *registeredTeam) string {
+	if rt.pulse == nil {
+		return "—"
+	}
+	if rt.pulse.Running() {
+		if rt.pulse.Paused() {
+			return "paused"
+		}
+		return "running"
+	}
+	return "off"
+}
+
 type registerResponse struct {
 	Team     string `json:"team"`
 	MCPURL   string `json:"mcp_url"`
@@ -511,9 +680,13 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		_ = rt.auditSink.Close()
 		_ = rt.plan.Close()
 		_ = rt.notes.Close()
+		if rt.archMemCancel != nil {
+			rt.archMemCancel()
+		}
 		if rt.inFlight != nil {
 			_ = rt.inFlight.Close()
 		}
+		removeTeamRegistration(name)
 		d.persistStateSnapshot()
 		w.WriteHeader(http.StatusNoContent)
 	case "pulse":
@@ -663,6 +836,14 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	d.teams[t.Name] = rt
 	d.mu.Unlock()
+	if err := writeTeamRegistration(t.Name, teamRegistration{
+		TeamYAML:     req.TeamYAML,
+		RepoRoot:     req.RepoRoot,
+		WorktreeBase: req.WorktreeBase,
+		RegisteredAt: rt.registered,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "[teemd] warning: persist registration for %q: %v\n", t.Name, err)
+	}
 	d.persistStateSnapshot()
 
 	// Best-effort reconcile in two passes:
@@ -719,6 +900,14 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		return nil, fmt.Errorf("notes: %w", err)
 	}
 
+	leaderStatusStore, err := leaderstatus.Open(defaultLeaderStatusPath(t.Name))
+	if err != nil {
+		_ = auditSink.Close()
+		_ = planStore.Close()
+		_ = notesInbox.Close()
+		return nil, fmt.Errorf("leader_status: %w", err)
+	}
+
 	// In-flight log for durability. Opened before reconcile so the
 	// next steps can both (a) emit job_interrupted for orphans and
 	// (b) hand it to the spawner for future jobs.
@@ -753,28 +942,76 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 
 	bs := bus.NewMemBus()
 	reg := mcpsrv.NewRegistry()
+
+	// Archetype memory store: per-team directory of per-role markdown
+	// files the leader injects as baseline context for every freshly
+	// spawned worker. Created up-front so the spawner can read from
+	// it and the audit hook can append to it.
+	archMemDir := defaultMemoryDir(t.Name)
+	archMemStore := archmem.New(archMemDir, func() []string {
+		archs := t.SnapshotArchetypes()
+		roles := make([]string, 0, len(archs))
+		for _, a := range archs {
+			roles = append(roles, a.Role)
+		}
+		return roles
+	})
+	archMemStore.SweepTmp()
+
+	transcriptsDir := filepath.Join(defaultStateDir(t.Name), "transcripts")
+
+	// Roster: per-team worker-name allocator. On first open after the
+	// T9 rollout (no existing roster.json), migrate legacy
+	// `<role>-N` ids from the previous archetype-seq.json counter
+	// and any historical transcripts subdirs so they participate in
+	// reincarnation. The legacy file is left in place — we no longer
+	// read it, but keeping it makes a downgrade non-destructive.
+	rosterPath := defaultRosterPath(t.Name)
+	rost, err := roster.Open(rosterPath)
+	if err != nil {
+		_ = auditSink.Close()
+		_ = planStore.Close()
+		_ = notesInbox.Close()
+		return nil, fmt.Errorf("roster: %w", err)
+	}
+	roleList := func() []string {
+		archs := t.SnapshotArchetypes()
+		roles := make([]string, 0, len(archs))
+		for _, a := range archs {
+			roles = append(roles, a.Role)
+		}
+		return roles
+	}()
+	if n := rost.MigrateLegacy(defaultArchetypeSeqPath(t.Name), transcriptsDir, roleList, nil); n > 0 {
+		fmt.Fprintf(os.Stderr, "[teemd] %s: migrated %d legacy worker id(s) into the roster\n", t.Name, n)
+	}
+
 	spawner := agent.NewSpawner(d.baseCtx, t, bs, reg, agent.Config{
-		HTTPClient:       d.httpClient,
-		WorkerToken:      d.token,
-		CloudProvisioner: cloudProvisionerFactory(d.token, leaderURL, gitCfg, stateStore),
-		RepoRoot:         repoRoot,
-		WorktreeBase:     worktreeBase,
-		LeaderURL:        leaderURL,
-		StateStore:       stateStore,
-		AuditSink:        auditSink,
-		ArchetypeSeqPath: defaultArchetypeSeqPath(t.Name),
-		InFlight:         inFlightLog,
-		SocketDir:        defaultSocketDir(t.Name),
+		HTTPClient:          d.httpClient,
+		WorkerToken:         d.token,
+		CloudProvisioner:    cloudProvisionerFactory(d.token, leaderURL, gitCfg, stateStore),
+		RepoRoot:            repoRoot,
+		WorktreeBase:        worktreeBase,
+		LeaderURL:           leaderURL,
+		StateStore:          stateStore,
+		AuditSink:           auditSink,
+		Roster:              rost,
+		InFlight:            inFlightLog,
+		SocketDir:           defaultSocketDir(t.Name),
+		LoadArchetypeMemory: archMemStore.Load,
 	})
 
 	srv, err := mcpsrv.New(mcpsrv.Config{
-		Bus:      bs,
-		Team:     t,
-		Registry: reg,
-		Spawner:  spawner,
-		Audit:    auditSink,
-		Plan:     planStore,
-		Notes:    notesInbox,
+		Bus:            bs,
+		Team:           t,
+		Registry:       reg,
+		Spawner:        spawner,
+		Audit:          auditSink,
+		Plan:           planStore,
+		Notes:          notesInbox,
+		TranscriptsDir: transcriptsDir,
+		ArchMem:        archMemStore,
+		LeaderStatus:   leaderStatusStore,
 	})
 	if err != nil {
 		_ = auditSink.Close()
@@ -819,23 +1056,189 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		fmt.Fprintf(os.Stderr, "[teemd] auto-resumed Pulse for %q\n", t.Name)
 	}
 
+	// Wake hook: publish on the in-process leader.wake bus topic
+	// whenever a worker emits a job-terminal event. Pulse already
+	// debounces via NudgeFromAudit (called by the same handler hook);
+	// this is the additive T6 signal future chat clients can subscribe
+	// to. Today no chat client consumes it because runChat exec()s
+	// directly into claude.
+	wakeHook := func(events []audit.Event) {
+		for _, e := range events {
+			if !isWakeKind(e.Kind) {
+				continue
+			}
+			payload, _ := json.Marshal(map[string]string{
+				"kind":     string(e.Kind),
+				"agent_id": e.AgentID,
+				"job_id":   e.JobID,
+			})
+			_ = bs.Publish(d.baseCtx, bus.Message{
+				ID:        bus.NewID(),
+				Topic:     "leader.wake",
+				From:      e.AgentID,
+				Kind:      bus.KindStatus,
+				Payload:   payload,
+				CreatedAt: time.Now().UTC(),
+			})
+		}
+	}
+
+	// Stop hook: when a worker emits worker_stopped, reconcile the
+	// spawner's bookkeeping (registry → stopped, teardown skipping
+	// /shutdown, drop subscriptions). Runs in a goroutine so the
+	// audit POST returns promptly; HandleWorkerStopped is idempotent
+	// against duplicates.
+	stopHook := func(events []audit.Event) {
+		for _, e := range events {
+			if e.Kind != audit.KindWorkerStopped {
+				continue
+			}
+			agentID := e.AgentID
+			go spawner.HandleWorkerStopped(context.Background(), agentID)
+		}
+	}
+
+	// Archmem hook: on every job-terminal event, append a one-line
+	// summary to the archetype's per-role memory file. The role is
+	// resolved from the registry; if the agent is gone we skip
+	// silently (audit fallback would need to scan history and isn't
+	// worth it for an append).
+	archMemHook := func(events []audit.Event) {
+		for _, e := range events {
+			if e.Kind != audit.KindJobComplete && e.Kind != audit.KindJobError {
+				continue
+			}
+			role := lookupRole(reg, e.AgentID)
+			if role == "" {
+				continue
+			}
+			status := "done"
+			summary, _ := e.Meta["output"].(string)
+			if e.Kind == audit.KindJobError {
+				status = "error"
+				if summary == "" {
+					summary = e.Message
+				}
+			}
+			entry := archmem.Entry{
+				Timestamp: e.Timestamp,
+				AgentID:   e.AgentID,
+				JobID:     e.JobID,
+				Status:    status,
+				Summary:   shortSummary(summary),
+			}
+			if err := archMemStore.AppendEntry(role, entry); err != nil && !errors.Is(err, archmem.ErrUnknownRole) {
+				fmt.Fprintf(os.Stderr, "[archmem] append %q: %v\n", role, err)
+			}
+		}
+	}
+
+	// Summarizer goroutine: rolling digest + retention pruning per
+	// role. Best-effort — failures log to stderr and the next tick
+	// retries. Skipped when ANTHROPIC_API_KEY is unset since the
+	// digest needs the LLM; appends still happen so the file isn't
+	// silently empty.
+	archMemCtx, archMemCancel := context.WithCancel(d.baseCtx)
+	llmClient, llmErr := llm.NewAnthropic("")
+	if llmErr != nil {
+		fmt.Fprintf(os.Stderr, "[archmem] LLM unavailable, digest will be skipped: %v\n", llmErr)
+	}
+	go (&archmem.Summarizer{
+		Store:  archMemStore,
+		Client: llmClient,
+		Roles: func() []string {
+			archs := t.SnapshotArchetypes()
+			roles := make([]string, 0, len(archs))
+			for _, a := range archs {
+				roles = append(roles, a.Role)
+			}
+			return roles
+		},
+	}).Run(archMemCtx)
+
 	return &registeredTeam{
 		team:      t,
 		mcp:       srv,
 		spawner:   spawner,
 		auditSink: auditSink,
 		// Audit handler fans every POST out to: write to disk, bump
-		// the agent's LastSeen, AND nudge Pulse so an event-triggered
-		// tick can fire after the debounce window.
-		auditH:     newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, pulseInst.NudgeFromAudit),
-		plan:       planStore,
-		notes:      notesInbox,
-		pulse:      pulseInst,
-		inFlight:   inFlightLog,
-		registry:   reg,
-		leaderURL:  leaderURL,
-		registered: time.Now(),
+		// the agent's LastSeen, nudge Pulse (debounced tick), AND
+		// publish on bus topic "leader.wake" for terminal worker
+		// events. Note the double-publish: NudgeFromAudit + wakeHook
+		// run on every accepted POST.
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(pulseInst.NudgeFromAudit, combineHooks(wakeHook, combineHooks(stopHook, archMemHook)))),
+		plan:           planStore,
+		notes:          notesInbox,
+		pulse:          pulseInst,
+		inFlight:       inFlightLog,
+		registry:       reg,
+		archMem:        archMemStore,
+		archMemCancel:  archMemCancel,
+		leaderStatus:   leaderStatusStore,
+		leaderURL:      leaderURL,
+		registered:     time.Now(),
+		transcriptsDir: transcriptsDir,
 	}, nil
+}
+
+// defaultLeaderStatusPath returns the per-team leader-status board
+// file path, alongside plan.jsonl and notes.jsonl.
+func defaultLeaderStatusPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "leader_status.json")
+}
+
+// lookupRole returns the role for agentID from the registry, or ""
+// when the agent isn't currently tracked. Falls back to parsing the
+// instance suffix off the id ("<role>-<N>") because the registry can
+// race a worker_stopped reconcile.
+func lookupRole(reg *mcpsrv.Registry, agentID string) string {
+	if e, ok := reg.Get(agentID); ok && e.Role != "" {
+		return e.Role
+	}
+	if i := strings.LastIndexByte(agentID, '-'); i > 0 {
+		return agentID[:i]
+	}
+	return ""
+}
+
+// shortSummary clamps an output string to a single-line preview safe
+// for the recent-entries section. Newlines are flattened; the result
+// is truncated to 200 bytes.
+func shortSummary(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.TrimSpace(s)
+	const cap = 200
+	if len(s) > cap {
+		s = s[:cap] + "…"
+	}
+	return s
+}
+
+// isWakeKind decides whether a worker event should fire a leader.wake
+// publish. Mirrors pulse.isInterestingKind but is intentionally
+// independent — different consumers (a future chat banner) may want
+// different signals.
+func isWakeKind(k audit.Kind) bool {
+	switch k {
+	case audit.KindJobComplete, audit.KindJobError, audit.KindJobTranscriptReady, audit.KindWorkerStopped:
+		return true
+	}
+	return false
+}
+
+// combineHooks chains two audit hooks; either may be nil.
+func combineHooks(a, b auditHook) auditHook {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	return func(events []audit.Event) {
+		a(events)
+		b(events)
+	}
 }
 
 // auditHook is a side-channel callback invoked on every accepted
@@ -930,14 +1333,204 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = "/audit"
 		rt.auditH.ServeHTTP(w, r2)
+	case strings.HasPrefix(suffix, "/transcripts/"):
+		d.handleTranscripts(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
 	default:
+		// SSR jobs pages — unauth like the dashboard (tailnet boundary).
+		if agentID, ok := resolveAgentJobsRoute(suffix); ok {
+			d.renderAgentJobs(w, r, rt, agentID)
+			return
+		}
+		if taskID, ok := resolveTaskFlowRoute(suffix); ok {
+			d.renderTaskFlow(w, r, rt, taskID)
+			return
+		}
+		if jobID, ok := resolveJobDetailRoute(suffix); ok {
+			d.renderJobDetail(w, r, rt, jobID)
+			return
+		}
 		http.NotFound(w, r)
 	}
+}
+
+// validIDRegexp matches the agent_id / job_id forms accepted on the
+// transcripts route. Restricted to letters, digits, and `.`/`_`/`-`
+// so URL handlers can't be tricked into writing outside the team's
+// transcripts directory. isSafeID layers on top of the regex to
+// reject the dot-only literals `.` and `..` which the character class
+// would otherwise accept and which filepath.Join resolves to a path
+// escape.
+var validIDRegexp = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+func isSafeID(s string) bool {
+	return validIDRegexp.MatchString(s) && s != "." && s != ".."
+}
+
+// handleTranscripts implements GET/POST /teams/<name>/transcripts/<agent>/<job>.
+// Bearer-auth gated (same shared token as /audit). POST writes the body
+// to the team's transcripts mirror; GET serves it back. ?head=N on GET
+// returns the first N NDJSON events (lines) rather than the whole body.
+func (d *daemon) handleTranscripts(w http.ResponseWriter, r *http.Request, rt *registeredTeam, rest string) {
+	if r.Header.Get("Authorization") != "Bearer "+d.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		http.Error(w, "want /transcripts/<agent_id>/<job_id>", http.StatusBadRequest)
+		return
+	}
+	agentID, jobID := rest[:slash], rest[slash+1:]
+	if !isSafeID(agentID) || !isSafeID(jobID) {
+		http.Error(w, "bad agent_id or job_id (must match [A-Za-z0-9._-]+ and not be . or ..)", http.StatusBadRequest)
+		return
+	}
+	if rt.transcriptsDir == "" {
+		http.Error(w, "transcripts not configured", http.StatusInternalServerError)
+		return
+	}
+	path := filepath.Join(rt.transcriptsDir, agentID, jobID+".jsonl")
+	switch r.Method {
+	case http.MethodPost:
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			http.Error(w, "mkdir: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// MaxBytesReader (not LimitReader) — surfaces the cap as a
+		// returned error so we can 413 instead of silently truncating
+		// a too-large upload.
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024*1024)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				http.Error(w, "transcript too large (>64 MiB)", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := atomicWrite(path, body); err != nil {
+			http.Error(w, "write: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	case http.MethodGet:
+		body, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.NotFound(w, r)
+				return
+			}
+			http.Error(w, "read: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		if h := r.URL.Query().Get("head"); h != "" {
+			n, err := strconv.Atoi(h)
+			if err != nil || n < 0 {
+				http.Error(w, "bad head", http.StatusBadRequest)
+				return
+			}
+			body = headLines(body, n)
+		}
+		_, _ = w.Write(body)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// headLines returns the first n NDJSON lines from body (preserving
+// trailing newlines). n <= 0 returns body unchanged.
+func headLines(body []byte, n int) []byte {
+	if n <= 0 {
+		return body
+	}
+	count := 0
+	for i, c := range body {
+		if c == '\n' {
+			count++
+			if count == n {
+				return body[:i+1]
+			}
+		}
+	}
+	return body
 }
 
 // --- state snapshot --------------------------------------------------------
 
 // persistStateSnapshot refreshes daemon.json with the current set of
+// runRetentionGC ticks on cfg.SweepInterval and, for each registered
+// team, removes stopped registry entries older than cfg.StoppedAgentTTL
+// and transcript files older than cfg.TranscriptTTL. Default
+// configuration ("never delete") prevents this goroutine from being
+// started in the first place — see serveDaemon's retCfg.Enabled() guard.
+//
+// The first sweep runs 30s after startup so a developer can observe
+// whether the configured TTL is sane without waiting an hour. Subsequent
+// sweeps fire on the configured interval (default 1h).
+func (d *daemon) runRetentionGC(cfg retention.Config) {
+	interval := retentionSweepInterval(cfg)
+	select {
+	case <-d.baseCtx.Done():
+		return
+	case <-time.After(30 * time.Second):
+	}
+	d.retentionSweep(cfg)
+
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-d.baseCtx.Done():
+			return
+		case <-t.C:
+			d.retentionSweep(cfg)
+		}
+	}
+}
+
+// retentionSweep runs one pass across every registered team, logging
+// counts only when something was actually removed so the log stays
+// quiet on idle systems.
+func (d *daemon) retentionSweep(cfg retention.Config) {
+	d.mu.Lock()
+	teams := make([]*registeredTeam, 0, len(d.teams))
+	for _, rt := range d.teams {
+		teams = append(teams, rt)
+	}
+	d.mu.Unlock()
+	now := time.Now()
+	for _, rt := range teams {
+		if cfg.StoppedAgentTTL > 0 && rt.registry != nil {
+			if removed := rt.registry.GCStopped(now, cfg.StoppedAgentTTL); removed > 0 {
+				fmt.Fprintf(os.Stderr, "[retention] %s: pruned %d stopped agent(s) older than %s\n",
+					rt.team.Name, removed, cfg.StoppedAgentTTL)
+			}
+		}
+		if cfg.TranscriptTTL > 0 && rt.transcriptsDir != "" {
+			removed, err := retention.SweepTranscripts(rt.transcriptsDir, now, cfg.TranscriptTTL)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[retention] %s: transcript sweep error: %v\n", rt.team.Name, err)
+			}
+			if removed > 0 {
+				fmt.Fprintf(os.Stderr, "[retention] %s: removed %d transcript file(s) older than %s\n",
+					rt.team.Name, removed, cfg.TranscriptTTL)
+			}
+		}
+	}
+}
+
+// retentionSweepInterval returns the effective sweep cadence, falling
+// back to retention.DefaultSweepInterval when unset.
+func retentionSweepInterval(cfg retention.Config) time.Duration {
+	if cfg.SweepInterval > 0 {
+		return cfg.SweepInterval
+	}
+	return retention.DefaultSweepInterval
+}
+
 // registered teams. Called after every registration/unregistration so
 // `teem status` sees up-to-date info.
 func (d *daemon) persistStateSnapshot() {

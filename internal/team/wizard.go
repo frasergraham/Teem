@@ -14,11 +14,19 @@ import (
 type Wizard struct {
 	R *bufio.Reader
 	W io.Writer
+	// ClaudeMDFinder probes for a project-level CLAUDE.md. Tests inject
+	// a stub; production wiring defaults to FindClaudeMD which reads
+	// ./CLAUDE.md then ./.claude/CLAUDE.md.
+	ClaudeMDFinder func() (path, contents string, ok bool)
 }
 
-// NewWizard wires reader/writer.
+// NewWizard wires reader/writer and a default CLAUDE.md probe.
 func NewWizard(r io.Reader, w io.Writer) *Wizard {
-	return &Wizard{R: bufio.NewReader(r), W: w}
+	return &Wizard{
+		R:              bufio.NewReader(r),
+		W:              w,
+		ClaudeMDFinder: FindClaudeMD,
+	}
 }
 
 // Run walks the operator through creating a team. Returns the assembled
@@ -34,50 +42,81 @@ func (z *Wizard) Run() (*Team, []byte, error) {
 		return nil, nil, err
 	}
 
+	// CLAUDE.md fold — silently skipped when neither file exists.
+	var claudeMD string
+	if z.ClaudeMDFinder != nil {
+		if path, contents, ok := z.ClaudeMDFinder(); ok {
+			z.printf("Detected %s (%s). Fold into the leader brief? ", path, humanSize(len(contents)))
+			fold, err := z.askYesNo("", true)
+			if err != nil {
+				return nil, nil, err
+			}
+			if fold {
+				claudeMD = contents
+			}
+		}
+	}
+
+	t := &Team{Name: name}
+
+	// Default archetypes.
 	z.println("")
-	z.println("Leader system prompt (the brief your Leader Claude works from).")
-	z.println("Enter one or more lines; finish with a blank line.")
-	prompt, err := z.askMultiline()
+	z.println("Default archetypes: worker, reviewer, integrator (all local).")
+	useDefaults, err := z.askYesNo("Use these defaults?", true)
 	if err != nil {
 		return nil, nil, err
 	}
-	if strings.TrimSpace(prompt) == "" {
-		return nil, nil, fmt.Errorf("leader system prompt is required")
+	if useDefaults {
+		t.Archetypes = append(t.Archetypes, cloneArchetypes(DefaultArchetypes)...)
+	} else {
+		z.println("")
+		z.println("Declare your own archetypes — role templates the leader spawns from.")
+		z.println("Each archetype has a max_concurrent cap; the leader decides how many to spawn.")
+		z.println("Common roles: worker, reviewer, integrator, backend, frontend.")
+		z.println("")
+		for {
+			add, err := z.askYesNo("Add an archetype?", true)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !add {
+				break
+			}
+			arch, err := z.askArchetype()
+			if err != nil {
+				return nil, nil, err
+			}
+			t.Archetypes = append(t.Archetypes, arch)
+			z.printf("  added %s (up to %d, %s)\n\n", arch.Role, arch.MaxConcurrent, arch.Placement)
+		}
 	}
 
-	t := &Team{
-		Name:   name,
-		Leader: LeaderSpec{SystemPrompt: prompt},
+	// Leader brief.
+	z.println("")
+	defaultPrompt := BuildDefaultLeaderPrompt(claudeMD)
+	customize, err := z.askYesNo("Customize the leader brief?", false)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	z.println("")
-	z.println("Now declare archetypes — role templates the leader spawns from.")
-	z.println("Each archetype has a max_concurrent cap; the leader decides how many to spawn.")
-	z.println("Common roles: worker, reviewer, integrator, backend, frontend.")
-	z.println("")
-
-	for {
-		add, err := z.askYesNo("Add an archetype?", true)
+	if customize {
+		z.println("Enter the leader brief. Hit enter on an empty line to accept the default below.")
+		z.println(indent(defaultPrompt, "  | "))
+		prompt, err := z.askMultiline()
 		if err != nil {
 			return nil, nil, err
 		}
-		if !add {
-			break
+		if strings.TrimSpace(prompt) == "" {
+			prompt = defaultPrompt
 		}
-		arch, err := z.askArchetype()
-		if err != nil {
-			return nil, nil, err
-		}
-		t.Archetypes = append(t.Archetypes, arch)
-		z.printf("  ✓ added %s (up to %d, %s)\n\n", arch.Role, arch.MaxConcurrent, arch.Placement)
+		t.Leader.SystemPrompt = prompt
+	} else {
+		t.Leader.SystemPrompt = defaultPrompt
 	}
 
 	if err := t.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("validate: %w", err)
 	}
 
-	// Marshal under the same fileWrapper team.Load expects. Go through
-	// Team.MarshalYAML so we don't copy the embedded mutex.
 	body, err := t.MarshalYAML()
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal: %w", err)
@@ -99,6 +138,23 @@ func (z *Wizard) Run() (*Team, []byte, error) {
 
 // ErrCancelled is returned when the operator declines the final write.
 var ErrCancelled = fmt.Errorf("wizard: cancelled")
+
+func cloneArchetypes(in []ArchetypeSpec) []ArchetypeSpec {
+	out := make([]ArchetypeSpec, len(in))
+	copy(out, in)
+	return out
+}
+
+func humanSize(n int) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%dB", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1fKB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1fMB", float64(n)/(1024*1024))
+	}
+}
 
 func (z *Wizard) askArchetype() (ArchetypeSpec, error) {
 	role, err := z.askRequired("  Role", "worker")
@@ -196,7 +252,11 @@ func (z *Wizard) askYesNo(label string, def bool) (bool, error) {
 		yn = "y/N"
 	}
 	for {
-		z.printf("%s [%s]: ", label, yn)
+		if label == "" {
+			z.printf("[%s]: ", yn)
+		} else {
+			z.printf("%s [%s]: ", label, yn)
+		}
 		line, err := z.R.ReadString('\n')
 		if err != nil && line == "" {
 			return false, err

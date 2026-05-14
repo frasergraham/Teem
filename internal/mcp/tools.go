@@ -7,9 +7,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
@@ -24,12 +26,65 @@ func (s *Server) handleSpawnAgent(ctx context.Context, req mcpgo.CallToolRequest
 	if s.team.FindArchetypeByRole(role) == nil {
 		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
 	}
-	id, err := s.spawner.SpawnByRole(ctx, role)
+	name := req.GetString("name", "")
+	id, err := s.spawner.Spawn(ctx, role, name)
 	if err != nil {
 		return mcpgo.NewToolResultErrorFromErr("spawn failed", err), nil
 	}
 	out, _ := json.Marshal(map[string]string{"agent_id": id})
 	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+// handleListRoster returns the persistent roster, optionally
+// filtered by role. The wire shape uses `name` / `last_seen` to
+// match MCP-facing terminology; `name` is the bare suffix when the
+// id has the role prefix and the full id for operator-supplied
+// (named) entries. in_use ORs the roster bit with a live
+// registry check so a never-cleared roster entry can't masquerade
+// as a still-running worker.
+func (s *Server) handleListRoster(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	role := req.GetString("role", "")
+	entries := s.spawner.RosterSnapshot(role)
+	type wire struct {
+		Name      string    `json:"name"`
+		Role      string    `json:"role"`
+		FirstSeen time.Time `json:"first_seen,omitempty"`
+		LastSeen  time.Time `json:"last_seen"`
+		InUse     bool      `json:"in_use"`
+		Source    string    `json:"source,omitempty"`
+	}
+	out := make([]wire, 0, len(entries))
+	for _, e := range entries {
+		name := e.ID
+		if prefix := e.Role + "-"; strings.HasPrefix(e.ID, prefix) {
+			name = e.ID[len(prefix):]
+		}
+		// in_use derives from the live registry — provisioning,
+		// running, and busy all count; stopped, error, and unknown
+		// do not. The roster's own in_use bit can lag behind a
+		// crashed worker, so we don't trust it as the source of
+		// truth here.
+		inUse := false
+		if entry, ok := s.registry.Get(e.ID); ok {
+			switch entry.State {
+			case StateProvisioning, StateRunning, StateBusy:
+				inUse = true
+			}
+		}
+		out = append(out, wire{
+			Name:      name,
+			Role:      e.Role,
+			FirstSeen: e.FirstSeen,
+			LastSeen:  e.LastUsedAt,
+			InUse:     inUse,
+			Source:    e.Source,
+		})
+	}
+	body, err := json.Marshal(out)
+	if err != nil {
+		return mcpgo.NewToolResultErrorFromErr("marshal roster", err), nil
+	}
+	return mcpgo.NewToolResultText(string(body)), nil
 }
 
 func (s *Server) handleAssignJob(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -212,6 +267,69 @@ func (s *Server) handleUpdateArchetype(_ context.Context, req mcpgo.CallToolRequ
 	return mcpgo.NewToolResultText(string(out)), nil
 }
 
+// --- archetype memory handlers --------------------------------------------
+
+func (s *Server) handleReadArchetypeMemory(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.archMem == nil {
+		return mcpgo.NewToolResultError("archetype memory is not configured"), nil
+	}
+	role, err := req.RequireString("role")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if s.team != nil && s.team.FindArchetypeByRole(role) == nil {
+		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
+	}
+	body, err := s.archMem.Load(role)
+	if err != nil {
+		return mcpgo.NewToolResultErrorFromErr("read_archetype_memory", err), nil
+	}
+	out, _ := json.Marshal(map[string]string{"role": role, "body": body})
+	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+func (s *Server) handleAppendArchetypeMemory(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.archMem == nil {
+		return mcpgo.NewToolResultError("archetype memory is not configured"), nil
+	}
+	role, err := req.RequireString("role")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	note, err := req.RequireString("note")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if s.team != nil && s.team.FindArchetypeByRole(role) == nil {
+		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
+	}
+	// Bound operator notes the same way job-complete summaries are
+	// bounded — keeps the file from being grown unboundedly by repeated
+	// calls before the next summariser run prunes by age. Also flattens
+	// newlines so the bullet line stays parseable.
+	const maxNoteBytes = 1024
+	clean := strings.ReplaceAll(strings.ReplaceAll(note, "\r", " "), "\n", " ")
+	if len(clean) > maxNoteBytes {
+		end := maxNoteBytes
+		for end > 0 && !utf8.RuneStart(clean[end]) {
+			end--
+		}
+		clean = clean[:end] + "…"
+	}
+	entry := archmem.Entry{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "leader",
+		JobID:     "",
+		Status:    "note",
+		Summary:   clean,
+	}
+	if err := s.archMem.AppendEntry(role, entry); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("append_archetype_memory", err), nil
+	}
+	out, _ := json.Marshal(map[string]string{"appended": role})
+	return mcpgo.NewToolResultText(string(out)), nil
+}
+
 // --- notes handler --------------------------------------------------------
 
 func (s *Server) handleWriteUserNote(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -305,6 +423,9 @@ func (s *Server) handleListTasks(_ context.Context, req mcpgo.CallToolRequest) (
 	if v := req.GetString("status", ""); v != "" {
 		f.Status = plan.Status(v)
 	}
+	if v := req.GetString("stage", ""); v != "" {
+		f.Stage = plan.Stage(v)
+	}
 	if req.GetString("open_only", "") == "true" {
 		f.OpenOnly = true
 	}
@@ -395,6 +516,174 @@ func (s *Server) handleRecallJobs(_ context.Context, req mcpgo.CallToolRequest) 
 	return mcpgo.NewToolResultText(string(body)), nil
 }
 
+// --- leader-status & stage / decision / blocker tools --------------------
+
+func (s *Server) handleUpdateLeaderStatus(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.leaderStatus == nil {
+		return mcpgo.NewToolResultError("leader_status store is not configured"), nil
+	}
+	text, err := req.RequireString("text")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	agentID := req.GetString("agent_id", "leader")
+	var taskIDs []string
+	if v := req.GetString("current_task_ids", ""); v != "" {
+		taskIDs = splitCSV(v)
+	}
+	if err := s.leaderStatus.Set(agentID, text, taskIDs); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("update_leader_status", err), nil
+	}
+	entry, _ := s.leaderStatus.Get(agentID)
+	body, _ := json.Marshal(entry)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleGetLeaderStatus(_ context.Context, _ mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.leaderStatus == nil {
+		return mcpgo.NewToolResultError("leader_status store is not configured"), nil
+	}
+	entries := s.leaderStatus.All()
+	out := map[string]any{}
+	for _, e := range entries {
+		out[e.AgentID] = e
+	}
+	body, _ := json.Marshal(out)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleSetTaskStage(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	stage, err := req.RequireString("stage")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	st := plan.Stage(stage)
+	if !plan.IsValidStage(st) {
+		return mcpgo.NewToolResultErrorf("unknown stage %q (valid: proposed, specced, building, in_review, merging, verified, blocked, abandoned)", stage), nil
+	}
+	task, err := s.plan.UpdateTask(taskID, plan.UpdateInput{Stage: st})
+	if err != nil {
+		switch {
+		case errors.Is(err, plan.ErrTaskNotFound):
+			return mcpgo.NewToolResultErrorf("task %q not found", taskID), nil
+		case errors.Is(err, plan.ErrInvalidStage):
+			return mcpgo.NewToolResultErrorf("illegal stage transition to %q", stage), nil
+		default:
+			return mcpgo.NewToolResultErrorFromErr("set_task_stage", err), nil
+		}
+	}
+	body, _ := json.Marshal(task)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleRecordDecision(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.audit == nil {
+		return mcpgo.NewToolResultError("audit sink is not configured"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	text, err := req.RequireString("text")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	// Sanity check: the task should exist when plan is wired. Lets
+	// the caller catch typos before scattering notes against
+	// nonexistent ids.
+	if s.plan != nil {
+		if _, ok := s.plan.Get(taskID); !ok {
+			return mcpgo.NewToolResultErrorf("task %q not found", taskID), nil
+		}
+	}
+	agentID := req.GetString("agent_id", "leader")
+	if agentID == "" {
+		agentID = "leader"
+	}
+	ev := audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   agentID,
+		Kind:      audit.KindDecisionNote,
+		Message:   text,
+		Meta:      map[string]any{"task_id": taskID},
+	}
+	if err := s.audit.Write(ev); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("record_decision", err), nil
+	}
+	body, _ := json.Marshal(map[string]string{"recorded": taskID})
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleRecordBlocker(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.audit == nil {
+		return mcpgo.NewToolResultError("audit sink is not configured"), nil
+	}
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	text, err := req.RequireString("text")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	cur, ok := s.plan.Get(taskID)
+	if !ok {
+		return mcpgo.NewToolResultErrorf("task %q not found", taskID), nil
+	}
+	// Atomic-effect intent: move the task to blocked stage AND
+	// status, then write a single audit event. UpdateTask is a single
+	// write under the plan mutex; the audit write is a separate file.
+	// We accept that interleaving order — the audit_kind=blocker_note
+	// event with task_id meta is what the dashboard joins on, not the
+	// plan store.
+	//
+	// Skip the UpdateTask entirely when the task is already at the
+	// blocked stage (and status) so an idempotent re-block doesn't
+	// fail the transition check. Any other rejection is a real error
+	// — surface it to the caller WITH current stage so they can decide,
+	// and do NOT emit the audit note (otherwise the audit and plan
+	// stores disagree).
+	if !(cur.Stage == plan.StageBlocked && cur.Status == plan.StatusBlocked) {
+		if _, err := s.plan.UpdateTask(taskID, plan.UpdateInput{
+			Status: plan.StatusBlocked,
+			Stage:  plan.StageBlocked,
+		}); err != nil {
+			if errors.Is(err, plan.ErrInvalidStage) {
+				return mcpgo.NewToolResultErrorf(
+					"record_blocker: stage %q cannot transition to blocked (current status %q); fix the stage first or call set_task_stage",
+					cur.Stage, cur.Status), nil
+			}
+			return mcpgo.NewToolResultErrorFromErr("record_blocker", err), nil
+		}
+	}
+	agentID := req.GetString("agent_id", "leader")
+	if agentID == "" {
+		agentID = "leader"
+	}
+	ev := audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   agentID,
+		Kind:      audit.KindBlockerNote,
+		Message:   text,
+		Meta:      map[string]any{"task_id": taskID},
+	}
+	if err := s.audit.Write(ev); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("record_blocker: audit", err), nil
+	}
+	body, _ := json.Marshal(map[string]string{"blocked": taskID})
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
 func (s *Server) handleQueryAudit(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 	if s.audit == nil {
 		return mcpgo.NewToolResultError("audit log is not configured"), nil
@@ -426,4 +715,3 @@ func (s *Server) handleQueryAudit(_ context.Context, req mcpgo.CallToolRequest) 
 	}
 	return mcpgo.NewToolResultText(string(body)), nil
 }
-

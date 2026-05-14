@@ -59,6 +59,12 @@ type Agent struct {
 	MCPs      []team.MCPRef
 	// Cloud holds backend-specific identifiers needed for Teardown.
 	Cloud *CloudPlacement
+	// Stopped is true when the worker has already terminated under
+	// its own steam (typically the self-exit-after-idle path). The
+	// LocalProvisioner uses this to skip the /shutdown POST and
+	// SIGTERM-by-pid fallback during Teardown and only clean up the
+	// on-disk artefacts (socket, pidfile, worktree).
+	Stopped bool
 }
 
 // IsPersistent reports whether the agent carries a persistent lifecycle.

@@ -301,7 +301,6 @@ func writeClaudeMCPConfig(path, url string) error {
 	return atomicWrite(path, body)
 }
 
-
 // teamSearchPaths lists the file names `teem chat` searches for a team
 // when --team is unset, in priority order. The wizard writes to the first
 // entry.
@@ -385,11 +384,19 @@ func defaultNotesPath(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "notes.jsonl")
 }
 
-// defaultArchetypeSeqPath returns the JSON file persisting the
-// spawner's per-role instance-id counter for a team. Survives daemon
-// restarts so freshly-spawned ids don't collide with historical ones.
+// defaultArchetypeSeqPath returns the JSON file produced by the
+// pre-T9 per-role instance-id counter. The current allocator
+// (internal/roster) reads this file once on first boot for
+// migration, then ignores it.
 func defaultArchetypeSeqPath(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "archetype-seq.json")
+}
+
+// defaultRosterPath returns the JSON file persisting the roster of
+// worker names (wordlist allocations + reincarnation candidates).
+// Replaces archetype-seq.json from T9 onward.
+func defaultRosterPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "roster.json")
 }
 
 // defaultPulseRunningFlag returns the file path used to persist
@@ -411,6 +418,19 @@ func defaultInFlightPath(teamName string) string {
 // path is socketDir/<agent-id>.sock with a sibling .pid file.
 func defaultSocketDir(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "sockets")
+}
+
+// defaultMemoryDir returns the directory holding per-archetype memory
+// markdown files for the team. One file per role: <dir>/<role>.md.
+func defaultMemoryDir(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "memory")
+}
+
+// defaultRegistrationPath returns the file the daemon writes on each
+// /control/teams registration so the team can be rebuilt after a
+// restart. Holds the YAML the operator submitted plus repo metadata.
+func defaultRegistrationPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "registration.json")
 }
 
 // drainTimeout returns the configured drain window for graceful

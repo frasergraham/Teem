@@ -11,22 +11,33 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpsrv "github.com/mark3labs/mcp-go/server"
 
+	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
+	"github.com/frasergraham/teem/internal/leaderstatus"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
+	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/team"
 )
 
 // Spawner is the abstraction the spawn_agent MCP tool calls into.
 // Implemented in internal/agent to avoid an import cycle.
+//
+// Spawn takes an optional operator-supplied name. When name == ""
+// the allocator picks an id from the role's wordlist (current
+// behavior). When name is set the worker is spawned under that
+// exact id — reincarnating a prior worker if the name was already
+// retired, idempotently returning the existing id if it's already
+// live, or rejecting if the name belongs to a different role.
 type Spawner interface {
-	SpawnByRole(ctx context.Context, role string) (string, error)
+	Spawn(ctx context.Context, role, name string) (string, error)
 	AssignJob(ctx context.Context, agentID, prompt, contextNote string) (string, error)
 	JobStatus(jobID string) (status string, output string, found bool)
 	StopAgent(ctx context.Context, agentID string) error
 	IsRunning(agentID string) bool
 	AnyRunningWithRole(role string) bool
+	RosterSnapshot(role string) []roster.Entry
 }
 
 // Server bundles the MCP server, its handler, and the dependencies its
@@ -36,13 +47,16 @@ type Server struct {
 	handler http.Handler
 	http    *http.Server
 
-	bus      bus.Bus
-	team     *team.Team
-	registry *Registry
-	spawner  Spawner
-	audit    audit.Sink
-	plan     *plan.Plan
-	notes    *notes.Inbox
+	bus            bus.Bus
+	team           *team.Team
+	registry       *Registry
+	spawner        Spawner
+	audit          audit.Sink
+	plan           *plan.Plan
+	notes          *notes.Inbox
+	archMem        *archmem.Store
+	leaderStatus   *leaderstatus.Store
+	transcriptsDir string
 }
 
 // Config holds the deps the orchestrator server needs.
@@ -60,6 +74,20 @@ type Config struct {
 	// Notes is the user-notes inbox the write_user_note tool appends
 	// to. Optional — if nil the tool returns a clear error.
 	Notes *notes.Inbox
+	// TranscriptsDir is the leader-side root directory mirroring
+	// worker transcripts (<dir>/<agent_id>/<job_id>.jsonl). When
+	// empty, the get_job_transcript tool returns an error explaining
+	// transcripts aren't configured.
+	TranscriptsDir string
+	// ArchMem is the per-archetype memory store. When nil the
+	// read_archetype_memory / append_archetype_memory tools return
+	// an error explaining the feature is unconfigured.
+	ArchMem *archmem.Store
+	// LeaderStatus persists the "what is each leader-tier agent
+	// doing right now" entries shown at the top of the dashboard.
+	// When nil the update_leader_status / get_leader_status tools
+	// return a clear error.
+	LeaderStatus *leaderstatus.Store
 }
 
 // New builds an orchestrator MCP server. Call Serve to start serving on a
@@ -74,14 +102,17 @@ func New(cfg Config) (*Server, error) {
 		mcpsrv.WithToolCapabilities(true),
 	)
 	s := &Server{
-		core:     core,
-		bus:      cfg.Bus,
-		team:     cfg.Team,
-		registry: cfg.Registry,
-		spawner:  cfg.Spawner,
-		audit:    cfg.Audit,
-		plan:     cfg.Plan,
-		notes:    cfg.Notes,
+		core:           core,
+		bus:            cfg.Bus,
+		team:           cfg.Team,
+		registry:       cfg.Registry,
+		spawner:        cfg.Spawner,
+		audit:          cfg.Audit,
+		plan:           cfg.Plan,
+		notes:          cfg.Notes,
+		archMem:        cfg.ArchMem,
+		leaderStatus:   cfg.LeaderStatus,
+		transcriptsDir: cfg.TranscriptsDir,
 	}
 	s.registerTools()
 	s.handler = mcpsrv.NewStreamableHTTPServer(core)
@@ -118,10 +149,18 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) registerTools() {
 	s.core.AddTool(
 		mcpgo.NewTool("spawn_agent",
-			mcpgo.WithDescription("Spawn a worker agent of the given role from the team roster."),
+			mcpgo.WithDescription("Spawn a worker agent of the given role from the team roster. Pass `name` to choose the worker's identity: a previously-retired name reincarnates the same worker (its branch teem/<name> and roster history come back); a name already in use returns idempotently; an unknown name is registered. Omit `name` to let the daemon pick from the wordlist."),
 			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Role name as declared in the team YAML.")),
+			mcpgo.WithString("name", mcpgo.Description("Optional. Spawn under this exact name. Must match ^[a-z][a-z0-9]{0,30}$. Reincarnates a prior worker with the same name, idempotently returns an already-live id, or registers a fresh entry.")),
 		),
 		s.handleSpawnAgent,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("list_roster",
+			mcpgo.WithDescription("Return the persistent roster of named workers for this team. Use this before spawn_agent to choose a previously-used name (reincarnation) or see what names are taken. Each entry includes {name, role, first_seen, last_seen, in_use, source} where source is one of 'wordlist' (allocator-picked), 'named' (operator-supplied), 'legacy' (migrated pre-T9 id)."),
+			mcpgo.WithString("role", mcpgo.Description("Optional. Restrict the result to one role.")),
+		),
+		s.handleListRoster,
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("assign_job",
@@ -189,7 +228,7 @@ func (s *Server) registerTools() {
 	s.core.AddTool(
 		mcpgo.NewTool("stop_agent",
 			mcpgo.WithDescription("Tear down a running worker instance. Cancels its result subscriber and calls Teardown on the provisioner (unless the archetype is persistent). The archetype stays in the roster."),
-			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the running instance, e.g. worker-3.")),
+			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the running instance, e.g. worker-ada.")),
 		),
 		s.handleStopAgent,
 	)
@@ -223,9 +262,9 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("update_task",
-			mcpgo.WithDescription("Mutate a task. Any subset of fields can be supplied; omitted fields are left as-is. Add evidence (job_ids that worked on this task) via add_evidence."),
+			mcpgo.WithDescription("Mutate a task's status, assignee, notes, depends_on, or evidence. Any subset of fields can be supplied; omitted fields are left as-is. To change the pipeline stage (proposed/specced/building/in_review/merging/verified/blocked/shelved/abandoned), use set_task_stage instead — it enforces the transitions matrix."),
 			mcpgo.WithString("id", mcpgo.Required(), mcpgo.Description("Task id.")),
-			mcpgo.WithString("status", mcpgo.Description("New status: pending, in_progress, blocked, done, abandoned.")),
+			mcpgo.WithString("status", mcpgo.Description("New status: pending, in_progress, blocked, shelved (paused, will pick up later), done, abandoned.")),
 			mcpgo.WithString("assigned_to", mcpgo.Description("Agent id currently working on this task.")),
 			mcpgo.WithString("notes", mcpgo.Description("Replace the notes field.")),
 			mcpgo.WithString("depends_on", mcpgo.Description("Comma-separated task ids; replaces existing list.")),
@@ -235,10 +274,11 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("list_tasks",
-			mcpgo.WithDescription("List tasks in the plan, optionally filtered. Returns the materialised view (title, status, assigned_to, depends_on, evidence, timestamps)."),
+			mcpgo.WithDescription("List tasks in the plan, optionally filtered. Returns the materialised view (title, status, stage, stage_entered_at, assigned_to, depends_on, evidence, timestamps)."),
 			mcpgo.WithString("status", mcpgo.Description("Restrict to one status.")),
+			mcpgo.WithString("stage", mcpgo.Description("Restrict to one stage (proposed/specced/building/in_review/merging/verified/blocked/shelved/abandoned).")),
 			mcpgo.WithString("parent_id", mcpgo.Description("Only direct children of this task.")),
-			mcpgo.WithString("open_only", mcpgo.Description("If 'true', skip done/abandoned tasks.")),
+			mcpgo.WithString("open_only", mcpgo.Description("If 'true', skip non-open tasks (only returns pending/in_progress/blocked).")),
 		),
 		s.handleListTasks,
 	)
@@ -251,10 +291,74 @@ func (s *Server) registerTools() {
 		s.handleLinkTaskToJob,
 	)
 	s.core.AddTool(
+		mcpgo.NewTool("get_job_transcript",
+			mcpgo.WithDescription("Fetch the full stream-json transcript a worker produced for a job. Use this to inspect what a sub-agent actually did beyond the truncated final assistant text in recall_jobs / query_audit. Returns either the raw NDJSON events ('raw') or a flat 'role: text' rendering ('text', default). Body is capped at 200 KiB; use head=N to fetch only the first N events."),
+			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Agent that ran the job.")),
+			mcpgo.WithString("job_id", mcpgo.Required(), mcpgo.Description("Job id from assign_job.")),
+			mcpgo.WithString("head", mcpgo.Description("Optional. Return only the first N stream-json events.")),
+			mcpgo.WithString("format", mcpgo.Description("'raw' (NDJSON verbatim) or 'text' (flat role/text rendering). Default 'text'.")),
+		),
+		s.handleGetJobTranscript,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("read_archetype_memory",
+			mcpgo.WithDescription("Return the persisted long-term memory for an archetype role: the rolling LLM digest plus the recent-entries list every freshly-spawned worker of that role inherits as baseline context. Use when triaging an agent's behavior or before adjusting how a role should work."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Archetype role (e.g. worker, reviewer).")),
+		),
+		s.handleReadArchetypeMemory,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("append_archetype_memory",
+			mcpgo.WithDescription("Append an operator-authored note to an archetype's memory file. Use sparingly — every line shows up as baseline context in future worker spawns. Good for one-off corrections (\"this role should always X\") that the LLM-generated digest hasn't picked up yet."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Archetype role to write under.")),
+			mcpgo.WithString("note", mcpgo.Required(), mcpgo.Description("The note text — one line, no markdown headers.")),
+		),
+		s.handleAppendArchetypeMemory,
+	)
+	s.core.AddTool(
 		mcpgo.NewTool("write_user_note",
 			mcpgo.WithDescription("Leave a short message for the user to read when they next open `teem chat`. Use during autonomous ticks for anything that needs the human's attention — completed milestones, decisions made, questions you want answered, blockers. The user sees a banner with unread notes before the chat opens."),
 			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Note body. One or more lines of markdown.")),
 		),
 		s.handleWriteUserNote,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("update_leader_status",
+			mcpgo.WithDescription("Set the short, human-readable \"what am I doing right now\" line shown at the top of the dashboard. Keep ≤120 chars; answer the right-now question (\"Reviewing T1+T6 diff\", \"Spawning reviewer-blake for T4\"). Planning detail belongs in record_decision. agent_id defaults to 'leader' for the Leader; PM-style workers should pass their own id."),
+			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Status line text. One sentence.")),
+			mcpgo.WithString("current_task_ids", mcpgo.Description("Optional comma-separated task ids being actively worked.")),
+			mcpgo.WithString("agent_id", mcpgo.Description("Optional. Defaults to 'leader'.")),
+		),
+		s.handleUpdateLeaderStatus,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("get_leader_status",
+			mcpgo.WithDescription("Read back the per-agent status board. Returns the map of agent_id → {text, updated_at, current_task_ids}."),
+		),
+		s.handleGetLeaderStatus,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("set_task_stage",
+			mcpgo.WithDescription("Move a task to a new pipeline stage: proposed, specced, building, in_review, merging, verified, blocked, shelved, abandoned. Stage is the lifecycle marker the dashboard pipeline view uses; Status (open/done) is separate. Shelved is for tasks intentionally paused — they leave the open pipeline but stay visible in their own dashboard section. Invalid transitions (e.g. verified → proposed) return an error."),
+			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id.")),
+			mcpgo.WithString("stage", mcpgo.Required(), mcpgo.Description("Target stage.")),
+		),
+		s.handleSetTaskStage,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("record_decision",
+			mcpgo.WithDescription("Record a non-trivial decision against a task: the \"why\" behind a choice that wouldn't be obvious from the diff alone. Persisted to the audit log under decision_note and rendered in the task's flow view. Use this for design choices, trade-offs picked, vendored deps, etc."),
+			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id this decision attaches to.")),
+			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Decision text — markdown allowed.")),
+		),
+		s.handleRecordDecision,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("record_blocker",
+			mcpgo.WithDescription("Record a blocker against a task. Atomic effect: the task moves to Stage='blocked' AND Status='blocked', and a blocker_note event lands in audit. Use when a worker reports unblockable issues that need leader or human action."),
+			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id being blocked.")),
+			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("What's blocking and what's needed to unblock.")),
+		),
+		s.handleRecordBlocker,
 	)
 }

@@ -3,13 +3,16 @@ package main
 import (
 	_ "embed"
 	"fmt"
+	"html"
 	"html/template"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/frasergraham/teem/internal/audit"
+	"github.com/frasergraham/teem/internal/leaderstatus"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/plan"
 )
@@ -17,24 +20,78 @@ import (
 //go:embed ui_dashboard.html
 var dashboardHTML string
 
-// dashboardTemplate is the parsed template; built once at startup.
-// nil-safe getter at access time so the daemon can wire the handler
-// before init() ordering matters.
-var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
-	"agoShort":     agoShort,
-	"timeShort":    timeShort,
-	"truncate200":  func(s string) string { return truncateMid(s, 200) },
-	"capitalize":   capitalize,
-	"toTitleCase":  capitalize,
-}).Parse(dashboardHTML))
+//go:embed ui_agent_jobs.html
+var agentJobsHTML string
+
+//go:embed ui_job_detail.html
+var jobDetailHTML string
+
+//go:embed ui_task_flow.html
+var taskFlowHTML string
+
+// uiTemplates is the parsed bundle of the three SSR pages, built once
+// at startup. They share a Funcs map so helpers (agoShort etc.) are
+// available from each. Lookup by template name (see ExecuteTemplate).
+var uiTemplates = newUITemplates()
+
+// newUITemplates parses all three SSR templates and returns the bundle.
+// Kept as a constructor so tests can rebuild a fresh copy when the
+// embedded HTML changes (and so the wiring is reviewable in one place).
+func newUITemplates() *template.Template {
+	funcs := template.FuncMap{
+		"agoShort":    agoShort,
+		"timeShort":   timeShort,
+		"expandable":  expandable,
+		"capitalize":  capitalize,
+		"toTitleCase": capitalize,
+		"durShort":    durShort,
+		"bytesShort":  bytesShort,
+	}
+	t := template.Must(template.New("dashboard").Funcs(funcs).Parse(dashboardHTML))
+	template.Must(t.New("agent_jobs").Parse(agentJobsHTML))
+	template.Must(t.New("job_detail").Parse(jobDetailHTML))
+	template.Must(t.New("task_flow").Parse(taskFlowHTML))
+	return t
+}
+
+// expandable renders short strings inline and longer ones inside a
+// collapsed <details> element so the dashboard/jobs tables don't
+// truncate mid-thought. Output is template.HTML because the helper
+// HTML-escapes the body itself; callers can hand it to the template
+// without piping through another safe wrapper.
+//
+// Threshold (180 chars) is roughly the length where a one-liner stops
+// fitting in a single tabular row at default body font.
+func expandable(s string) template.HTML {
+	if s == "" {
+		return ""
+	}
+	const inlineMax = 180
+	escaped := html.EscapeString(s)
+	if len(s) <= inlineMax {
+		return template.HTML(escaped)
+	}
+	// Trim back to the last valid UTF-8 rune boundary so a 2/3-byte
+	// rune at the cap doesn't leave an invalid sequence inside the
+	// preview HTML.
+	end := inlineMax
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	preview := html.EscapeString(s[:end]) + "…"
+	return template.HTML(
+		`<details class="expandable"><summary>` + preview +
+			`</summary><div class="expanded">` + escaped + `</div></details>`,
+	)
+}
 
 // dashboardSnapshot is the data the template renders. Computed fresh
 // on every GET so the page doesn't have to lie about state.
 type dashboardSnapshot struct {
-	Endpoint   string
-	StartedAt  time.Time
-	UptimeAgo  string
-	Teams      []dashboardTeam
+	Endpoint     string
+	StartedAt    time.Time
+	UptimeAgo    string
+	Teams        []dashboardTeam
 	NowFormatted string
 }
 
@@ -43,7 +100,11 @@ type dashboardTeam struct {
 	RegisteredAgo  string
 	Agents         []dashboardAgent
 	OpenTaskCount  int
-	PendingTasks   []dashboardTask
+	OpenTasks      []dashboardTask
+	Shelved        []dashboardTask
+	RecentDone     []dashboardTask
+	LeaderStatus   *leaderRow // pinned "leader" entry, if any
+	OtherStatuses  []leaderRow
 	PulseRunning   bool
 	PulsePaused    bool
 	PulseInterval  string
@@ -55,17 +116,34 @@ type dashboardTeam struct {
 }
 
 type dashboardAgent struct {
-	ID       string
-	Role     string
-	State    string
-	LastSeen string
+	ID        string
+	Role      string
+	State     string
+	LastSeen  string
+	JobsURL   string
+	Placement string
+}
+
+type leaderRow struct {
+	AgentID        string
+	Text           string
+	UpdatedAgo     string
+	CurrentTaskIDs []taskLink
+}
+
+type taskLink struct {
+	ID  string
+	URL string
 }
 
 type dashboardTask struct {
 	ID         string
 	Title      string
 	Status     string
+	Stage      string
+	StageAgo   string
 	AssignedTo string
+	URL        string
 }
 
 type dashboardEvent struct {
@@ -73,6 +151,8 @@ type dashboardEvent struct {
 	AgentID string
 	Kind    string
 	Message string
+	JobID   string
+	JobURL  string
 }
 
 // renderDashboard composes the snapshot for the daemon's current state
@@ -101,7 +181,7 @@ func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if err := dashboardTemplate.Execute(w, snap); err != nil {
+	if err := uiTemplates.ExecuteTemplate(w, "dashboard", snap); err != nil {
 		// Template errors land here once everything else has already
 		// been written; surface to stderr but don't try to recover.
 		fmt.Printf("[teemd] dashboard render: %v\n", err)
@@ -122,14 +202,26 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	out := dashboardTeam{Name: rt.team.Name}
 	out.RegisteredAgo = agoShort(rt.registered)
 
-	// Agents from the registry.
+	// Agents from the registry — hide fully-stopped agents only.
+	// Provisioning and error states stay visible: an operator watching
+	// a Fargate spin-up or a crashed worker needs that signal. Stopped
+	// workers remain reachable at /teams/<team>/agents/<id>/jobs.
 	entries := rt.registry.List()
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	for _, e := range entries {
+		if e.State == mcpsrv.StateStopped {
+			continue
+		}
+		placement := "—"
+		if a := rt.team.FindArchetypeByRole(e.Role); a != nil {
+			placement = a.Placement
+		}
 		da := dashboardAgent{
-			ID:    e.ID,
-			Role:  e.Role,
-			State: string(e.State),
+			ID:        e.ID,
+			Role:      e.Role,
+			State:     string(e.State),
+			JobsURL:   fmt.Sprintf("/teams/%s/agents/%s/jobs", rt.team.Name, e.ID),
+			Placement: placement,
 		}
 		if !e.LastSeen.IsZero() {
 			da.LastSeen = agoShort(e.LastSeen)
@@ -142,20 +234,58 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		}
 	}
 
-	// Plan: open tasks for the leader-attention count.
+	// Plan: open tasks (sorted by stage so the pipeline reads
+	// proposed → verified) and the 5 most-recently-completed tasks.
 	if rt.plan != nil {
-		open := rt.plan.List(plan.Filter{OpenOnly: true})
-		out.OpenTaskCount = len(open)
-		for _, t := range open {
-			if len(out.PendingTasks) >= 5 {
-				break
+		all := rt.plan.List(plan.Filter{})
+		var shelved []plan.Task
+		for _, t := range all {
+			switch {
+			case t.Status.IsOpen():
+				out.OpenTaskCount++
+				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.Name, t))
+			case t.Status.IsShelved():
+				shelved = append(shelved, t)
 			}
-			out.PendingTasks = append(out.PendingTasks, dashboardTask{
-				ID:         t.ID,
-				Title:      t.Title,
-				Status:     string(t.Status),
-				AssignedTo: t.AssignedTo,
-			})
+		}
+		// Sort open tasks by stage order then created.
+		sort.SliceStable(out.OpenTasks, func(i, j int) bool {
+			return stageOrder(out.OpenTasks[i].Stage) < stageOrder(out.OpenTasks[j].Stage)
+		})
+		// Shelved tasks: newest-shelved first so a task you just put
+		// down is easy to find again. Not capped — the section exists
+		// so the operator doesn't forget what they paused on.
+		sort.Slice(shelved, func(i, j int) bool { return shelved[i].UpdatedAt.After(shelved[j].UpdatedAt) })
+		for _, t := range shelved {
+			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.Name, t))
+		}
+		// Recent completed: tasks whose status moved to done, newest
+		// first by UpdatedAt; capped to 5.
+		var done []plan.Task
+		for _, t := range all {
+			if t.Status == plan.StatusDone || t.Status == plan.StatusAbandoned {
+				done = append(done, t)
+			}
+		}
+		sort.Slice(done, func(i, j int) bool { return done[i].UpdatedAt.After(done[j].UpdatedAt) })
+		if len(done) > 5 {
+			done = done[:5]
+		}
+		for _, t := range done {
+			out.RecentDone = append(out.RecentDone, taskToDashboardTask(rt.team.Name, t))
+		}
+	}
+
+	// Leader status board: leader pinned on top, others below.
+	if rt.leaderStatus != nil {
+		for _, e := range rt.leaderStatus.All() {
+			row := leaderStatusToRow(rt.team.Name, e)
+			if e.AgentID == "leader" {
+				rcopy := row
+				out.LeaderStatus = &rcopy
+				continue
+			}
+			out.OtherStatuses = append(out.OtherStatuses, row)
 		}
 	}
 
@@ -183,12 +313,17 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 			if len(out.RecentEvents) >= 8 {
 				break
 			}
-			out.RecentEvents = append(out.RecentEvents, dashboardEvent{
+			de := dashboardEvent{
 				Time:    timeShort(e.Timestamp),
 				AgentID: e.AgentID,
 				Kind:    string(e.Kind),
-				Message: truncateMid(eventSummary(e), 80),
-			})
+				Message: eventSummary(e),
+				JobID:   e.JobID,
+			}
+			if e.JobID != "" {
+				de.JobURL = fmt.Sprintf("/teams/%s/jobs/%s", rt.team.Name, e.JobID)
+			}
+			out.RecentEvents = append(out.RecentEvents, de)
 		}
 	}
 
@@ -198,6 +333,66 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		out.UnreadNotes = len(notes)
 	}
 	return out
+}
+
+// taskToDashboardTask converts a plan.Task to the row shape rendered
+// by the dashboard template.
+func taskToDashboardTask(team string, t plan.Task) dashboardTask {
+	stageAgo := ""
+	if !t.StageEnteredAt.IsZero() {
+		stageAgo = agoShort(t.StageEnteredAt)
+	}
+	return dashboardTask{
+		ID:         t.ID,
+		Title:      t.Title,
+		Status:     string(t.Status),
+		Stage:      string(t.Stage),
+		StageAgo:   stageAgo,
+		AssignedTo: t.AssignedTo,
+		URL:        fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID),
+	}
+}
+
+// leaderStatusToRow converts a leaderstatus.Entry to the dashboard
+// row shape, resolving task ids to clickable links.
+func leaderStatusToRow(team string, e leaderstatus.Entry) leaderRow {
+	r := leaderRow{
+		AgentID:    e.AgentID,
+		Text:       e.Text,
+		UpdatedAgo: agoShort(e.UpdatedAt),
+	}
+	for _, id := range e.CurrentTaskIDs {
+		r.CurrentTaskIDs = append(r.CurrentTaskIDs, taskLink{
+			ID:  id,
+			URL: fmt.Sprintf("/teams/%s/tasks/%s", team, id),
+		})
+	}
+	return r
+}
+
+// stageOrder maps a stage to its display index so the dashboard can
+// sort open tasks left-to-right along the pipeline. Unknown stages
+// sort last.
+func stageOrder(s string) int {
+	switch plan.Stage(s) {
+	case plan.StageProposed:
+		return 0
+	case plan.StageSpecced:
+		return 1
+	case plan.StageBuilding:
+		return 2
+	case plan.StageInReview:
+		return 3
+	case plan.StageMerging:
+		return 4
+	case plan.StageVerified:
+		return 5
+	case plan.StageBlocked:
+		return 6
+	case plan.StageAbandoned:
+		return 7
+	}
+	return 99
 }
 
 // eventSummary picks the most useful one-liner for an audit event.
@@ -251,14 +446,39 @@ func timeShort(t time.Time) string {
 	return t.Local().Format("15:04:05")
 }
 
-// truncateMid trims to n with an ellipsis when overlong. Bias toward
-// the beginning so "long prompt about implementing migrations" stays
-// recognizable from a glance.
-func truncateMid(s string, n int) string {
-	if len(s) <= n {
-		return s
+// durShort renders a non-zero duration compactly. Zero returns the
+// empty string so templates can hide the field for in-flight jobs.
+func durShort(d time.Duration) string {
+	if d <= 0 {
+		return ""
 	}
-	return s[:n] + "…"
+	if d < time.Second {
+		return fmt.Sprintf("%dms", int(d/time.Millisecond))
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm%ds", int(d/time.Minute), int((d%time.Minute)/time.Second))
+	}
+	return d.Truncate(time.Second).String()
+}
+
+// bytesShort renders a byte count with a binary-prefix suffix. Empty
+// when n == 0 so templates can hide the field for missing transcripts.
+func bytesShort(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	const k = 1024
+	switch {
+	case n < k:
+		return fmt.Sprintf("%dB", n)
+	case n < k*k:
+		return fmt.Sprintf("%.1fKB", float64(n)/k)
+	default:
+		return fmt.Sprintf("%.1fMB", float64(n)/(k*k))
+	}
 }
 
 // capitalize lowercases everything except the first character.

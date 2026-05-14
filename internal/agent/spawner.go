@@ -18,6 +18,7 @@ import (
 	"github.com/frasergraham/teem/internal/inflight"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/provisioner"
+	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/team"
 )
@@ -84,17 +85,24 @@ type Config struct {
 	// JobBodyCap is the per-event truncation cap for prompt + output
 	// strings. Defaults to 64 KiB when zero.
 	JobBodyCap int
-	// ArchetypeSeqPath, when non-empty, names a JSON file the spawner
-	// persists per-role instance-id counters to. Restored at
-	// NewSpawner time so daemon restarts don't reuse instance ids
-	// (`worker-3` after restart stays distinct from a historical
-	// `worker-3`). Empty disables persistence.
-	ArchetypeSeqPath string
+	// Roster is the per-team name allocator. Required when calls to
+	// Spawn or ReconcileLocalSockets are expected; tests that
+	// only construct the Spawner can leave it nil and one will be
+	// created in-memory. Persistence and migration of legacy
+	// `<role>-N` ids is the caller's responsibility — see
+	// internal/roster.MigrateLegacy.
+	Roster *roster.Roster
 	// InFlight is the per-team in-flight job log. When set, the
 	// spawner hands it to every Worker so start/end records get
 	// written for each job. Used by the daemon's restart-reconcile
 	// path to emit job_interrupted audit events for orphans.
 	InFlight *inflight.Log
+	// LoadArchetypeMemory, when non-nil, is called at worker
+	// construction to fetch the role's persisted memory markdown.
+	// Returned body is snapshot once onto Worker.BaselineContext so
+	// every job the worker runs carries the same long-term context.
+	// Errors are logged and treated as empty.
+	LoadArchetypeMemory func(role string) (string, error)
 }
 
 // GitConfig is the source-control configuration the leader hands to
@@ -131,11 +139,11 @@ type Spawner struct {
 	jobs        map[string]*jobRecord
 	subs        map[string]context.CancelFunc
 	provisioned map[string]provisionedAgent
-	// archetypeSeq is a monotonic counter per archetype role; the next
-	// auto-generated id is `<role>-<seq+1>`. IDs are never reused so
-	// audit history stays coherent — `worker-3` always refers to one
-	// historical worker even after it stopped.
-	archetypeSeq map[string]int
+	// roster is the source of truth for ephemeral worker names. Every
+	// new id comes from roster.Allocate; ids are returned to the pool
+	// via roster.Release on stop so the names persist as identity
+	// across the worker's lifetime.
+	roster *roster.Roster
 }
 
 type provisionedAgent struct {
@@ -152,139 +160,26 @@ func NewSpawner(baseCtx context.Context, t *team.Team, b bus.Bus, r *mcpsrv.Regi
 		baseCtx = context.Background()
 	}
 	ctx, cancel := context.WithCancel(baseCtx)
+	if cfg.Roster == nil {
+		// Tests and the no-tailnet smoke flow can construct a Spawner
+		// without arranging a persisted roster — an in-memory one
+		// keeps Allocate working.
+		cfg.Roster, _ = roster.Open("")
+	}
 	s := &Spawner{
-		team:         t,
-		bus:          b,
-		registry:     r,
-		cfg:          cfg,
-		baseCtx:      ctx,
-		baseCancel:   cancel,
-		workers:      map[string]*Worker{},
-		jobs:         map[string]*jobRecord{},
-		subs:         map[string]context.CancelFunc{},
-		provisioned:  map[string]provisionedAgent{},
-		archetypeSeq: map[string]int{},
-	}
-	// Restore the per-role counter from disk so daemon restarts
-	// don't reuse instance ids. Best-effort: a missing/corrupt file
-	// is treated as "start from zero," because the audit-history
-	// belt-and-suspenders below will catch any drift.
-	if loaded, err := readArchetypeSeq(cfg.ArchetypeSeqPath); err == nil {
-		for role, n := range loaded {
-			s.archetypeSeq[role] = n
-		}
-	}
-	// Belt-and-suspenders: walk the audit log for max `<role>-N`
-	// already used per archetype. If anything is higher than the
-	// persisted counter, use that. Combined, the next spawn always
-	// produces a fresh id even if the state file is missing/stale.
-	if cfg.AuditSink != nil {
-		for role, n := range maxArchetypeIDFromAudit(cfg.AuditSink, t) {
-			if n > s.archetypeSeq[role] {
-				s.archetypeSeq[role] = n
-			}
-		}
+		team:        t,
+		bus:         b,
+		registry:    r,
+		cfg:         cfg,
+		baseCtx:     ctx,
+		baseCancel:  cancel,
+		workers:     map[string]*Worker{},
+		jobs:        map[string]*jobRecord{},
+		subs:        map[string]context.CancelFunc{},
+		provisioned: map[string]provisionedAgent{},
+		roster:      cfg.Roster,
 	}
 	return s
-}
-
-// readArchetypeSeq loads the persisted per-role counter map. Returns
-// an empty map (and nil error) when the file is missing.
-func readArchetypeSeq(path string) (map[string]int, error) {
-	if path == "" {
-		return map[string]int{}, nil
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]int{}, nil
-		}
-		return nil, err
-	}
-	out := map[string]int{}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return map[string]int{}, nil // tolerate corruption — audit fallback recovers
-	}
-	return out, nil
-}
-
-// writeArchetypeSeq atomically persists the counter map. Best-effort:
-// errors are not fatal because the audit-history scan reconstructs the
-// state on the next start.
-func writeArchetypeSeq(path string, seq map[string]int) error {
-	if path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	body, err := json.MarshalIndent(seq, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// maxArchetypeIDFromAudit scans the audit log for any agent id of the
-// form `<role>-N` matching a known archetype role and returns the max
-// N seen per role. Used to recover the counter if the state file is
-// gone or stale.
-func maxArchetypeIDFromAudit(sink audit.Sink, t *team.Team) map[string]int {
-	out := map[string]int{}
-	roles := map[string]struct{}{}
-	for _, a := range t.SnapshotArchetypes() {
-		roles[a.Role] = struct{}{}
-	}
-	if len(roles) == 0 {
-		return out
-	}
-	events, err := sink.Query("", time.Time{}, 0)
-	if err != nil {
-		return out
-	}
-	for _, e := range events {
-		role, n, ok := parseInstanceID(e.AgentID)
-		if !ok {
-			continue
-		}
-		if _, isRole := roles[role]; !isRole {
-			continue
-		}
-		if n > out[role] {
-			out[role] = n
-		}
-	}
-	return out
-}
-
-// parseInstanceID splits `<role>-<N>` into (role, N, true). Anything
-// that doesn't fit returns (_, _, false).
-func parseInstanceID(id string) (string, int, bool) {
-	for i := len(id) - 1; i >= 0; i-- {
-		if id[i] == '-' {
-			role := id[:i]
-			if role == "" {
-				return "", 0, false
-			}
-			n := 0
-			for j := i + 1; j < len(id); j++ {
-				c := id[j]
-				if c < '0' || c > '9' {
-					return "", 0, false
-				}
-				n = n*10 + int(c-'0')
-			}
-			if i+1 == len(id) {
-				return "", 0, false
-			}
-			return role, n, true
-		}
-	}
-	return "", 0, false
 }
 
 // Reconcile attempts to reconnect every persistent agent in the team
@@ -299,6 +194,13 @@ func parseInstanceID(id string) (string, int, bool) {
 // For each persistent archetype, walk instance slots teem-<role>-1
 // through teem-<role>-N (where N = MaxConcurrent) and probe /healthz.
 // Each that answers gets registered as a running worker.
+//
+// TODO(named-persistent): persistent archetypes still use the legacy
+// numeric `<role>-N` slot shape because their hostnames are operator-
+// provisioned (the user runs `teem-worker` themselves at
+// teem-<role>-N). Switching them to wordlist names would require an
+// operator-facing rename — left for a follow-up PR. Ephemeral spawns
+// (Spawn) use the new wordlist allocator.
 func (s *Spawner) Reconcile(ctx context.Context) int {
 	if s.cfg.HTTPClient == nil || s.cfg.WorkerToken == "" {
 		return 0
@@ -337,19 +239,10 @@ func (s *Spawner) Reconcile(ctx context.Context) int {
 				s.publishLog(id, fmt.Sprintf("reconcile start failed: %v", err))
 				continue
 			}
-			// Bump the per-role counter so future ad-hoc spawns don't
-			// collide with the reconciled id. Persist to keep the
-			// state file in sync.
-			s.mu.Lock()
-			if s.archetypeSeq[arch.Role] < n {
-				s.archetypeSeq[arch.Role] = n
-			}
-			snap := make(map[string]int, len(s.archetypeSeq))
-			for k, v := range s.archetypeSeq {
-				snap[k] = v
-			}
-			s.mu.Unlock()
-			_ = writeArchetypeSeq(s.cfg.ArchetypeSeqPath, snap)
+			// Register the reconciled id with the roster so ephemeral
+			// allocations for the same role can't collide with it
+			// via the numeric-suffix fallback.
+			s.roster.MarkInUse(id, arch.Role)
 			connected++
 			s.publishLog(id, "reconciled — persistent worker reused")
 		}
@@ -390,8 +283,8 @@ func (s *Spawner) ReconcileLocalSockets(ctx context.Context) int {
 			_ = os.Remove(socketPath)
 			continue
 		}
-		role, _, ok := parseInstanceID(agentID)
-		if !ok {
+		role := roster.RoleFromID(agentID)
+		if role == "" {
 			continue
 		}
 		a := &provisioner.Agent{
@@ -423,34 +316,70 @@ func (s *Spawner) ReconcileLocalSockets(ctx context.Context) int {
 		s.workers[agentID] = w
 		s.provisioned[agentID] = provisionedAgent{provisioner: p, agent: a}
 		s.mu.Unlock()
+		// Register with the roster so ephemeral allocations don't
+		// collide with this reattached id.
+		s.roster.MarkInUse(agentID, role)
 		connected++
 	}
 	return connected
 }
 
-// specForRole resolves a role to a concrete team.AgentSpec by spawning
-// a fresh instance from the matching archetype. Returns an error if
-// the role has no archetype or the archetype is at its concurrency
-// cap.
-func (s *Spawner) specForRole(role string) (*team.AgentSpec, bool, error) {
+// resolveSpec maps a role + optional operator-supplied name to a
+// concrete team.AgentSpec. The returned aliveID is non-empty only
+// when name was supplied and a worker with that id is already
+// running (idempotent spawn); in that case spec is nil and the
+// caller returns aliveID without doing any provisioning.
+//
+// Cap, cross-role, and live-name checks happen atomically under
+// s.mu so concurrent spawn_agent calls can't race past
+// MaxConcurrent or simultaneously claim the same operator name.
+func (s *Spawner) resolveSpec(role, name string) (spec *team.AgentSpec, aliveID string, err error) {
 	arch := s.team.FindArchetypeByRole(role)
 	if arch == nil {
-		return nil, false, fmt.Errorf("no archetype with role %q", role)
+		return nil, "", fmt.Errorf("no archetype with role %q", role)
 	}
-	active := s.countActiveByRole(role)
+	if name == "" {
+		s.mu.Lock()
+		active := s.countActiveByRoleLocked(role)
+		s.mu.Unlock()
+		if active >= arch.MaxConcurrent {
+			return nil, "", fmt.Errorf("archetype %q is at capacity (%d/%d running)", role, active, arch.MaxConcurrent)
+		}
+		id := s.roster.Allocate(role)
+		out := s.specFromArchetype(*arch, id)
+		return &out, "", nil
+	}
+
+	if err := roster.ValidateName(name); err != nil {
+		return nil, "", err
+	}
+	s.mu.Lock()
+	// Idempotent: a worker with this name is already live. Return
+	// its id without re-provisioning.
+	if _, alive := s.workers[name]; alive {
+		s.mu.Unlock()
+		return nil, name, nil
+	}
+	if existing, ok := s.roster.Lookup(name); ok && existing.Role != role {
+		s.mu.Unlock()
+		return nil, "", fmt.Errorf("%q is already a %s; pick a different name", name, existing.Role)
+	}
+	active := s.countActiveByRoleLocked(role)
 	if active >= arch.MaxConcurrent {
-		return nil, false, fmt.Errorf("archetype %q is at capacity (%d/%d running)", role, active, arch.MaxConcurrent)
+		s.mu.Unlock()
+		return nil, "", fmt.Errorf("archetype %q is at capacity (%d/%d running)", role, active, arch.MaxConcurrent)
 	}
-	id := s.nextArchetypeID(role)
-	spec := s.specFromArchetype(*arch, id)
-	return &spec, true, nil
+	s.mu.Unlock()
+	if _, err := s.roster.ReserveNamed(name, role); err != nil {
+		return nil, "", err
+	}
+	out := s.specFromArchetype(*arch, name)
+	return &out, "", nil
 }
 
-// countActiveByRole walks current workers and counts those whose role
-// matches. Used to enforce archetype MaxConcurrent.
-func (s *Spawner) countActiveByRole(role string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// countActiveByRoleLocked walks current workers and counts those
+// whose role matches. Must be called with s.mu held.
+func (s *Spawner) countActiveByRoleLocked(role string) int {
 	n := 0
 	for _, pa := range s.provisioned {
 		if pa.agent != nil && pa.agent.Role == role {
@@ -458,29 +387,6 @@ func (s *Spawner) countActiveByRole(role string) int {
 		}
 	}
 	return n
-}
-
-// nextArchetypeID returns the next monotonic id for an archetype role.
-// Counter never decrements: even after a stopped worker frees a slot,
-// the next spawn gets a fresh number so audit history isn't ambiguous.
-// Persists the bumped counter so daemon restart doesn't reuse ids.
-func (s *Spawner) nextArchetypeID(role string) string {
-	s.mu.Lock()
-	s.archetypeSeq[role]++
-	id := fmt.Sprintf("%s-%d", role, s.archetypeSeq[role])
-	// Snapshot the map under the lock; persist outside the critical
-	// section so disk latency doesn't pile up on the spawn path.
-	snap := make(map[string]int, len(s.archetypeSeq))
-	for k, v := range s.archetypeSeq {
-		snap[k] = v
-	}
-	s.mu.Unlock()
-	if err := writeArchetypeSeq(s.cfg.ArchetypeSeqPath, snap); err != nil {
-		// Disk failure isn't fatal — next start will pick up the
-		// audit fallback. Surface to stderr so the operator notices.
-		fmt.Fprintf(os.Stderr, "[spawner] persist archetype-seq: %v\n", err)
-	}
-	return id
 }
 
 // specFromArchetype materialises a concrete team.AgentSpec from an
@@ -519,21 +425,30 @@ func (noopTeardownProvisioner) Provision(context.Context, provisioner.AgentSpec)
 }
 func (noopTeardownProvisioner) Teardown(context.Context, *provisioner.Agent) error { return nil }
 
-// SpawnByRole provisions a worker for the role and starts its loop.
+// Spawn provisions a worker of the given role and starts its loop.
 //
-// Lookup precedence:
-//  1. team.Agents with this role and not currently running (specific
-//     IDs declared by the operator, typically persistent or otherwise
-//     identity-bound).
-//  2. team.Archetypes with this role: if the current count of running
-//     instances < MaxConcurrent, generate the next sequential id
-//     (<role>-<N>) and provision from the archetype template.
+// When name == "" the allocator picks a fresh wordlist entry (or
+// reincarnates an LRU retired one for the role). When name is set
+// the operator is explicitly choosing identity:
 //
-// Returns an error if neither matches or the archetype is at its cap.
-func (s *Spawner) SpawnByRole(ctx context.Context, role string) (string, error) {
-	spec, fromArchetype, err := s.specForRole(role)
+//   - If a worker with that name is currently live in this team:
+//     idempotent — return the existing agent_id without re-spawning.
+//   - If the name is in the roster under a *different* role: reject.
+//   - If the name is in the roster under the same role but retired:
+//     reincarnate — same id, same worktree branch (`teem/<name>`)
+//     reused so the worker comes back with prior commits intact.
+//   - If the name isn't on the roster yet: validate shape +
+//     reserved-name list, then register and spawn fresh.
+//
+// Returns an error if no archetype matches the role or the archetype
+// is at its concurrency cap.
+func (s *Spawner) Spawn(ctx context.Context, role, name string) (string, error) {
+	spec, aliveID, err := s.resolveSpec(role, name)
 	if err != nil {
 		return "", err
+	}
+	if aliveID != "" {
+		return aliveID, nil
 	}
 	if err := EnsureDir(spec.WorkingDir); err != nil {
 		return "", err
@@ -543,7 +458,6 @@ func (s *Spawner) SpawnByRole(ctx context.Context, role string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	_ = fromArchetype // currently no per-source behavior; kept for future logging
 
 	// For cloud backends, register the agent immediately with state
 	// "provisioning" and finish provisioning + worker startup in the
@@ -592,7 +506,7 @@ func (s *Spawner) provisionAndStart(p provisioner.Provisioner, spec provisioner.
 	s.publishLog(a.ID, "agent ready")
 }
 
-// startWorker is the shared half of SpawnByRole and provisionAndStart: it
+// startWorker is the shared half of Spawn and provisionAndStart: it
 // builds the executor, kicks off the worker loop, subscribes results, and
 // updates the registry entry.
 //
@@ -618,6 +532,17 @@ func (s *Spawner) startWorker(p provisioner.Provisioner, a *provisioner.Agent) e
 		w.HeartbeatInterval = s.heartbeatInterval()
 		w.BodyCap = s.cfg.JobBodyCap
 		w.InFlight = s.cfg.InFlight
+	}
+	// Archetype memory snapshot: bake the role's long-term context
+	// into the Worker at construction so it rides along with every
+	// job the leader assigns. Best-effort — a load failure leaves
+	// BaselineContext empty.
+	if s.cfg.LoadArchetypeMemory != nil && a.Role != "" {
+		if body, err := s.cfg.LoadArchetypeMemory(a.Role); err == nil {
+			w.BaselineContext = body
+		} else {
+			fmt.Fprintf(os.Stderr, "[spawner] load archmem for %q: %v\n", a.Role, err)
+		}
 	}
 	if err := w.Start(s.baseCtx); err != nil {
 		return err
@@ -695,10 +620,16 @@ func (s *Spawner) startLivenessWatch(w provisioner.Watcher, a *provisioner.Agent
 				s.publishLog(a.ID, fmt.Sprintf("liveness check error: %v", err))
 				continue
 			}
-			// Agent has stopped on the backend.
-			_ = s.registry.SetState(a.ID, mcpsrv.StateStopped)
+			// Agent has stopped on the backend. Fail outstanding jobs
+			// first (HandleWorkerStopped tears down subs and the
+			// provisioner but doesn't surface pending-job failures),
+			// then fully reconcile via the same idempotent helper
+			// used by the worker_stopped audit path — otherwise
+			// s.workers/s.provisioned leak and MaxConcurrent keeps
+			// counting the dead agent.
 			s.failOutstandingJobs(subCtx, a.ID, "agent stopped")
-			s.publishLog(a.ID, "agent stopped on backend; jobs failed")
+			s.publishLog(a.ID, "agent stopped on backend; reconciling")
+			s.HandleWorkerStopped(subCtx, a.ID)
 			return
 		}
 	}()
@@ -919,6 +850,11 @@ func (s *Spawner) StopAgent(ctx context.Context, agentID string) error {
 	}
 
 	_ = s.registry.SetState(agentID, mcpsrv.StateStopped)
+	// Return the name to the pool so it can be reincarnated. Skip
+	// for persistent agents — their slot is operator-managed.
+	if !hasProv || !pa.agent.IsPersistent() {
+		s.roster.Release(agentID)
+	}
 
 	if !hasWorker && !hasProv {
 		return nil // agent wasn't running
@@ -931,6 +867,74 @@ func (s *Spawner) StopAgent(ctx context.Context, agentID string) error {
 		}
 	}
 	return nil
+}
+
+// HandleWorkerStopped reconciles leader state with a worker that
+// terminated under its own steam. Mirrors StopAgent's bookkeeping
+// (cancel subscriptions, flip registry to Stopped, drop from internal
+// maps), then calls provisioner.Teardown with Agent.Stopped=true so
+// the provisioner skips the /shutdown POST / SIGTERM path that would
+// otherwise hang waiting for an already-dead process.
+//
+// No-op when the agent is unknown — duplicate worker_stopped events
+// can arrive (audit posts are at-least-once) and the second one
+// finds nothing to clean up.
+func (s *Spawner) HandleWorkerStopped(ctx context.Context, agentID string) {
+	s.mu.Lock()
+	_, hasWorker := s.workers[agentID]
+	pa, hasProv := s.provisioned[agentID]
+	cancelLiveness := s.subs["liveness:"+agentID]
+	cancelResults := s.subs[agentID]
+	delete(s.workers, agentID)
+	delete(s.provisioned, agentID)
+	delete(s.subs, "liveness:"+agentID)
+	delete(s.subs, agentID)
+	s.mu.Unlock()
+
+	if !hasWorker && !hasProv {
+		return
+	}
+	if cancelLiveness != nil {
+		cancelLiveness()
+	}
+	if cancelResults != nil {
+		cancelResults()
+	}
+	_ = s.registry.SetState(agentID, mcpsrv.StateStopped)
+	// Return the name to the pool for reincarnation; persistent
+	// agents keep theirs (the slot identity is operator-managed).
+	if !hasProv || !pa.agent.IsPersistent() {
+		s.roster.Release(agentID)
+	}
+
+	if !hasProv {
+		return
+	}
+	pa.agent.Stopped = true
+	tdCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := pa.provisioner.Teardown(tdCtx, pa.agent); err != nil {
+		s.publishLog(agentID, fmt.Sprintf("post-stop teardown: %v", err))
+	}
+}
+
+// RosterSnapshot returns the team's roster entries, optionally
+// filtered to a single role. `InUse` reflects the roster's view of
+// liveness, which the spawner keeps in sync via Allocate /
+// ReserveNamed / Release / MarkInUse. Used by the list_roster MCP
+// tool.
+func (s *Spawner) RosterSnapshot(role string) []roster.Entry {
+	all := s.roster.Snapshot()
+	if role == "" {
+		return all
+	}
+	out := all[:0]
+	for _, e := range all {
+		if e.Role == role {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // IsRunning reports whether the spawner currently owns a worker for

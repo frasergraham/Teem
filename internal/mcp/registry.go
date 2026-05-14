@@ -101,3 +101,32 @@ func (r *Registry) List() []AgentEntry {
 	}
 	return out
 }
+
+// GCStopped removes registry entries that have been in StateStopped
+// for longer than ttl. Returns the number of entries removed.
+// ttl <= 0 is a no-op — retention is opt-in and the registry preserves
+// stopped agents forever by default so audit history stays joinable.
+// Callers should poll this on a timer when configured.
+func (r *Registry) GCStopped(now time.Time, ttl time.Duration) int {
+	if ttl <= 0 {
+		return 0
+	}
+	cutoff := now.Add(-ttl)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	removed := 0
+	for id, e := range r.agents {
+		if e.State != StateStopped {
+			continue
+		}
+		ref := e.LastSeen
+		if ref.IsZero() {
+			ref = e.StartedAt
+		}
+		if ref.IsZero() || ref.Before(cutoff) {
+			delete(r.agents, id)
+			removed++
+		}
+	}
+	return removed
+}

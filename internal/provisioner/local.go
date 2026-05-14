@@ -61,6 +61,12 @@ type LocalProvisioner struct {
 	// resolving via PATH at spawn time.
 	WorkerBinary string
 
+	// ExitAfterIdle is the value passed to teem-worker as the
+	// TEEM_EXIT_AFTER_IDLE env var. Ephemeral local workers self-
+	// terminate after this idle window once they've handled at least
+	// one job. Empty means "2s default"; "0" or "off" disables.
+	ExitAfterIdle string
+
 	// mu serializes git worktree mutations. Concurrent SpawnByRole calls
 	// must not race the git index.
 	mu sync.Mutex
@@ -182,6 +188,15 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 	if p.LeaderURL != "" {
 		env = append(env, "TEEM_LEADER_URL="+p.LeaderURL)
 	}
+	// Ephemeral local workers self-exit after the configured idle
+	// window once they've finished at least one job. Persistent
+	// workers returned early above; everything reaching this point is
+	// ephemeral.
+	exit := p.ExitAfterIdle
+	if exit == "" {
+		exit = "2s"
+	}
+	env = append(env, "TEEM_EXIT_AFTER_IDLE="+exit)
 
 	cmd := exec.Command(binary, "--unix-socket", socketPath)
 	cmd.Env = env
@@ -235,10 +250,16 @@ func (p *LocalProvisioner) Teardown(ctx context.Context, a *Agent) error {
 	}
 
 	// Tell the worker to shut down via its socket. Falls back to
-	// SIGTERM-by-pid if the HTTP shutdown doesn't take effect.
+	// SIGTERM-by-pid if the HTTP shutdown doesn't take effect. When
+	// the worker has already self-terminated (Stopped=true), skip
+	// the live signals and only mop up on-disk artefacts.
 	if a.SocketPath != "" {
-		_ = shutdownWorker(ctx, a.SocketPath, p.WorkerToken)
-		_ = killByPidFile(strings.TrimSuffix(a.SocketPath, ".sock") + ".pid")
+		if !a.Stopped {
+			_ = shutdownWorker(ctx, a.SocketPath, p.WorkerToken)
+			_ = killByPidFile(strings.TrimSuffix(a.SocketPath, ".sock") + ".pid")
+		} else {
+			_ = os.Remove(strings.TrimSuffix(a.SocketPath, ".sock") + ".pid")
+		}
 		_ = os.Remove(a.SocketPath)
 	}
 
@@ -249,6 +270,33 @@ func (p *LocalProvisioner) Teardown(ctx context.Context, a *Agent) error {
 		return RemoveWorktree(ctx, p.RepoRoot, a.Cloud.TaskARN)
 	}
 	return nil
+}
+
+// CheckLiveness dials the worker's unix socket. A successful dial
+// means the worker is still bound; ECONNREFUSED or "socket missing"
+// means it has terminated. Other dial errors are reported as
+// transient (the spawner keeps polling).
+func (p *LocalProvisioner) CheckLiveness(ctx context.Context, a *Agent) error {
+	if a == nil || a.SocketPath == "" {
+		return nil
+	}
+	d := &net.Dialer{Timeout: 2 * time.Second}
+	conn, err := d.DialContext(ctx, "unix", a.SocketPath)
+	if err == nil {
+		_ = conn.Close()
+		return nil
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
+		return ErrAgentStopped
+	}
+	// Unwrap PathError / OpError for ENOENT — Go wraps the syscall
+	// error inside net.OpError, which errors.Is sometimes misses.
+	if oe, ok := err.(*net.OpError); ok && oe.Err != nil {
+		if errors.Is(oe.Err, syscall.ECONNREFUSED) || errors.Is(oe.Err, syscall.ENOENT) {
+			return ErrAgentStopped
+		}
+	}
+	return err
 }
 
 // waitForSocket polls for socketPath to exist and become connectable
