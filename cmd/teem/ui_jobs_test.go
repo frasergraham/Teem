@@ -202,7 +202,9 @@ func TestDashboardLinksToJobsPages(t *testing.T) {
 	})
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	// Per-agent jobs URL and per-job detail URL only render in the
+	// per-team detail page; the summary index is counters-only.
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

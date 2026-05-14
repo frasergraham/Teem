@@ -1286,7 +1286,16 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/teams/")
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
-		http.NotFound(w, r)
+		// Bare /teams/<slug> — render the per-team detail SSR page.
+		// Slug lookup is intentional: keeps URLs canonical even when
+		// the team name contains spaces / capitals. Subresources
+		// (/mcp, /audit, …) below still match the team's exact name
+		// as registered.
+		if rest == "" {
+			http.NotFound(w, r)
+			return
+		}
+		d.renderTeamPage(w, r, rest)
 		return
 	}
 	name, suffix := rest[:slash], rest[slash:]

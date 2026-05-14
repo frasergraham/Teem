@@ -47,6 +47,10 @@ func newUITemplates() *template.Template {
 		"durShort":    durShort,
 		"bytesShort":  bytesShort,
 	}
+	// dashboardHTML contains two named defines ("summary" and
+	// "team_detail") plus a shared "ui_styles" sub-template. The
+	// outer template name doesn't matter because we always render
+	// via ExecuteTemplate by define name.
 	t := template.Must(template.New("dashboard").Funcs(funcs).Parse(dashboardHTML))
 	template.Must(t.New("agent_jobs").Parse(agentJobsHTML))
 	template.Must(t.New("job_detail").Parse(jobDetailHTML))
@@ -85,14 +89,45 @@ func expandable(s string) template.HTML {
 	)
 }
 
-// dashboardSnapshot is the data the template renders. Computed fresh
-// on every GET so the page doesn't have to lie about state.
+// dashboardSnapshot is the data the summary index template renders.
+// Computed fresh on every GET so the page doesn't have to lie about
+// state. Tiles is the per-team rollup; the per-team detail page uses
+// teamPageSnapshot instead.
 type dashboardSnapshot struct {
 	Endpoint     string
 	StartedAt    time.Time
 	UptimeAgo    string
-	Teams        []dashboardTeam
+	Tiles        []summaryTile
 	NowFormatted string
+}
+
+// summaryTile is the per-team rollup rendered on the index page. The
+// counters are intentionally precomputed so the template stays free of
+// arithmetic. URL is the deep link to the per-team detail page.
+type summaryTile struct {
+	Name             string
+	Slug             string
+	URL              string
+	RegisteredAgo    string
+	OpenTaskCount    int
+	ActiveAgentCount int
+	InFlight         int64
+	CompletedToday   int
+	LeaderStatusText string // truncated to ~140 chars; empty when never set
+	LeaderStatusAgo  string
+	PulseRunning     bool
+	PulsePaused      bool
+	UnreadNotes      int
+}
+
+// teamPageSnapshot wraps a single dashboardTeam for the detail page,
+// reusing the existing per-team rendering. Carrying Endpoint/UptimeAgo
+// keeps the header consistent with the summary index.
+type teamPageSnapshot struct {
+	Endpoint     string
+	UptimeAgo    string
+	NowFormatted string
+	Team         dashboardTeam
 }
 
 type dashboardTeam struct {
@@ -166,8 +201,9 @@ type dashboardEvent struct {
 	JobURL  string
 }
 
-// renderDashboard composes the snapshot for the daemon's current state
-// and writes the rendered HTML.
+// renderDashboard composes the summary index — a tile per registered
+// team, each linking to /teams/<slug> for the deep view. Designed to
+// read at-a-glance across the room: counters in big bold numerals.
 func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 	d.mu.Lock()
 	teams := make([]*registeredTeam, 0, len(d.teams))
@@ -183,20 +219,122 @@ func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 		Endpoint:     d.endpoint,
 		StartedAt:    state.StartedAt,
 		UptimeAgo:    agoShort(state.StartedAt),
-		Teams:        make([]dashboardTeam, 0, len(teams)),
+		Tiles:        make([]summaryTile, 0, len(teams)),
 		NowFormatted: time.Now().Local().Format("Mon Jan 2 15:04:05"),
 	}
 	for _, rt := range teams {
-		snap.Teams = append(snap.Teams, teamSnapshot(rt))
+		snap.Tiles = append(snap.Tiles, teamTileSnapshot(rt))
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if err := uiTemplates.ExecuteTemplate(w, "dashboard", snap); err != nil {
+	if err := uiTemplates.ExecuteTemplate(w, "summary", snap); err != nil {
 		// Template errors land here once everything else has already
 		// been written; surface to stderr but don't try to recover.
 		fmt.Printf("[teemd] dashboard render: %v\n", err)
 	}
+}
+
+// renderTeamPage serves the deep view for a single team at
+// /teams/<slug>. teamSlug is matched against slug(t.Name) so the URL
+// is stable across casing / spacing variations of the team name.
+// Returns 404 when no team matches.
+func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamSlug string) {
+	d.mu.Lock()
+	var found *registeredTeam
+	for _, rt := range d.teams {
+		if slug(rt.team.Name) == teamSlug {
+			found = rt
+			break
+		}
+	}
+	d.mu.Unlock()
+	if found == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	state := readDaemonStateFileSafe()
+	snap := teamPageSnapshot{
+		Endpoint:     d.endpoint,
+		UptimeAgo:    agoShort(state.StartedAt),
+		NowFormatted: time.Now().Local().Format("Mon Jan 2 15:04:05"),
+		Team:         teamSnapshot(found),
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if err := uiTemplates.ExecuteTemplate(w, "team_detail", snap); err != nil {
+		fmt.Printf("[teemd] team page render: %v\n", err)
+	}
+}
+
+// teamTileSnapshot rolls a registered team up into its summary index
+// tile. Reuses teamSnapshot for the counters that are already cheap to
+// compute and layers on completed-today (which the deep view doesn't
+// surface separately) and the leader-status one-liner.
+func teamTileSnapshot(rt *registeredTeam) summaryTile {
+	ts := teamSnapshot(rt)
+	tile := summaryTile{
+		Name:             rt.team.Name,
+		Slug:             slug(rt.team.Name),
+		RegisteredAgo:    ts.RegisteredAgo,
+		OpenTaskCount:    ts.OpenTaskCount,
+		ActiveAgentCount: len(ts.Agents),
+		InFlight:         ts.InFlight,
+		PulseRunning:     ts.PulseRunning,
+		PulsePaused:      ts.PulsePaused,
+		UnreadNotes:      ts.UnreadNotes,
+	}
+	tile.URL = "/teams/" + tile.Slug
+
+	// Completed today: tasks whose Status is terminal (done or
+	// abandoned) and whose UpdatedAt is at-or-after local midnight.
+	// We re-scan the plan because teamSnapshot caps RecentDone at 5
+	// — for the counter we want the full count.
+	if rt.plan != nil {
+		midnight := startOfLocalDay(time.Now())
+		for _, t := range rt.plan.List(plan.Filter{}) {
+			if t.Status != plan.StatusDone && t.Status != plan.StatusAbandoned {
+				continue
+			}
+			if !t.UpdatedAt.Before(midnight) {
+				tile.CompletedToday++
+			}
+		}
+	}
+
+	// Leader status one-liner: most recent entry where AgentID is
+	// "leader". teamSnapshot has already pulled the pinned LeaderStatus
+	// row out for us; if missing, look for any leader-keyed entry
+	// directly (defensive — should be equivalent).
+	if ts.LeaderStatus != nil {
+		tile.LeaderStatusText = truncateForTile(ts.LeaderStatus.Text, 140)
+		tile.LeaderStatusAgo = ts.LeaderStatus.UpdatedAgo
+	}
+	return tile
+}
+
+// startOfLocalDay returns the most recent midnight in the local zone.
+// Used for the "completed today" counter so a task finished at 23:59
+// drops out at midnight.
+func startOfLocalDay(now time.Time) time.Time {
+	loc := now.Location()
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+}
+
+// truncateForTile clamps a leader status blurb to a single-line preview
+// suitable for a tile footer. UTF-8 safe: we back up to a valid rune
+// boundary so we never split a multi-byte rune.
+func truncateForTile(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	end := max
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "…"
 }
 
 // readDaemonStateFileSafe wraps readDaemonStateFile to swallow errors

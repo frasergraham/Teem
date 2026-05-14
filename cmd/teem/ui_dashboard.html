@@ -1,3 +1,320 @@
+{{/*
+  This file defines two SSR pages for the dashboard:
+
+    - "summary"     — GET /, the per-team tile index (entry point).
+    - "team_detail" — GET /teams/<slug>, the deep view for one team.
+
+  Both share the CSS block below via the "ui_styles" sub-template so
+  edits to colour tokens / mobile breakpoints stay in one place.
+*/}}
+
+{{ define "ui_styles" }}
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f5f4;
+    --fg: #1c1917;
+    --muted: #78716c;
+    --card: #ffffff;
+    --border: #e7e5e4;
+    --accent: #15803d;
+    --warn: #b45309;
+    --error: #b91c1c;
+    --pill-bg: #f5f5f4;
+    --code-bg: #fafaf9;
+    --info: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c0a09;
+      --fg: #fafaf9;
+      --muted: #a8a29e;
+      --card: #1c1917;
+      --border: #292524;
+      --accent: #22c55e;
+      --warn: #f59e0b;
+      --error: #ef4444;
+      --pill-bg: #292524;
+      --code-bg: #1c1917;
+      --info: #60a5fa;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    padding: 16px 16px 64px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.4;
+    max-width: 960px;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 16px;
+  }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  header h1 a { color: inherit; text-decoration: none; }
+  header .endpoint { color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+  header .clock { margin-left: auto; color: var(--muted); font-size: 12px; }
+  header .crumbs { color: var(--muted); font-size: 13px; }
+  header .crumbs a { color: var(--muted); text-decoration: none; }
+  header .crumbs a:hover { color: var(--fg); text-decoration: underline; }
+
+  .team {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+  }
+  .team h2 {
+    margin: 0 0 4px 0;
+    font-size: 17px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .team .meta { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    background: var(--pill-bg); color: var(--muted);
+    font-size: 11px; font-weight: 500; letter-spacing: 0.02em; text-transform: uppercase;
+  }
+  .pill.running { background: var(--accent); color: white; }
+  .pill.paused  { background: var(--warn); color: white; }
+  .pill.error   { background: var(--error); color: white; }
+  .pill.notes   { background: var(--info); color: white; }
+
+  /* Stage pills — colour-coded by lifecycle. */
+  .stage { display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:500; text-transform: uppercase; letter-spacing: 0.03em; }
+  .stage.proposed  { background: var(--pill-bg); color: var(--muted); }
+  .stage.specced   { background: var(--pill-bg); color: var(--info); }
+  .stage.building  { background: var(--warn); color: #fff; }
+  .stage.in_review { background: var(--info); color: #fff; }
+  .stage.merging   { background: #7c3aed; color: #fff; }
+  .stage.verified  { background: var(--accent); color: #fff; }
+  .stage.blocked   { background: var(--error); color: #fff; }
+  .stage.shelved   { background: var(--pill-bg); color: var(--muted); border: 1px dashed var(--muted); padding: 0 6px; }
+  .stage.abandoned { background: var(--pill-bg); color: var(--muted); text-decoration: line-through; }
+
+  /* Shelved section: muted to signal "intentionally paused, not in flight." */
+  .shelved-section h3 { color: var(--muted); }
+  .shelved-section .tasks tbody tr { opacity: 0.75; }
+
+  .leader-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+  }
+  .leader-card h3 { margin: 0 0 6px 0; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .leader-line { display:flex; gap:10px; align-items: baseline; padding: 2px 0; }
+  .leader-line .who { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); min-width: 80px; }
+  .leader-line .what { flex: 1; }
+  .leader-line .when { color: var(--muted); font-size: 12px; }
+  .leader-line .tasks { font-size: 12px; color: var(--muted); }
+  .leader-line .tasks a { color: var(--info); text-decoration: none; margin-left: 6px; }
+  .empty-leader { color: var(--muted); font-style: italic; font-size: 13px; }
+
+  .section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .section h3 { margin: 0 0 8px 0; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+
+  table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.tasks th, table.tasks td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.tasks th { color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
+  table.tasks tr:hover td { background: var(--pill-bg); }
+  table.tasks td.id { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); }
+  table.tasks td a { color: inherit; text-decoration: none; }
+  table.tasks td a:hover { color: var(--fg); text-decoration: underline; }
+  table.tasks .assignee { color: var(--muted); font-size: 12px; }
+  /* Assignee whose worker is no longer active: muted + suffixed. */
+  table.tasks .assignee.gone { opacity: 0.55; text-decoration: line-through; }
+  table.tasks .assignee.gone::after { content: " (gone)"; text-decoration: none; font-style: italic; }
+  /* STALE pill: an active-pipeline task whose worker has vanished. */
+  .stale-pill {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border: 1px dashed var(--accent);
+    border-radius: 999px;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    vertical-align: middle;
+  }
+  table.tasks .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+  .agents-mini { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+  .agents-mini .agent {
+    background: var(--pill-bg); border-radius: 6px; padding: 4px 8px;
+    display: flex; gap: 8px; align-items: baseline;
+  }
+  .agents-mini .agent .id { font-family: ui-monospace, SFMono-Regular, monospace; }
+  .agents-mini .agent .state.busy { color: var(--accent); font-weight: 500; }
+  .agents-mini .agent .state.running { color: var(--accent); }
+  .agents-mini .agent .placement, .agents-mini .agent .seen { color: var(--muted); }
+
+  .events { display: flex; flex-direction: column; gap: 4px; }
+  .event { display:flex; gap:8px; align-items: baseline; font-size: 13px; padding: 4px 0; }
+  .event .time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 60px; }
+  .event .agent { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); min-width: 90px; }
+  .event .kind { color: var(--muted); font-size: 12px; min-width: 110px; }
+  .event .kind a { color: inherit; text-decoration: none; }
+  .event .kind a:hover { color: var(--fg); text-decoration: underline; }
+  .event .msg { color: var(--fg); font-size: 13px; flex: 1; overflow: hidden; white-space: normal; }
+
+  .empty { color: var(--muted); font-style: italic; font-size: 13px; }
+  .summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+  .summary .stat { display: flex; gap: 4px; align-items: baseline; }
+  .summary .stat .n { font-weight: 600; }
+  .summary .stat .lbl { color: var(--muted); }
+
+  /* --- Tile grid (summary index page) -----------------------------
+     Tiles are full-bleed links so the entire card is tappable. Big
+     bold numerals dominate so the dashboard reads at a glance from
+     across the room. */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  a.tile {
+    display: block;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    color: inherit;
+    text-decoration: none;
+  }
+  a.tile:hover { border-color: var(--muted); }
+  .tile h2 {
+    margin: 0 0 4px 0;
+    font-size: 18px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .tile .meta {
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+  .tile .counters {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px 16px;
+    margin-bottom: 12px;
+  }
+  .tile .counter { display: flex; flex-direction: column; }
+  .tile .counter .n {
+    font-size: 32px; font-weight: 700; letter-spacing: -0.02em; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .tile .counter .lbl {
+    color: var(--muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 4px;
+  }
+  .tile .leader-blurb {
+    border-top: 1px solid var(--border);
+    padding-top: 10px;
+    color: var(--fg);
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  .tile .leader-blurb .when { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .tile .leader-blurb.empty { color: var(--muted); font-style: italic; }
+
+  details.expandable { display: inline; }
+  details.expandable > summary { cursor: pointer; list-style: none; display: inline; color: inherit; }
+  details.expandable > summary::-webkit-details-marker { display: none; }
+  details.expandable[open] > summary { color: var(--muted); }
+  details.expandable .expanded { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+
+  footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; text-align: center; }
+
+  /* --- Mobile (≤ 720px) ----------------------------------------
+     Strategy: tables and event rows turn into stacked cards. Long
+     lines wrap. Tap targets get bigger. Side-by-side header bits
+     wrap onto multiple lines. */
+  @media (max-width: 720px) {
+    body { padding: 12px 12px 64px; font-size: 16px; }
+    header { flex-wrap: wrap; gap: 6px 12px; }
+    header h1 { font-size: 22px; }
+    header .endpoint { font-size: 11px; word-break: break-all; }
+    header .clock { margin-left: 0; width: 100%; order: 99; }
+    .team { padding: 12px; }
+    .team h2 { font-size: 18px; }
+    .summary { gap: 8px 14px; }
+
+    /* Tiles: single column, taller numerals (still readable). */
+    .tiles { grid-template-columns: 1fr; gap: 10px; }
+    a.tile { padding: 14px 16px; }
+    .tile .counter .n { font-size: 28px; }
+
+    /* Tables → vertical cards. Each row stacks its cells; the header
+       row hides (the cell labels are baked into ::before pseudos). */
+    table.tasks thead { display: none; }
+    table.tasks, table.tasks tbody, table.tasks tr, table.tasks td { display: block; width: 100%; }
+    table.tasks tr {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      background: var(--card);
+    }
+    table.tasks tr:hover td { background: transparent; }
+    table.tasks td { border-bottom: none; padding: 2px 0; }
+    /* Title row is the headline; bump it up. */
+    table.tasks td:nth-child(2) { font-size: 16px; line-height: 1.3; margin-bottom: 4px; }
+    table.tasks td:nth-child(2) a { color: var(--fg); }
+    /* Id, stage, assignee, in-stage line up as a metadata strip. */
+    table.tasks td.id,
+    table.tasks td.assignee,
+    table.tasks td.when,
+    table.tasks td:nth-child(3) {
+      display: inline-block;
+      width: auto;
+      margin-right: 10px;
+      font-size: 12px;
+    }
+    table.tasks td.assignee::before { content: "by "; color: var(--muted); }
+    table.tasks td.when::before     { content: "in stage "; color: var(--muted); }
+
+    /* Recent activity stream: stacked rows, full-width msg. */
+    .event { flex-wrap: wrap; row-gap: 2px; }
+    .event .time, .event .agent, .event .kind { min-width: 0; }
+    .event .kind { margin-right: auto; }
+    .event .msg { flex-basis: 100%; }
+
+    /* Leader card lines also wrap. */
+    .leader-line { flex-wrap: wrap; row-gap: 2px; }
+    .leader-line .who { min-width: 0; }
+    .leader-line .what { flex-basis: 100%; }
+
+    /* Agent chips already wrap, but bump font for legibility. */
+    .agents-mini { font-size: 13px; }
+    .agents-mini .agent { padding: 6px 10px; }
+  }
+
+  /* Touch-pointer affordance: bigger tap targets even at desktop sizes. */
+  @media (hover: none) {
+    table.tasks td a { padding: 6px 0; display: inline-block; }
+    .event .kind a { padding: 4px 0; display: inline-block; }
+  }
+</style>
+{{ end }}
+
+
+{{/* ================= SUMMARY INDEX (/, /ui) ================= */}}
+{{ define "summary" }}
 <!doctype html>
 <html lang="en">
 <head>
@@ -5,256 +322,90 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta http-equiv="refresh" content="10">
   <title>teem</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --bg: #f5f5f4;
-      --fg: #1c1917;
-      --muted: #78716c;
-      --card: #ffffff;
-      --border: #e7e5e4;
-      --accent: #15803d;
-      --warn: #b45309;
-      --error: #b91c1c;
-      --pill-bg: #f5f5f4;
-      --code-bg: #fafaf9;
-      --info: #2563eb;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #0c0a09;
-        --fg: #fafaf9;
-        --muted: #a8a29e;
-        --card: #1c1917;
-        --border: #292524;
-        --accent: #22c55e;
-        --warn: #f59e0b;
-        --error: #ef4444;
-        --pill-bg: #292524;
-        --code-bg: #1c1917;
-        --info: #60a5fa;
-      }
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0 auto;
-      padding: 16px 16px 64px;
-      background: var(--bg);
-      color: var(--fg);
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-      font-size: 15px;
-      line-height: 1.4;
-      max-width: 960px;
-    }
-    header {
-      display: flex;
-      align-items: baseline;
-      gap: 12px;
-      padding-bottom: 16px;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 16px;
-    }
-    header h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
-    header .endpoint { color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
-    header .clock { margin-left: auto; color: var(--muted); font-size: 12px; }
-
-    .team {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 14px 16px;
-      margin-bottom: 14px;
-    }
-    .team h2 {
-      margin: 0 0 4px 0;
-      font-size: 17px; font-weight: 600;
-      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    }
-    .team .meta { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
-
-    .pill {
-      display: inline-block; padding: 2px 8px; border-radius: 999px;
-      background: var(--pill-bg); color: var(--muted);
-      font-size: 11px; font-weight: 500; letter-spacing: 0.02em; text-transform: uppercase;
-    }
-    .pill.running { background: var(--accent); color: white; }
-    .pill.paused  { background: var(--warn); color: white; }
-    .pill.error   { background: var(--error); color: white; }
-    .pill.notes   { background: var(--info); color: white; }
-
-    /* Stage pills — colour-coded by lifecycle. */
-    .stage { display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:500; text-transform: uppercase; letter-spacing: 0.03em; }
-    .stage.proposed  { background: var(--pill-bg); color: var(--muted); }
-    .stage.specced   { background: var(--pill-bg); color: var(--info); }
-    .stage.building  { background: var(--warn); color: #fff; }
-    .stage.in_review { background: var(--info); color: #fff; }
-    .stage.merging   { background: #7c3aed; color: #fff; }
-    .stage.verified  { background: var(--accent); color: #fff; }
-    .stage.blocked   { background: var(--error); color: #fff; }
-    .stage.shelved   { background: var(--pill-bg); color: var(--muted); border: 1px dashed var(--muted); padding: 0 6px; }
-    .stage.abandoned { background: var(--pill-bg); color: var(--muted); text-decoration: line-through; }
-
-    /* Shelved section: muted to signal "intentionally paused, not in flight." */
-    .shelved-section h3 { color: var(--muted); }
-    .shelved-section .tasks tbody tr { opacity: 0.75; }
-
-    .leader-card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px 14px;
-      margin-bottom: 12px;
-    }
-    .leader-card h3 { margin: 0 0 6px 0; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
-    .leader-line { display:flex; gap:10px; align-items: baseline; padding: 2px 0; }
-    .leader-line .who { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); min-width: 80px; }
-    .leader-line .what { flex: 1; }
-    .leader-line .when { color: var(--muted); font-size: 12px; }
-    .leader-line .tasks { font-size: 12px; color: var(--muted); }
-    .leader-line .tasks a { color: var(--info); text-decoration: none; margin-left: 6px; }
-    .empty-leader { color: var(--muted); font-style: italic; font-size: 13px; }
-
-    .section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
-    .section h3 { margin: 0 0 8px 0; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
-
-    table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
-    table.tasks th, table.tasks td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-    table.tasks th { color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
-    table.tasks tr:hover td { background: var(--pill-bg); }
-    table.tasks td.id { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); }
-    table.tasks td a { color: inherit; text-decoration: none; }
-    table.tasks td a:hover { color: var(--fg); text-decoration: underline; }
-    table.tasks .assignee { color: var(--muted); font-size: 12px; }
-    /* Assignee whose worker is no longer active: muted + suffixed. */
-    table.tasks .assignee.gone { opacity: 0.55; text-decoration: line-through; }
-    table.tasks .assignee.gone::after { content: " (gone)"; text-decoration: none; font-style: italic; }
-    /* STALE pill: an active-pipeline task whose worker has vanished. */
-    .stale-pill {
-      display: inline-block;
-      margin-left: 6px;
-      padding: 1px 6px;
-      border: 1px dashed var(--accent);
-      border-radius: 999px;
-      font-size: 10px;
-      letter-spacing: 0.06em;
-      color: var(--accent);
-      vertical-align: middle;
-    }
-    table.tasks .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
-
-    .agents-mini { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
-    .agents-mini .agent {
-      background: var(--pill-bg); border-radius: 6px; padding: 4px 8px;
-      display: flex; gap: 8px; align-items: baseline;
-    }
-    .agents-mini .agent .id { font-family: ui-monospace, SFMono-Regular, monospace; }
-    .agents-mini .agent .state.busy { color: var(--accent); font-weight: 500; }
-    .agents-mini .agent .state.running { color: var(--accent); }
-    .agents-mini .agent .placement, .agents-mini .agent .seen { color: var(--muted); }
-
-    .events { display: flex; flex-direction: column; gap: 4px; }
-    .event { display:flex; gap:8px; align-items: baseline; font-size: 13px; padding: 4px 0; }
-    .event .time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 60px; }
-    .event .agent { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); min-width: 90px; }
-    .event .kind { color: var(--muted); font-size: 12px; min-width: 110px; }
-    .event .kind a { color: inherit; text-decoration: none; }
-    .event .kind a:hover { color: var(--fg); text-decoration: underline; }
-    .event .msg { color: var(--fg); font-size: 13px; flex: 1; overflow: hidden; white-space: normal; }
-
-    .empty { color: var(--muted); font-style: italic; font-size: 13px; }
-    .summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
-    .summary .stat { display: flex; gap: 4px; align-items: baseline; }
-    .summary .stat .n { font-weight: 600; }
-    .summary .stat .lbl { color: var(--muted); }
-
-    details.expandable { display: inline; }
-    details.expandable > summary { cursor: pointer; list-style: none; display: inline; color: inherit; }
-    details.expandable > summary::-webkit-details-marker { display: none; }
-    details.expandable[open] > summary { color: var(--muted); }
-    details.expandable .expanded { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
-
-    footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; text-align: center; }
-
-    /* --- Mobile (≤ 720px) ----------------------------------------
-       Strategy: tables and event rows turn into stacked cards. Long
-       lines wrap. Tap targets get bigger. Side-by-side header bits
-       wrap onto multiple lines. */
-    @media (max-width: 720px) {
-      body { padding: 12px 12px 64px; font-size: 16px; }
-      header { flex-wrap: wrap; gap: 6px 12px; }
-      header h1 { font-size: 22px; }
-      header .endpoint { font-size: 11px; word-break: break-all; }
-      header .clock { margin-left: 0; width: 100%; order: 99; }
-      .team { padding: 12px; }
-      .team h2 { font-size: 18px; }
-      .summary { gap: 8px 14px; }
-
-      /* Tables → vertical cards. Each row stacks its cells; the header
-         row hides (the cell labels are baked into ::before pseudos). */
-      table.tasks thead { display: none; }
-      table.tasks, table.tasks tbody, table.tasks tr, table.tasks td { display: block; width: 100%; }
-      table.tasks tr {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 10px 12px;
-        margin-bottom: 8px;
-        background: var(--card);
-      }
-      table.tasks tr:hover td { background: transparent; }
-      table.tasks td { border-bottom: none; padding: 2px 0; }
-      /* Title row is the headline; bump it up. */
-      table.tasks td:nth-child(2) { font-size: 16px; line-height: 1.3; margin-bottom: 4px; }
-      table.tasks td:nth-child(2) a { color: var(--fg); }
-      /* Id, stage, assignee, in-stage line up as a metadata strip. */
-      table.tasks td.id,
-      table.tasks td.assignee,
-      table.tasks td.when,
-      table.tasks td:nth-child(3) {
-        display: inline-block;
-        width: auto;
-        margin-right: 10px;
-        font-size: 12px;
-      }
-      table.tasks td.assignee::before { content: "by "; color: var(--muted); }
-      table.tasks td.when::before     { content: "in stage "; color: var(--muted); }
-
-      /* Recent activity stream: stacked rows, full-width msg. */
-      .event { flex-wrap: wrap; row-gap: 2px; }
-      .event .time, .event .agent, .event .kind { min-width: 0; }
-      .event .kind { margin-right: auto; }
-      .event .msg { flex-basis: 100%; }
-
-      /* Leader card lines also wrap. */
-      .leader-line { flex-wrap: wrap; row-gap: 2px; }
-      .leader-line .who { min-width: 0; }
-      .leader-line .what { flex-basis: 100%; }
-
-      /* Agent chips already wrap, but bump font for legibility. */
-      .agents-mini { font-size: 13px; }
-      .agents-mini .agent { padding: 6px 10px; }
-    }
-
-    /* Touch-pointer affordance: bigger tap targets even at desktop sizes. */
-    @media (hover: none) {
-      table.tasks td a { padding: 6px 0; display: inline-block; }
-      .event .kind a { padding: 4px 0; display: inline-block; }
-    }
-  </style>
+  {{ template "ui_styles" . }}
 </head>
 <body>
   <header>
-    <h1>teem</h1>
+    <h1><a href="/">teem</a></h1>
     <span class="endpoint">{{ .Endpoint }}</span>
     <span class="clock">{{ .NowFormatted }}</span>
   </header>
 
-  {{ if not .Teams }}
+  {{ if not .Tiles }}
     <div class="team empty">
       No teams registered yet. Run <code>teem chat</code> in a project to register one.
     </div>
+  {{ else }}
+    <div class="tiles">
+      {{ range .Tiles }}
+        <a class="tile" href="{{ .URL }}">
+          <h2>
+            {{ .Name }}
+            {{ if .PulseRunning }}
+              {{ if .PulsePaused }}<span class="pill paused">pulse paused</span>
+              {{ else }}<span class="pill running">pulse running</span>{{ end }}
+            {{ else }}<span class="pill">pulse off</span>{{ end }}
+            {{ if gt .UnreadNotes 0 }}<span class="pill notes">{{ .UnreadNotes }} note{{ if gt .UnreadNotes 1 }}s{{ end }}</span>{{ end }}
+          </h2>
+          <div class="meta">registered {{ .RegisteredAgo }}</div>
+
+          <div class="counters">
+            <div class="counter">
+              <span class="n">{{ .OpenTaskCount }}</span>
+              <span class="lbl">Open task{{ if ne .OpenTaskCount 1 }}s{{ end }}</span>
+            </div>
+            <div class="counter">
+              <span class="n">{{ .ActiveAgentCount }}</span>
+              <span class="lbl">Active worker{{ if ne .ActiveAgentCount 1 }}s{{ end }}</span>
+            </div>
+            <div class="counter">
+              <span class="n">{{ .InFlight }}</span>
+              <span class="lbl">In flight</span>
+            </div>
+            <div class="counter">
+              <span class="n">{{ .CompletedToday }}</span>
+              <span class="lbl">Completed today</span>
+            </div>
+          </div>
+
+          {{ if .LeaderStatusText }}
+            <div class="leader-blurb">
+              {{ .LeaderStatusText }}<span class="when">{{ .LeaderStatusAgo }}</span>
+            </div>
+          {{ else }}
+            <div class="leader-blurb empty">leader hasn't posted a status yet</div>
+          {{ end }}
+        </a>
+      {{ end }}
+    </div>
   {{ end }}
 
-  {{ range .Teams }}
+  <footer>teem · refreshing every 10s · uptime {{ .UptimeAgo }}</footer>
+</body>
+</html>
+{{ end }}
+
+
+{{/* ============= PER-TEAM DETAIL (/teams/<slug>) ============= */}}
+{{ define "team_detail" }}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="refresh" content="10">
+  <title>teem · {{ .Team.Name }}</title>
+  {{ template "ui_styles" . }}
+</head>
+<body>
+  <header>
+    <h1><a href="/">teem</a></h1>
+    <span class="crumbs">/ {{ .Team.Name }}</span>
+    <span class="endpoint">{{ .Endpoint }}</span>
+    <span class="clock">{{ .NowFormatted }}</span>
+  </header>
+
+  {{ with .Team }}
     <section class="team">
       <h2>
         {{ .Name }}
@@ -406,3 +557,4 @@
   <footer>teem · refreshing every 10s · uptime {{ .UptimeAgo }}</footer>
 </body>
 </html>
+{{ end }}

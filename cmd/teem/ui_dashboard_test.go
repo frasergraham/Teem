@@ -61,7 +61,9 @@ func TestDashboard_FiltersStoppedWorkers(t *testing.T) {
 	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-3", Role: "worker", State: mcpsrv.StateStopped})
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	// Worker identity and placement only render on the per-team detail
+	// page; the summary index at "/" carries counters, not chip rows.
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -85,7 +87,7 @@ func TestDashboard_ShowsPlacement(t *testing.T) {
 	rt.registry.Add(mcpsrv.AgentEntry{ID: "reviewer-1", Role: "reviewer", State: mcpsrv.StateRunning})
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -110,7 +112,7 @@ func TestDashboard_ShowsLeaderStatusAndTasks(t *testing.T) {
 
 	_ = rt.leaderStatus.Set("leader", "Reviewing T1+T6 diff", []string{task.ID})
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -245,7 +247,9 @@ func TestDashboard_MarksOrphanedAssigneeStale(t *testing.T) {
 	taskC, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "pre-work"})
 	_, _ = rt.plan.UpdateTask(taskC.ID, plan.UpdateInput{AssignedTo: &vanished})
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	// Task-level styling lives on the per-team detail page; the summary
+	// index only carries counters and the leader status snippet.
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -317,5 +321,123 @@ func TestResolveTaskFlowRoute(t *testing.T) {
 		if got != tc.wantID || ok != tc.wantOK {
 			t.Errorf("%q: got (%q,%v), want (%q,%v)", tc.in, got, ok, tc.wantID, tc.wantOK)
 		}
+	}
+}
+
+// TestSummaryIndex_RendersTilePerTeam verifies the / route renders one
+// tile per registered team, with the four headline counters and a deep
+// link to the per-team detail page. The numbers are exercised end-to-end
+// so a regression in teamTileSnapshot is visible.
+func TestSummaryIndex_RendersTilePerTeam(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rtA := newFullTestTeam(t, "alpha")
+	rtA.registry.Add(mcpsrv.AgentEntry{ID: "worker-1", Role: "worker", State: mcpsrv.StateRunning})
+	rtA.registry.Add(mcpsrv.AgentEntry{ID: "worker-2", Role: "worker", State: mcpsrv.StateBusy})
+	// One open task and one completed-today task (UpdatedAt == now).
+	openT, _ := rtA.plan.AddTask(plan.NewTaskInput{Title: "Build something"})
+	_, _ = rtA.plan.UpdateTask(openT.ID, plan.UpdateInput{Stage: plan.StageBuilding})
+	doneT, _ := rtA.plan.AddTask(plan.NewTaskInput{Title: "Already shipped"})
+	_, _ = rtA.plan.UpdateTask(doneT.ID, plan.UpdateInput{Status: plan.StatusDone})
+	_ = rtA.leaderStatus.Set("leader", "Cutting the T20 release", nil)
+	d.teams["alpha"] = rtA
+
+	rtB := newFullTestTeam(t, "beta")
+	d.teams["beta"] = rtB
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// Each team has a tile that deep-links to /teams/<slug>.
+	for _, want := range []string{
+		`href="/teams/alpha"`,
+		`href="/teams/beta"`,
+		"alpha",
+		"beta",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in summary body", want)
+		}
+	}
+
+	// Headline labels are present (counters render even when zero).
+	for _, want := range []string{
+		"Open task",
+		"Active worker",
+		"In flight",
+		"Completed today",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing counter label %q in summary body", want)
+		}
+	}
+
+	// The leader-status one-liner shows up.
+	if !strings.Contains(body, "Cutting the T20 release") {
+		t.Errorf("missing leader status on tile: %s", body)
+	}
+
+	// The detail-page only sections are NOT inlined on the index.
+	if strings.Contains(body, "worker-1") || strings.Contains(body, "Status board") {
+		t.Errorf("detail-page content leaked into summary index: %s", body)
+	}
+}
+
+// TestTeamDetail_RendersSingleTeam verifies /teams/<slug> renders the
+// deep view for that team and the deep view alone. Slug resolution is
+// covered indirectly by using a team name with capitalisation that the
+// slug helper lowercases.
+func TestTeamDetail_RendersSingleTeam(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "Alpha Team")
+	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-1", Role: "worker", State: mcpsrv.StateBusy})
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Wire up the thing"})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageBuilding})
+	_ = rt.leaderStatus.Set("leader", "Looking at the diff", []string{task.ID})
+
+	// Second team must NOT bleed into the detail page.
+	rtOther := newFullTestTeam(t, "beta")
+	otherTask, _ := rtOther.plan.AddTask(plan.NewTaskInput{Title: "Other team's task"})
+	_ = otherTask
+	d.teams["Alpha Team"] = rt
+	d.teams["beta"] = rtOther
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha-team", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	for _, want := range []string{
+		"Alpha Team",
+		"Status board",
+		"Looking at the diff",
+		"Wire up the thing",
+		"worker-1",
+		"Open tasks",
+		"Active agents",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in team detail body", want)
+		}
+	}
+
+	// Other team's content must not leak in.
+	if strings.Contains(body, "Other team's task") {
+		t.Errorf("other team leaked into detail page: %s", body)
+	}
+
+	// Unknown slug → 404.
+	req2 := httptest.NewRequest(http.MethodGet, "/teams/nonesuch", nil)
+	w2 := httptest.NewRecorder()
+	d.handler().ServeHTTP(w2, req2)
+	if w2.Code != http.StatusNotFound {
+		t.Errorf("unknown slug should 404, got %d", w2.Code)
 	}
 }
