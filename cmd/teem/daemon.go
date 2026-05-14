@@ -31,6 +31,7 @@ import (
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
 	"github.com/frasergraham/teem/internal/pulse"
+	"github.com/frasergraham/teem/internal/retention"
 	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/tailnet"
@@ -396,6 +397,17 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 	httpSrv := &http.Server{
 		Handler:           d.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// Retention GC: spawns only when an operator has explicitly
+	// configured one of the TTL knobs. Default is "never delete"; the
+	// daemon preserves all stopped-agent and transcript history
+	// indefinitely unless opted in.
+	retCfg := retention.LoadConfig()
+	if retCfg.Enabled() {
+		fmt.Fprintf(os.Stderr, "[teemd] retention: stopped_agent_ttl=%s transcript_ttl=%s sweep=%s\n",
+			retCfg.StoppedAgentTTL, retCfg.TranscriptTTL, retentionSweepInterval(retCfg))
+		go d.runRetentionGC(retCfg)
 	}
 
 	serverErr := make(chan error, 1)
@@ -1449,6 +1461,76 @@ func headLines(body []byte, n int) []byte {
 // --- state snapshot --------------------------------------------------------
 
 // persistStateSnapshot refreshes daemon.json with the current set of
+// runRetentionGC ticks on cfg.SweepInterval and, for each registered
+// team, removes stopped registry entries older than cfg.StoppedAgentTTL
+// and transcript files older than cfg.TranscriptTTL. Default
+// configuration ("never delete") prevents this goroutine from being
+// started in the first place — see serveDaemon's retCfg.Enabled() guard.
+//
+// The first sweep runs 30s after startup so a developer can observe
+// whether the configured TTL is sane without waiting an hour. Subsequent
+// sweeps fire on the configured interval (default 1h).
+func (d *daemon) runRetentionGC(cfg retention.Config) {
+	interval := retentionSweepInterval(cfg)
+	select {
+	case <-d.baseCtx.Done():
+		return
+	case <-time.After(30 * time.Second):
+	}
+	d.retentionSweep(cfg)
+
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-d.baseCtx.Done():
+			return
+		case <-t.C:
+			d.retentionSweep(cfg)
+		}
+	}
+}
+
+// retentionSweep runs one pass across every registered team, logging
+// counts only when something was actually removed so the log stays
+// quiet on idle systems.
+func (d *daemon) retentionSweep(cfg retention.Config) {
+	d.mu.Lock()
+	teams := make([]*registeredTeam, 0, len(d.teams))
+	for _, rt := range d.teams {
+		teams = append(teams, rt)
+	}
+	d.mu.Unlock()
+	now := time.Now()
+	for _, rt := range teams {
+		if cfg.StoppedAgentTTL > 0 && rt.registry != nil {
+			if removed := rt.registry.GCStopped(now, cfg.StoppedAgentTTL); removed > 0 {
+				fmt.Fprintf(os.Stderr, "[retention] %s: pruned %d stopped agent(s) older than %s\n",
+					rt.team.Name, removed, cfg.StoppedAgentTTL)
+			}
+		}
+		if cfg.TranscriptTTL > 0 && rt.transcriptsDir != "" {
+			removed, err := retention.SweepTranscripts(rt.transcriptsDir, now, cfg.TranscriptTTL)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[retention] %s: transcript sweep error: %v\n", rt.team.Name, err)
+			}
+			if removed > 0 {
+				fmt.Fprintf(os.Stderr, "[retention] %s: removed %d transcript file(s) older than %s\n",
+					rt.team.Name, removed, cfg.TranscriptTTL)
+			}
+		}
+	}
+}
+
+// retentionSweepInterval returns the effective sweep cadence, falling
+// back to retention.DefaultSweepInterval when unset.
+func retentionSweepInterval(cfg retention.Config) time.Duration {
+	if cfg.SweepInterval > 0 {
+		return cfg.SweepInterval
+	}
+	return retention.DefaultSweepInterval
+}
+
 // registered teams. Called after every registration/unregistration so
 // `teem status` sees up-to-date info.
 func (d *daemon) persistStateSnapshot() {
