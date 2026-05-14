@@ -150,6 +150,18 @@
   }
   table.tasks .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
+  /* Active branches list: monospace name column, muted SHA + age. */
+  .branches { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  .branch { display: flex; gap: 10px; align-items: baseline; padding: 4px 0; flex-wrap: wrap; }
+  .branch .name { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; min-width: 200px; }
+  .branch .name a { color: inherit; text-decoration: none; }
+  .branch .name a:hover { color: var(--fg); text-decoration: underline; }
+  .branch .sha { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; color: var(--muted); }
+  .branch .subj { flex: 1; min-width: 0; }
+  .branch .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .branch.orphan .name { opacity: 0.7; }
+  .branch.orphan .name::after { content: " (orphan)"; color: var(--muted); font-style: italic; }
+
   .agents-mini { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
   .agents-mini .agent {
     background: var(--pill-bg); border-radius: 6px; padding: 4px 8px;
@@ -366,6 +378,10 @@
               <span class="n">{{ .CompletedToday }}</span>
               <span class="lbl">Completed today</span>
             </div>
+            <div class="counter">
+              <span class="n">{{ .BranchCount }}</span>
+              <span class="lbl">Branch{{ if ne .BranchCount 1 }}es{{ end }}</span>
+            </div>
           </div>
 
           {{ if .LeaderStatusText }}
@@ -532,6 +548,26 @@
             </div>
           {{ end }}
         </div>
+        {{ end }}
+      </div>
+
+      <div class="section">
+        <h3>Active branches</h3>
+        {{ if not .HasRepo }}
+          <div class="empty">(no repo)</div>
+        {{ else if not .Branches }}
+          <div class="empty">no teem/* branches in this working tree</div>
+        {{ else }}
+          <div class="branches">
+            {{ range .Branches }}
+              <div class="branch{{ if not .Live }} orphan{{ end }}">
+                <span class="name">{{ if .Live }}<a href="{{ .JobsURL }}">{{ .Name }}</a>{{ else }}{{ .Name }}{{ end }}</span>
+                <span class="sha">{{ .SHA }}</span>
+                <span class="subj">{{ .Subject }}</span>
+                <span class="when">{{ .AgeAgo }}</span>
+              </div>
+            {{ end }}
+          </div>
         {{ end }}
       </div>
 

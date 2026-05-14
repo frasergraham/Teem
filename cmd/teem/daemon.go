@@ -301,6 +301,11 @@ type registeredTeam struct {
 	// transcriptsDir is the leader-side mirror root for worker
 	// transcript files: <stateDir>/transcripts/<agent>/<job>.jsonl.
 	transcriptsDir string
+	// repoRoot is the git working tree the team's workers branch off
+	// of. Empty for Fargate-only / repo-less teams; the dashboard's
+	// "Active branches" section renders an empty placeholder in that
+	// case. Comes straight from the registration payload.
+	repoRoot string
 }
 
 // serveDaemon runs the multi-tenant orchestrator until ctx is cancelled.
@@ -1163,6 +1168,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		leaderURL:      leaderURL,
 		registered:     time.Now(),
 		transcriptsDir: transcriptsDir,
+		repoRoot:       repoRoot,
 	}, nil
 }
 

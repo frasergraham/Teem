@@ -305,6 +305,81 @@ func extractTaskRow(t *testing.T, body, taskID string) string {
 	return body[start : idx+end+len("</tr>")]
 }
 
+// TestTeamDetail_RendersBranchesSection seeds a real temp git repo with
+// teem/* branches, points a registered team at it, and verifies that
+// the per-team detail page shows the new "Active branches" rows and
+// the summary index tile carries the branch counter.
+func TestTeamDetail_RendersBranchesSection(t *testing.T) {
+	dir := seedRepoWithBranches(t)
+
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	rt.repoRoot = dir
+	// Mark worker-1 live so its row links to the jobs page; worker-2
+	// stays orphaned (no registry entry).
+	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-1", Role: "worker", State: mcpsrv.StateRunning})
+	d.teams["alpha"] = rt
+
+	// Per-team detail page renders the full section.
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"Active branches",
+		"teem/worker-1",
+		"teem/worker-2",
+		"did the thing",
+		"left over branch",
+		`href="/teams/alpha/agents/worker-1/jobs"`,
+		"orphan", // class added when no registry entry
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in detail body", want)
+		}
+	}
+	// feature/x is not a teem/ branch and must not appear.
+	if strings.Contains(body, "feature/x") {
+		t.Errorf("non-teem branch leaked into Active branches list")
+	}
+
+	// Summary tile shows the branch counter.
+	reqI := httptest.NewRequest(http.MethodGet, "/", nil)
+	wI := httptest.NewRecorder()
+	d.handler().ServeHTTP(wI, reqI)
+	bodyI := wI.Body.String()
+	if !strings.Contains(bodyI, "Branches") {
+		t.Errorf("summary tile missing branches counter label: %s", bodyI)
+	}
+}
+
+// TestTeamDetail_NoRepoShowsPlaceholder asserts a repo-less team
+// (Fargate-only) renders the section header with a "(no repo)" hint
+// instead of attempting to shell out and 500-ing.
+func TestTeamDetail_NoRepoShowsPlaceholder(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	rt.repoRoot = ""
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "Active branches") {
+		t.Errorf("section header missing")
+	}
+	if !strings.Contains(body, "(no repo)") {
+		t.Errorf("expected '(no repo)' placeholder for repo-less team")
+	}
+}
+
 func TestResolveTaskFlowRoute(t *testing.T) {
 	cases := []struct {
 		in     string

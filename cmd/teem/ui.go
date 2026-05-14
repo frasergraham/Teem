@@ -118,6 +118,7 @@ type summaryTile struct {
 	PulseRunning     bool
 	PulsePaused      bool
 	UnreadNotes      int
+	BranchCount      int
 }
 
 // teamPageSnapshot wraps a single dashboardTeam for the detail page,
@@ -148,6 +149,10 @@ type dashboardTeam struct {
 	RecentEvents   []dashboardEvent
 	UnreadNotes    int
 	InFlight       int64
+	// HasRepo reflects whether the team's registration carried a repo
+	// root. False ⇒ render "(no repo)" in place of the branches section.
+	HasRepo  bool
+	Branches []dashboardBranch
 }
 
 type dashboardAgent struct {
@@ -285,6 +290,7 @@ func teamTileSnapshot(rt *registeredTeam) summaryTile {
 		PulseRunning:     ts.PulseRunning,
 		PulsePaused:      ts.PulsePaused,
 		UnreadNotes:      ts.UnreadNotes,
+		BranchCount:      len(ts.Branches),
 	}
 	tile.URL = "/teams/" + tile.Slug
 
@@ -489,6 +495,14 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	if rt.notes != nil {
 		notes, _ := rt.notes.Unread()
 		out.UnreadNotes = len(notes)
+	}
+
+	// Active teem/* branches in the team's working tree. One git
+	// invocation per render is fine at v1 scale; if branches counts
+	// climb into the hundreds we can layer a small TTL cache here.
+	out.HasRepo = rt.repoRoot != ""
+	if out.HasRepo {
+		out.Branches = listTeemBranches(rt.repoRoot, rt.registry, rt.team.Name)
 	}
 	return out
 }
