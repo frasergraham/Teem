@@ -1127,6 +1127,15 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(suffix, "/transcripts/"):
 		d.handleTranscripts(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
 	default:
+		// SSR jobs pages — unauth like the dashboard (tailnet boundary).
+		if agentID, ok := resolveAgentJobsRoute(suffix); ok {
+			d.renderAgentJobs(w, r, rt, agentID)
+			return
+		}
+		if jobID, ok := resolveJobDetailRoute(suffix); ok {
+			d.renderJobDetail(w, r, rt, jobID)
+			return
+		}
 		http.NotFound(w, r)
 	}
 }

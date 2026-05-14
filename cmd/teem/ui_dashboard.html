@@ -141,6 +141,8 @@
       color: var(--muted);
       min-width: 90px;
     }
+    .agent .id a, .event .kind a { color: inherit; text-decoration: none; }
+    .agent .id a:hover, .event .kind a:hover { color: var(--fg); text-decoration: underline; }
     .agent .state.busy  { color: var(--accent); font-weight: 500; }
     .agent .state.running { color: var(--accent); }
     .agent .state.error { color: var(--error); }
@@ -229,7 +231,7 @@
         <div class="agents">
           {{ range .Agents }}
             <div class="agent">
-              <span class="id">{{ .ID }}</span>
+              <span class="id"><a href="{{ .JobsURL }}">{{ .ID }}</a></span>
               <span class="role">{{ .Role }}</span>
               <span class="state {{ .State }}">{{ .State }}</span>
               <span class="seen">{{ .LastSeen }}</span>
@@ -262,7 +264,9 @@
             <div class="event">
               <span class="time">{{ .Time }}</span>
               <span class="agent">{{ .AgentID }}</span>
-              <span class="kind">{{ .Kind }}</span>
+              <span class="kind">
+                {{ if .JobURL }}<a href="{{ .JobURL }}">{{ .Kind }}</a>{{ else }}{{ .Kind }}{{ end }}
+              </span>
               <span class="msg">{{ .Message }}</span>
             </div>
           {{ end }}

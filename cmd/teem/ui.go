@@ -17,16 +17,35 @@ import (
 //go:embed ui_dashboard.html
 var dashboardHTML string
 
-// dashboardTemplate is the parsed template; built once at startup.
-// nil-safe getter at access time so the daemon can wire the handler
-// before init() ordering matters.
-var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
-	"agoShort":    agoShort,
-	"timeShort":   timeShort,
-	"truncate200": func(s string) string { return truncateMid(s, 200) },
-	"capitalize":  capitalize,
-	"toTitleCase": capitalize,
-}).Parse(dashboardHTML))
+//go:embed ui_agent_jobs.html
+var agentJobsHTML string
+
+//go:embed ui_job_detail.html
+var jobDetailHTML string
+
+// uiTemplates is the parsed bundle of the three SSR pages, built once
+// at startup. They share a Funcs map so helpers (agoShort etc.) are
+// available from each. Lookup by template name (see ExecuteTemplate).
+var uiTemplates = newUITemplates()
+
+// newUITemplates parses all three SSR templates and returns the bundle.
+// Kept as a constructor so tests can rebuild a fresh copy when the
+// embedded HTML changes (and so the wiring is reviewable in one place).
+func newUITemplates() *template.Template {
+	funcs := template.FuncMap{
+		"agoShort":    agoShort,
+		"timeShort":   timeShort,
+		"truncate200": func(s string) string { return truncateMid(s, 200) },
+		"capitalize":  capitalize,
+		"toTitleCase": capitalize,
+		"durShort":    durShort,
+		"bytesShort":  bytesShort,
+	}
+	t := template.Must(template.New("dashboard").Funcs(funcs).Parse(dashboardHTML))
+	template.Must(t.New("agent_jobs").Parse(agentJobsHTML))
+	template.Must(t.New("job_detail").Parse(jobDetailHTML))
+	return t
+}
 
 // dashboardSnapshot is the data the template renders. Computed fresh
 // on every GET so the page doesn't have to lie about state.
@@ -59,6 +78,7 @@ type dashboardAgent struct {
 	Role     string
 	State    string
 	LastSeen string
+	JobsURL  string
 }
 
 type dashboardTask struct {
@@ -73,6 +93,8 @@ type dashboardEvent struct {
 	AgentID string
 	Kind    string
 	Message string
+	JobID   string
+	JobURL  string
 }
 
 // renderDashboard composes the snapshot for the daemon's current state
@@ -101,7 +123,7 @@ func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if err := dashboardTemplate.Execute(w, snap); err != nil {
+	if err := uiTemplates.ExecuteTemplate(w, "dashboard", snap); err != nil {
 		// Template errors land here once everything else has already
 		// been written; surface to stderr but don't try to recover.
 		fmt.Printf("[teemd] dashboard render: %v\n", err)
@@ -127,9 +149,10 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	for _, e := range entries {
 		da := dashboardAgent{
-			ID:    e.ID,
-			Role:  e.Role,
-			State: string(e.State),
+			ID:      e.ID,
+			Role:    e.Role,
+			State:   string(e.State),
+			JobsURL: fmt.Sprintf("/teams/%s/agents/%s/jobs", rt.team.Name, e.ID),
 		}
 		if !e.LastSeen.IsZero() {
 			da.LastSeen = agoShort(e.LastSeen)
@@ -183,12 +206,17 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 			if len(out.RecentEvents) >= 8 {
 				break
 			}
-			out.RecentEvents = append(out.RecentEvents, dashboardEvent{
+			de := dashboardEvent{
 				Time:    timeShort(e.Timestamp),
 				AgentID: e.AgentID,
 				Kind:    string(e.Kind),
 				Message: truncateMid(eventSummary(e), 80),
-			})
+				JobID:   e.JobID,
+			}
+			if e.JobID != "" {
+				de.JobURL = fmt.Sprintf("/teams/%s/jobs/%s", rt.team.Name, e.JobID)
+			}
+			out.RecentEvents = append(out.RecentEvents, de)
 		}
 	}
 
@@ -259,6 +287,41 @@ func truncateMid(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// durShort renders a non-zero duration compactly. Zero returns the
+// empty string so templates can hide the field for in-flight jobs.
+func durShort(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	if d < time.Second {
+		return fmt.Sprintf("%dms", int(d/time.Millisecond))
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm%ds", int(d/time.Minute), int((d%time.Minute)/time.Second))
+	}
+	return d.Truncate(time.Second).String()
+}
+
+// bytesShort renders a byte count with a binary-prefix suffix. Empty
+// when n == 0 so templates can hide the field for missing transcripts.
+func bytesShort(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	const k = 1024
+	switch {
+	case n < k:
+		return fmt.Sprintf("%dB", n)
+	case n < k*k:
+		return fmt.Sprintf("%.1fKB", float64(n)/k)
+	default:
+		return fmt.Sprintf("%.1fMB", float64(n)/(k*k))
+	}
 }
 
 // capitalize lowercases everything except the first character.
