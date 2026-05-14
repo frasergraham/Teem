@@ -215,6 +215,92 @@ func TestTaskFlow_LongPromptCollapsesIntoDetails(t *testing.T) {
 	}
 }
 
+// TestDashboard_MarksOrphanedAssigneeStale locks in the visual signal
+// for the situation the user hit: tasks sit in an active pipeline stage
+// (building/in_review/merging) with an AssignedTo that names a worker
+// no longer in the registry. The dashboard should:
+//   - mute/strike the assignee (class="assignee gone")
+//   - show a STALE pill so the leader sees they need to act.
+func TestDashboard_MarksOrphanedAssigneeStale(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	live := "worker-live"
+	ghost := "worker-ghost"
+	vanished := "worker-vanished"
+
+	// Task A: assigned to a worker that IS active → no stale, no gone.
+	taskA, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "live-handoff"})
+	_, _ = rt.plan.UpdateTask(taskA.ID, plan.UpdateInput{AssignedTo: &live, Stage: plan.StageBuilding})
+	rt.registry.Add(mcpsrv.AgentEntry{ID: live, Role: "worker", State: mcpsrv.StateBusy})
+
+	// Task B: assigned to a worker that is GONE (never registered) →
+	// stage is building → must surface as STALE + gone.
+	taskB, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "orphaned"})
+	_, _ = rt.plan.UpdateTask(taskB.ID, plan.UpdateInput{AssignedTo: &ghost, Stage: plan.StageBuilding})
+
+	// Task C: assignee gone but stage is 'proposed' — not in an
+	// active-work stage, so we mute the assignee but do NOT mark stale.
+	taskC, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "pre-work"})
+	_, _ = rt.plan.UpdateTask(taskC.ID, plan.UpdateInput{AssignedTo: &vanished})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// Task A's row should not carry the gone class or STALE pill.
+	rowA := extractTaskRow(t, body, taskA.ID)
+	if strings.Contains(rowA, "assignee gone") {
+		t.Errorf("task A assignee is live; should not be marked gone:\n%s", rowA)
+	}
+	if strings.Contains(rowA, "STALE") {
+		t.Errorf("task A is not stale (live worker):\n%s", rowA)
+	}
+
+	// Task B: orphaned in an active stage → gone class + STALE pill.
+	rowB := extractTaskRow(t, body, taskB.ID)
+	if !strings.Contains(rowB, "assignee gone") {
+		t.Errorf("task B has an orphaned assignee — assignee cell should carry the gone class:\n%s", rowB)
+	}
+	if !strings.Contains(rowB, "STALE") {
+		t.Errorf("task B is in an active stage with a vanished worker — STALE pill missing:\n%s", rowB)
+	}
+
+	// Task C: gone but stage is proposed — mute the assignee but no STALE.
+	rowC := extractTaskRow(t, body, taskC.ID)
+	if !strings.Contains(rowC, "assignee gone") {
+		t.Errorf("task C: assignee is gone, cell should be muted:\n%s", rowC)
+	}
+	if strings.Contains(rowC, "STALE") {
+		t.Errorf("task C is in 'proposed' stage; STALE is reserved for active work stages:\n%s", rowC)
+	}
+}
+
+// extractTaskRow returns the HTML for the <tr>...</tr> row that
+// contains the given task id. Best-effort string slicing — good enough
+// for asserting per-row classes in the dashboard tests.
+func extractTaskRow(t *testing.T, body, taskID string) string {
+	t.Helper()
+	idx := strings.Index(body, taskID)
+	if idx < 0 {
+		t.Fatalf("task %q not found in body", taskID)
+	}
+	start := strings.LastIndex(body[:idx], "<tr")
+	if start < 0 {
+		t.Fatalf("no <tr before task %q", taskID)
+	}
+	end := strings.Index(body[idx:], "</tr>")
+	if end < 0 {
+		t.Fatalf("no </tr> after task %q", taskID)
+	}
+	return body[start : idx+end+len("</tr>")]
+}
+
 func TestResolveTaskFlowRoute(t *testing.T) {
 	cases := []struct {
 		in     string

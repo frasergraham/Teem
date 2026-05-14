@@ -143,7 +143,18 @@ type dashboardTask struct {
 	Stage      string
 	StageAgo   string
 	AssignedTo string
-	URL        string
+	// AssigneeActive is false when AssignedTo names a worker the
+	// registry no longer treats as active (stopped, unregistered, or
+	// never seen). The template uses this to mute the cell so it's
+	// obvious nobody is currently driving the task.
+	AssigneeActive bool
+	// Stale is true when an active pipeline stage (building/in_review/
+	// merging) names an inactive assignee — i.e. the task thinks
+	// someone is working it but no one is. The template surfaces this
+	// as a small STALE pill so the leader knows to re-assign or move
+	// the task forward.
+	Stale bool
+	URL   string
 }
 
 type dashboardEvent struct {
@@ -208,6 +219,15 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	// workers remain reachable at /teams/<team>/agents/<id>/jobs.
 	entries := rt.registry.List()
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
+	// liveAgents = the set rendered under "Active agents" below. Used
+	// to decide whether a task's AssignedTo is currently being worked
+	// on or pointing at a worker that's gone.
+	liveAgents := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if e.State != mcpsrv.StateStopped {
+			liveAgents[e.ID] = true
+		}
+	}
 	for _, e := range entries {
 		if e.State == mcpsrv.StateStopped {
 			continue
@@ -243,7 +263,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 			switch {
 			case t.Status.IsOpen():
 				out.OpenTaskCount++
-				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.Name, t))
+				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.Name, t, liveAgents))
 			case t.Status.IsShelved():
 				shelved = append(shelved, t)
 			}
@@ -257,7 +277,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		// so the operator doesn't forget what they paused on.
 		sort.Slice(shelved, func(i, j int) bool { return shelved[i].UpdatedAt.After(shelved[j].UpdatedAt) })
 		for _, t := range shelved {
-			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.Name, t))
+			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.Name, t, liveAgents))
 		}
 		// Recent completed: tasks whose status moved to done, newest
 		// first by UpdatedAt; capped to 5.
@@ -272,7 +292,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 			done = done[:5]
 		}
 		for _, t := range done {
-			out.RecentDone = append(out.RecentDone, taskToDashboardTask(rt.team.Name, t))
+			out.RecentDone = append(out.RecentDone, taskToDashboardTask(rt.team.Name, t, liveAgents))
 		}
 	}
 
@@ -336,20 +356,34 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 }
 
 // taskToDashboardTask converts a plan.Task to the row shape rendered
-// by the dashboard template.
-func taskToDashboardTask(team string, t plan.Task) dashboardTask {
+// by the dashboard template. liveAgents is the set of currently active
+// (non-stopped) agent ids; it's used to decide whether the task's
+// AssignedTo is being actively worked or pointing at a worker that
+// has gone away — the latter is rendered muted and flagged STALE when
+// the stage is one where someone should be holding the task.
+func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool) dashboardTask {
 	stageAgo := ""
 	if !t.StageEnteredAt.IsZero() {
 		stageAgo = agoShort(t.StageEnteredAt)
 	}
+	assigneeActive := t.AssignedTo == "" || liveAgents[t.AssignedTo]
+	stale := false
+	if t.AssignedTo != "" && !assigneeActive {
+		switch t.Stage {
+		case plan.StageBuilding, plan.StageInReview, plan.StageMerging:
+			stale = true
+		}
+	}
 	return dashboardTask{
-		ID:         t.ID,
-		Title:      t.Title,
-		Status:     string(t.Status),
-		Stage:      string(t.Stage),
-		StageAgo:   stageAgo,
-		AssignedTo: t.AssignedTo,
-		URL:        fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID),
+		ID:             t.ID,
+		Title:          t.Title,
+		Status:         string(t.Status),
+		Stage:          string(t.Stage),
+		StageAgo:       stageAgo,
+		AssignedTo:     t.AssignedTo,
+		AssigneeActive: assigneeActive,
+		Stale:          stale,
+		URL:            fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID),
 	}
 }
 
