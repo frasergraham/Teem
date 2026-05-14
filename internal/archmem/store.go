@@ -194,6 +194,79 @@ func (s *Store) AppendEntry(role string, e Entry) error {
 	return nil
 }
 
+// AppendBlock writes a labelled section to a role's memory file,
+// replacing any prior block with the same name. Use for periodic
+// system-generated content (peer-awareness, summaries) that should
+// stay structured AND not grow the file unboundedly. The block is
+// inserted between the digest and the "# Recent entries" section.
+//
+// Markdown is preserved verbatim — unlike AppendEntry which flattens
+// newlines. Pass the full markdown body (including any leading
+// header you want shown).
+func (s *Store) AppendBlock(role, blockName, markdown string) error {
+	p := s.path(role)
+	if p == "" {
+		return fmt.Errorf("archmem: bad role %q", role)
+	}
+	if !s.validRole(role) {
+		return ErrUnknownRole
+	}
+	if !roleRE.MatchString(blockName) {
+		return fmt.Errorf("archmem: bad block name %q", blockName)
+	}
+	unlock := s.lockRole(role)
+	defer unlock()
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+		return fmt.Errorf("archmem: mkdir: %w", err)
+	}
+	if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+		if err := s.initFile(p, role); err != nil {
+			return err
+		}
+	}
+	body, err := os.ReadFile(p)
+	if err != nil {
+		return fmt.Errorf("archmem: read: %w", err)
+	}
+	next := replaceBlock(string(body), blockName, markdown)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, []byte(next), 0o600); err != nil {
+		return fmt.Errorf("archmem: write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("archmem: rename: %w", err)
+	}
+	return nil
+}
+
+// replaceBlock removes any existing `<!-- block: name -->...<!-- /block: name -->`
+// pair from body and inserts a fresh one (with the supplied markdown)
+// immediately before the "# Recent entries" section.
+func replaceBlock(body, name, markdown string) string {
+	open := fmt.Sprintf("<!-- block: %s -->", name)
+	closeM := fmt.Sprintf("<!-- /block: %s -->", name)
+	if i := strings.Index(body, open); i >= 0 {
+		if j := strings.Index(body[i:], closeM); j >= 0 {
+			end := i + j + len(closeM)
+			if end < len(body) && body[end] == '\n' {
+				end++
+			}
+			start := i
+			for start > 0 && body[start-1] == '\n' {
+				start--
+			}
+			body = body[:start] + "\n" + body[end:]
+		}
+	}
+	block := open + "\n" + strings.TrimSpace(markdown) + "\n" + closeM + "\n"
+	if i := strings.Index(body, recentHeader); i >= 0 {
+		prefix := strings.TrimRight(body[:i], "\n") + "\n\n"
+		return prefix + block + "\n" + body[i:]
+	}
+	return strings.TrimRight(body, "\n") + "\n\n" + block
+}
+
 // Load returns the full markdown body for role, or "" if the file
 // doesn't exist yet.
 func (s *Store) Load(role string) (string, error) {

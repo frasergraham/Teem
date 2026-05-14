@@ -416,3 +416,98 @@ func TestSummarizer_RecoversFromClientPanic(t *testing.T) {
 	// crash the test binary instead of failing cleanly.
 	sm.runOnce(context.Background())
 }
+
+// TestAppendBlock_ReplacesNotAppends pins the file-size invariant: a
+// second AppendBlock call with the same block name overwrites the first
+// payload instead of stacking a new block alongside it. This is the
+// core reason peeraware uses AppendBlock over AppendEntry — the hourly
+// digest must not grow leader.md unboundedly.
+func TestAppendBlock_ReplacesNotAppends(t *testing.T) {
+	s := newStore(t)
+	if err := s.AppendBlock(LeaderRole, "peer-projects", "# Peer projects\n- first tick body\n"); err != nil {
+		t.Fatalf("first AppendBlock: %v", err)
+	}
+	if err := s.AppendBlock(LeaderRole, "peer-projects", "# Peer projects\n- second tick body\n"); err != nil {
+		t.Fatalf("second AppendBlock: %v", err)
+	}
+	body, err := s.Load(LeaderRole)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	openMarker := "<!-- block: peer-projects -->"
+	closeMarker := "<!-- /block: peer-projects -->"
+	if got := strings.Count(body, openMarker); got != 1 {
+		t.Errorf("want exactly 1 open marker, got %d\nbody:\n%s", got, body)
+	}
+	if got := strings.Count(body, closeMarker); got != 1 {
+		t.Errorf("want exactly 1 close marker, got %d\nbody:\n%s", got, body)
+	}
+	if strings.Contains(body, "first tick body") {
+		t.Errorf("old block content survived second AppendBlock\nbody:\n%s", body)
+	}
+	if !strings.Contains(body, "second tick body") {
+		t.Errorf("new block content missing\nbody:\n%s", body)
+	}
+	// Block must land between digest and recent-entries.
+	iDigest := strings.Index(body, digestHeader)
+	iBlock := strings.Index(body, openMarker)
+	iRecent := strings.Index(body, recentHeader)
+	if !(iDigest >= 0 && iDigest < iBlock && iBlock < iRecent) {
+		t.Errorf("block not positioned between digest and recent-entries: digest=%d block=%d recent=%d\nbody:\n%s",
+			iDigest, iBlock, iRecent, body)
+	}
+}
+
+// TestAppendBlock_PreservesNewlines confirms the documented contract:
+// unlike AppendEntry, AppendBlock writes the markdown body verbatim.
+// peeraware relies on this so the rendered "## Peer: ..." sub-headers
+// survive the round-trip to disk as real markdown structure.
+func TestAppendBlock_PreservesNewlines(t *testing.T) {
+	s := newStore(t)
+	md := "# Peer projects\n\n## Peer: beta\n- 2 tasks in flight: t-abcd (building)\n- Workers active: worker-ada\n"
+	if err := s.AppendBlock(LeaderRole, "peer-projects", md); err != nil {
+		t.Fatalf("AppendBlock: %v", err)
+	}
+	body, _ := s.Load(LeaderRole)
+	for _, want := range []string{"# Peer projects", "## Peer: beta", "- 2 tasks in flight: t-abcd (building)", "- Workers active: worker-ada"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q\nbody:\n%s", want, body)
+		}
+	}
+}
+
+func TestAppendBlock_CoexistsWithAppendEntry(t *testing.T) {
+	s := newStore(t)
+	if err := s.AppendEntry(LeaderRole, Entry{
+		Timestamp: time.Date(2026, 5, 14, 12, 0, 0, 0, time.UTC),
+		AgentID:   "worker-1",
+		JobID:     "j",
+		Status:    "done",
+		Summary:   "did a thing",
+	}); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+	if err := s.AppendBlock(LeaderRole, "peer-projects", "# Peer projects\n- body\n"); err != nil {
+		t.Fatalf("AppendBlock: %v", err)
+	}
+	if err := s.AppendEntry(LeaderRole, Entry{
+		Timestamp: time.Date(2026, 5, 14, 13, 0, 0, 0, time.UTC),
+		AgentID:   "worker-2",
+		JobID:     "k",
+		Status:    "done",
+		Summary:   "later thing",
+	}); err != nil {
+		t.Fatalf("AppendEntry after AppendBlock: %v", err)
+	}
+	entries, err := s.LoadEntries(LeaderRole)
+	if err != nil {
+		t.Fatalf("LoadEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 recent entries, got %d", len(entries))
+	}
+	body, _ := s.Load(LeaderRole)
+	if !strings.Contains(body, "<!-- block: peer-projects -->") {
+		t.Errorf("block marker lost after subsequent AppendEntry\nbody:\n%s", body)
+	}
+}

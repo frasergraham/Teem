@@ -404,6 +404,15 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		safeGo("retention.gc", func() { d.runRetentionGC(retCfg) })
 	}
 
+	// Cross-project peer awareness (XP1): once per interval, write a
+	// "what your peers are doing" digest into each leader's archmem
+	// memory file. Enabled by default; TEEM_PEERAWARE_INTERVAL=0
+	// disables. With a single team registered the loop becomes a no-op.
+	if peerInterval := peerAwareConfig(); peerInterval > 0 {
+		fmt.Fprintf(os.Stderr, "[teemd] peeraware: interval=%s\n", peerInterval)
+		safeGo("peeraware.loop", func() { d.runPeerAware(peerInterval) })
+	}
+
 	serverErr := make(chan error, 1)
 	go func() {
 		err := httpSrv.Serve(listener)
