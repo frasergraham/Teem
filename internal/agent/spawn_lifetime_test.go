@@ -76,7 +76,7 @@ func TestSpawnAndAssign_WorkerOutlivesRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpawnByRole: %v", err)
 	}
-	if id != "worker-1" {
+	if id != "worker-ada" {
 		t.Fatalf("agent id = %q", id)
 	}
 	cancelReq() // pretend the MCP framework cancelled the request
@@ -85,7 +85,7 @@ func TestSpawnAndAssign_WorkerOutlivesRequest(t *testing.T) {
 	// the goroutine actually receiving a job. The real executor would
 	// try to exec `claude`.
 	sp.mu.Lock()
-	w := sp.workers["worker-1"]
+	w := sp.workers["worker-ada"]
 	sp.mu.Unlock()
 	if w == nil {
 		t.Fatal("worker missing from spawner.workers after spawn")
@@ -100,7 +100,7 @@ func TestSpawnAndAssign_WorkerOutlivesRequest(t *testing.T) {
 	// Now assign a job with a fresh request ctx.
 	jobReqCtx, cancelAssign := context.WithCancel(context.Background())
 	defer cancelAssign()
-	jobID, err := sp.AssignJob(jobReqCtx, "worker-1", "hello", "")
+	jobID, err := sp.AssignJob(jobReqCtx, "worker-ada", "hello", "")
 	if err != nil {
 		t.Fatalf("AssignJob: %v", err)
 	}

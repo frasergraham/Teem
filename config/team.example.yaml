@@ -48,8 +48,10 @@ team:
     mcps: []
 
   # Archetypes are role templates. The leader chooses how many to spawn
-  # of each, up to max_concurrent. Auto-generated instance ids are
-  # worker-1, worker-2, … (never reused).
+  # of each, up to max_concurrent. Auto-generated instance ids carry a
+  # wordlist name (e.g. worker-ada, worker-blake). Names return to the
+  # pool on stop and are reincarnated only when the wordlist for the
+  # role is exhausted.
   archetypes:
     - role: worker
       description: "Implements features, fixes bugs, and investigates code. Runs in an isolated git worktree per instance so multiple workers can work in parallel without stepping on each other."

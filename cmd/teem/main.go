@@ -384,11 +384,19 @@ func defaultNotesPath(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "notes.jsonl")
 }
 
-// defaultArchetypeSeqPath returns the JSON file persisting the
-// spawner's per-role instance-id counter for a team. Survives daemon
-// restarts so freshly-spawned ids don't collide with historical ones.
+// defaultArchetypeSeqPath returns the JSON file produced by the
+// pre-T9 per-role instance-id counter. The current allocator
+// (internal/roster) reads this file once on first boot for
+// migration, then ignores it.
 func defaultArchetypeSeqPath(teamName string) string {
 	return filepath.Join(defaultStateDir(teamName), "archetype-seq.json")
+}
+
+// defaultRosterPath returns the JSON file persisting the roster of
+// worker names (wordlist allocations + reincarnation candidates).
+// Replaces archetype-seq.json from T9 onward.
+func defaultRosterPath(teamName string) string {
+	return filepath.Join(defaultStateDir(teamName), "roster.json")
 }
 
 // defaultPulseRunningFlag returns the file path used to persist

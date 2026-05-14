@@ -70,13 +70,13 @@ func TestDrain_BlocksUntilJobsFinish(t *testing.T) {
 
 	// Swap in our blocking executor so we can gate completion.
 	sp.mu.Lock()
-	w := sp.workers["worker-1"]
+	w := sp.workers["worker-ada"]
 	sp.mu.Unlock()
 	be := newBlockingExec()
 	w.Executor = be
 
 	// Assign a job; the executor will block on be.release.
-	if _, err := sp.AssignJob(context.Background(), "worker-1", "do stuff", ""); err != nil {
+	if _, err := sp.AssignJob(context.Background(), "worker-ada", "do stuff", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Wait for the worker to actually pick up the job and start

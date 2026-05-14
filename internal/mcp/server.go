@@ -211,7 +211,7 @@ func (s *Server) registerTools() {
 	s.core.AddTool(
 		mcpgo.NewTool("stop_agent",
 			mcpgo.WithDescription("Tear down a running worker instance. Cancels its result subscriber and calls Teardown on the provisioner (unless the archetype is persistent). The archetype stays in the roster."),
-			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the running instance, e.g. worker-3.")),
+			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Id of the running instance, e.g. worker-ada.")),
 		),
 		s.handleStopAgent,
 	)
@@ -307,7 +307,7 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("update_leader_status",
-			mcpgo.WithDescription("Set the short, human-readable \"what am I doing right now\" line shown at the top of the dashboard. Keep ≤120 chars; answer the right-now question (\"Reviewing T1+T6 diff\", \"Spawning reviewer-7 for T4\"). Planning detail belongs in record_decision. agent_id defaults to 'leader' for the Leader; PM-style workers should pass their own id."),
+			mcpgo.WithDescription("Set the short, human-readable \"what am I doing right now\" line shown at the top of the dashboard. Keep ≤120 chars; answer the right-now question (\"Reviewing T1+T6 diff\", \"Spawning reviewer-blake for T4\"). Planning detail belongs in record_decision. agent_id defaults to 'leader' for the Leader; PM-style workers should pass their own id."),
 			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Status line text. One sentence.")),
 			mcpgo.WithString("current_task_ids", mcpgo.Description("Optional comma-separated task ids being actively worked.")),
 			mcpgo.WithString("agent_id", mcpgo.Description("Optional. Defaults to 'leader'.")),

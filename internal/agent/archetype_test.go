@@ -40,8 +40,8 @@ func TestSpawnByRole_GeneratesArchetypeIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn 1: %v", err)
 	}
-	if id1 != "worker-1" {
-		t.Errorf("id1 = %q want worker-1", id1)
+	if id1 != "worker-ada" {
+		t.Errorf("id1 = %q want worker-ada", id1)
 	}
 	// Swap executor so the worker doesn't try to exec claude on the
 	// next assignment. (The Worker is started inside SpawnByRole.)
@@ -51,8 +51,8 @@ func TestSpawnByRole_GeneratesArchetypeIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn 2: %v", err)
 	}
-	if id2 != "worker-2" {
-		t.Errorf("id2 = %q want worker-2", id2)
+	if id2 != "worker-blake" {
+		t.Errorf("id2 = %q want worker-blake", id2)
 	}
 	swapExecutor(t, sp, id2)
 
@@ -60,8 +60,8 @@ func TestSpawnByRole_GeneratesArchetypeIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn 3: %v", err)
 	}
-	if id3 != "worker-3" {
-		t.Errorf("id3 = %q want worker-3", id3)
+	if id3 != "worker-cleo" {
+		t.Errorf("id3 = %q want worker-cleo", id3)
 	}
 	swapExecutor(t, sp, id3)
 
@@ -87,8 +87,9 @@ func TestSpawnByRole_MonotonicAfterStop(t *testing.T) {
 	id2, _ := sp.SpawnByRole(context.Background(), "worker")
 	swapExecutor(t, sp, id2)
 
-	// Stopping worker-1 frees a slot. The next spawn must NOT reuse
-	// the id — it gets worker-3.
+	// Stopping the first worker releases its name back to the pool,
+	// but the next spawn still goes to a fresh wordlist entry — the
+	// wordlist is far from exhausted, so we don't reincarnate yet.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := sp.StopAgent(ctx, id1); err != nil {
@@ -99,8 +100,11 @@ func TestSpawnByRole_MonotonicAfterStop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn after stop: %v", err)
 	}
-	if id3 != "worker-3" {
-		t.Errorf("id3 = %q want worker-3 (no id reuse)", id3)
+	if id3 == id1 || id3 == id2 {
+		t.Errorf("id3 = %q reused a still-in-use or just-released name (id1=%q id2=%q); fresh wordlist still has entries", id3, id1, id2)
+	}
+	if id3 != "worker-cleo" {
+		t.Errorf("id3 = %q want worker-cleo (next fresh wordlist entry)", id3)
 	}
 }
 
