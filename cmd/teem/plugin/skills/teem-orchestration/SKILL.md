@@ -31,8 +31,23 @@ The `teem` MCP server exposes these tools.
   the team is going to work on. Returns a `task_id` like `t-3b9f`.
 - `update_task(id, status?, assigned_to?, notes?, depends_on?,
   add_evidence?)` — mark progress. Statuses: pending, in_progress,
-  blocked, done, abandoned. `add_evidence` appends job_ids.
-- `list_tasks(status?, parent_id?, open_only?)` — query the plan.
+  blocked, done, abandoned. `add_evidence` appends job_ids. *Stage*
+  changes go through `set_task_stage` (below), not here.
+- `set_task_stage(task_id, stage)` — move a task along the pipeline:
+  `proposed → specced → building → in_review → merging → verified`,
+  plus `blocked` and `abandoned`. The transitions matrix rejects
+  illegal jumps (e.g. `verified → proposed`).
+- `record_decision(task_id, text)` — capture a non-trivial decision
+  against a task: the "why" behind a design choice, the trade-off you
+  picked, a vendored dep, etc. Persisted to the audit log and
+  surfaced in the task's flow view alongside the diff.
+- `record_blocker(task_id, text)` — mark a task blocked. Atomic
+  effect: stage moves to `blocked`, status moves to `blocked`, and a
+  `blocker_note` lands in audit. Use when work cannot proceed without
+  outside action.
+- `list_tasks(status?, stage?, parent_id?, open_only?)` — query the
+  plan. Returns stage + stage_entered_at so callers can see how long
+  a task has been parked.
 - `link_task_to_job(task_id, job_id)` — register that this job is the
   work for this task (shortcut for update_task add_evidence).
 
@@ -40,6 +55,40 @@ Use the plan as durable memory across sessions and across daemon
 restarts. At the start of a non-trivial piece of work, break it into
 tasks; mark them in_progress as you assign, done as you verify. When
 you come back to a session, the plan tells you what was outstanding.
+
+## Keeping the dashboard honest
+
+Status text should be ≤ 120 chars and answer "what are you doing
+right now," e.g. "Reviewing T1+T6 diff" or "Spawning reviewer-7 for
+T4". Don't include planning details — that's for `record_decision`.
+
+- `update_leader_status(text, current_task_ids?, agent_id?)` — set
+  the one-line "what am I doing right now" entry shown at the top of
+  the dashboard. `agent_id` defaults to `leader`; PM-style workers
+  should pass their own id so the leader card surfaces their state
+  separately. Call this whenever you start a new chunk of work, hand
+  off to a worker, or change focus.
+- `get_leader_status` — read back the per-agent status map. Useful
+  when you're resuming a session and want to know what you (or a PM
+  worker) reported you were doing.
+
+## Marking stages and decisions
+
+Treat stage moves and decision notes as part of the work, not as
+overhead:
+
+- Move a task into `building` the moment a worker starts on it;
+  `in_review` when the change is up for review; `merging` while you
+  wait on CI/merge gates; `verified` only after you've confirmed the
+  task's success criteria.
+- `record_decision` should fire on every choice a future reader
+  wouldn't recover from the diff alone — "we kept the old API to
+  unblock the mobile team; new API ships next sprint" is exactly the
+  kind of note that belongs there.
+- `record_blocker` is heavier-weight; reach for it only when
+  something genuinely can't progress (waiting on a credential, a
+  third-party fix, a human decision). It moves the task into the
+  blocked column on the dashboard.
 
 **Inspecting the team:**
 - `read_team` — current roster, including roles, descriptions, and

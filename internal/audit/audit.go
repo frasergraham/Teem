@@ -57,6 +57,15 @@ const (
 	// KindWorkerStopped is emitted when a worker subprocess terminates
 	// (clean shutdown or otherwise). Used as a leader-wake signal.
 	KindWorkerStopped Kind = "worker_stopped"
+	// KindDecisionNote captures a non-trivial decision recorded
+	// against a task (the "why" alongside the diff). Meta carries
+	// task_id and (when present) summary. Emitted by the
+	// record_decision MCP tool.
+	KindDecisionNote Kind = "decision_note"
+	// KindBlockerNote captures a blocker recorded against a task.
+	// Emitted by record_blocker; the same tool also moves the task
+	// to Stage="blocked" and Status="blocked" atomically.
+	KindBlockerNote Kind = "blocker_note"
 )
 
 // Event is one entry on the audit channel. Meta is a free-form bag for

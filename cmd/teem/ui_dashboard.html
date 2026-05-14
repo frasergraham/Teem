@@ -18,6 +18,7 @@
       --error: #b91c1c;
       --pill-bg: #f5f5f4;
       --code-bg: #fafaf9;
+      --info: #2563eb;
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -31,20 +32,19 @@
         --error: #ef4444;
         --pill-bg: #292524;
         --code-bg: #1c1917;
+        --info: #60a5fa;
       }
     }
     * { box-sizing: border-box; }
     body {
-      margin: 0;
-      padding: 16px;
+      margin: 0 auto;
+      padding: 16px 16px 64px;
       background: var(--bg);
       color: var(--fg);
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
       font-size: 15px;
       line-height: 1.4;
-      max-width: 720px;
-      margin: 0 auto;
-      padding-bottom: 64px;
+      max-width: 960px;
     }
     header {
       display: flex;
@@ -54,22 +54,9 @@
       border-bottom: 1px solid var(--border);
       margin-bottom: 16px;
     }
-    header h1 {
-      margin: 0;
-      font-size: 20px;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-    }
-    header .endpoint {
-      color: var(--muted);
-      font-family: ui-monospace, SFMono-Regular, monospace;
-      font-size: 12px;
-    }
-    header .clock {
-      margin-left: auto;
-      color: var(--muted);
-      font-size: 12px;
-    }
+    header h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+    header .endpoint { color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+    header .clock { margin-left: auto; color: var(--muted); font-size: 12px; }
 
     .team {
       background: var(--card);
@@ -80,108 +67,93 @@
     }
     .team h2 {
       margin: 0 0 4px 0;
-      font-size: 17px;
-      font-weight: 600;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
+      font-size: 17px; font-weight: 600;
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     }
-    .team .meta {
-      color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 12px;
-    }
+    .team .meta { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
 
     .pill {
-      display: inline-block;
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: var(--pill-bg);
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 500;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      background: var(--pill-bg); color: var(--muted);
+      font-size: 11px; font-weight: 500; letter-spacing: 0.02em; text-transform: uppercase;
     }
     .pill.running { background: var(--accent); color: white; }
     .pill.paused  { background: var(--warn); color: white; }
     .pill.error   { background: var(--error); color: white; }
-    .pill.notes   { background: #2563eb; color: white; }
+    .pill.notes   { background: var(--info); color: white; }
 
-    .section {
-      margin-top: 12px;
-      padding-top: 12px;
-      border-top: 1px solid var(--border);
-    }
-    .section h3 {
-      margin: 0 0 8px 0;
-      font-size: 12px;
-      font-weight: 600;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
+    /* Stage pills — colour-coded by lifecycle. */
+    .stage { display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:500; text-transform: uppercase; letter-spacing: 0.03em; }
+    .stage.proposed  { background: var(--pill-bg); color: var(--muted); }
+    .stage.specced   { background: var(--pill-bg); color: var(--info); }
+    .stage.building  { background: var(--warn); color: #fff; }
+    .stage.in_review { background: var(--info); color: #fff; }
+    .stage.merging   { background: #7c3aed; color: #fff; }
+    .stage.verified  { background: var(--accent); color: #fff; }
+    .stage.blocked   { background: var(--error); color: #fff; }
+    .stage.abandoned { background: var(--pill-bg); color: var(--muted); text-decoration: line-through; }
 
-    .agents, .tasks, .events {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
+    .leader-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
     }
-    .agent, .task, .event {
-      display: flex;
-      gap: 8px;
-      align-items: baseline;
-      font-size: 14px;
-      padding: 4px 0;
-    }
-    .agent .id, .task .id, .event .agent {
-      font-family: ui-monospace, SFMono-Regular, monospace;
-      font-size: 12px;
-      color: var(--muted);
-      min-width: 90px;
-    }
-    .agent .id a, .event .kind a { color: inherit; text-decoration: none; }
-    .agent .id a:hover, .event .kind a:hover { color: var(--fg); text-decoration: underline; }
-    .agent .state.busy  { color: var(--accent); font-weight: 500; }
-    .agent .state.running { color: var(--accent); }
-    .agent .state.error { color: var(--error); }
-    .agent .state.stopped { color: var(--muted); }
-    .agent .seen  { color: var(--muted); font-size: 12px; margin-left: auto; }
-    .task .status { color: var(--muted); font-size: 12px; }
-    .task .assignee { margin-left: auto; color: var(--muted); font-size: 12px; }
-    .event .time  { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 60px; }
-    .event .kind  { color: var(--muted); font-size: 12px; min-width: 100px; }
-    .event .msg   { color: var(--fg); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .leader-card h3 { margin: 0 0 6px 0; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+    .leader-line { display:flex; gap:10px; align-items: baseline; padding: 2px 0; }
+    .leader-line .who { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); min-width: 80px; }
+    .leader-line .what { flex: 1; }
+    .leader-line .when { color: var(--muted); font-size: 12px; }
+    .leader-line .tasks { font-size: 12px; color: var(--muted); }
+    .leader-line .tasks a { color: var(--info); text-decoration: none; margin-left: 6px; }
+    .empty-leader { color: var(--muted); font-style: italic; font-size: 13px; }
 
-    .empty {
-      color: var(--muted);
-      font-style: italic;
-      font-size: 13px;
-    }
+    .section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+    .section h3 { margin: 0 0 8px 0; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
 
-    .summary {
-      display: flex;
-      gap: 14px;
-      flex-wrap: wrap;
-      font-size: 13px;
+    table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.tasks th, table.tasks td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    table.tasks th { color: var(--muted); font-weight: 500; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; }
+    table.tasks tr:hover td { background: var(--pill-bg); }
+    table.tasks td.id { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); }
+    table.tasks td a { color: inherit; text-decoration: none; }
+    table.tasks td a:hover { color: var(--fg); text-decoration: underline; }
+    table.tasks .assignee { color: var(--muted); font-size: 12px; }
+    table.tasks .when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+    .agents-mini { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+    .agents-mini .agent {
+      background: var(--pill-bg); border-radius: 6px; padding: 4px 8px;
+      display: flex; gap: 8px; align-items: baseline;
     }
-    .summary .stat {
-      display: flex;
-      gap: 4px;
-      align-items: baseline;
-    }
-    .summary .stat .n { font-weight: 600; color: var(--fg); }
+    .agents-mini .agent .id { font-family: ui-monospace, SFMono-Regular, monospace; }
+    .agents-mini .agent .state.busy { color: var(--accent); font-weight: 500; }
+    .agents-mini .agent .state.running { color: var(--accent); }
+    .agents-mini .agent .placement, .agents-mini .agent .seen { color: var(--muted); }
+
+    .events { display: flex; flex-direction: column; gap: 4px; }
+    .event { display:flex; gap:8px; align-items: baseline; font-size: 13px; padding: 4px 0; }
+    .event .time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 60px; }
+    .event .agent { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); min-width: 90px; }
+    .event .kind { color: var(--muted); font-size: 12px; min-width: 110px; }
+    .event .kind a { color: inherit; text-decoration: none; }
+    .event .kind a:hover { color: var(--fg); text-decoration: underline; }
+    .event .msg { color: var(--fg); font-size: 13px; flex: 1; overflow: hidden; white-space: normal; }
+
+    .empty { color: var(--muted); font-style: italic; font-size: 13px; }
+    .summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+    .summary .stat { display: flex; gap: 4px; align-items: baseline; }
+    .summary .stat .n { font-weight: 600; }
     .summary .stat .lbl { color: var(--muted); }
 
-    footer {
-      margin-top: 32px;
-      padding-top: 16px;
-      border-top: 1px solid var(--border);
-      color: var(--muted);
-      font-size: 12px;
-      text-align: center;
-    }
+    details.expandable { display: inline; }
+    details.expandable > summary { cursor: pointer; list-style: none; display: inline; color: inherit; }
+    details.expandable > summary::-webkit-details-marker { display: none; }
+    details.expandable[open] > summary { color: var(--muted); }
+    details.expandable .expanded { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+
+    footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; text-align: center; }
   </style>
 </head>
 <body>
@@ -202,17 +174,10 @@
       <h2>
         {{ .Name }}
         {{ if .PulseRunning }}
-          {{ if .PulsePaused }}
-            <span class="pill paused">pulse paused</span>
-          {{ else }}
-            <span class="pill running">pulse running</span>
-          {{ end }}
-        {{ else }}
-          <span class="pill">pulse off</span>
-        {{ end }}
-        {{ if gt .UnreadNotes 0 }}
-          <span class="pill notes">{{ .UnreadNotes }} note{{ if gt .UnreadNotes 1 }}s{{ end }}</span>
-        {{ end }}
+          {{ if .PulsePaused }}<span class="pill paused">pulse paused</span>
+          {{ else }}<span class="pill running">pulse running</span>{{ end }}
+        {{ else }}<span class="pill">pulse off</span>{{ end }}
+        {{ if gt .UnreadNotes 0 }}<span class="pill notes">{{ .UnreadNotes }} note{{ if gt .UnreadNotes 1 }}s{{ end }}</span>{{ end }}
       </h2>
       <div class="meta">
         registered {{ .RegisteredAgo }}
@@ -220,41 +185,100 @@
       </div>
 
       <div class="summary">
-        <span class="stat"><span class="n">{{ len .Agents }}</span><span class="lbl">agent{{ if ne (len .Agents) 1 }}s{{ end }}</span></span>
+        <span class="stat"><span class="n">{{ len .Agents }}</span><span class="lbl">active agent{{ if ne (len .Agents) 1 }}s{{ end }}</span></span>
         <span class="stat"><span class="n">{{ .InFlight }}</span><span class="lbl">in flight</span></span>
         <span class="stat"><span class="n">{{ .OpenTaskCount }}</span><span class="lbl">open task{{ if ne .OpenTaskCount 1 }}s{{ end }}</span></span>
       </div>
 
+      <div class="leader-card">
+        <h3>Status board</h3>
+        {{ if .LeaderStatus }}
+          <div class="leader-line">
+            <span class="who">leader</span>
+            <span class="what">{{ expandable .LeaderStatus.Text }}</span>
+            <span class="when">{{ .LeaderStatus.UpdatedAgo }}</span>
+          </div>
+          {{ if .LeaderStatus.CurrentTaskIDs }}
+            <div class="leader-line">
+              <span class="who"></span>
+              <span class="tasks">on:{{ range .LeaderStatus.CurrentTaskIDs }}<a href="{{ .URL }}">{{ .ID }}</a>{{ end }}</span>
+            </div>
+          {{ end }}
+        {{ else }}
+          <div class="empty-leader">leader hasn't posted a status yet — use update_leader_status to set one</div>
+        {{ end }}
+        {{ range .OtherStatuses }}
+          <div class="leader-line">
+            <span class="who">{{ .AgentID }}</span>
+            <span class="what">{{ expandable .Text }}</span>
+            <span class="when">{{ .UpdatedAgo }}</span>
+          </div>
+          {{ if .CurrentTaskIDs }}
+            <div class="leader-line">
+              <span class="who"></span>
+              <span class="tasks">on:{{ range .CurrentTaskIDs }}<a href="{{ .URL }}">{{ .ID }}</a>{{ end }}</span>
+            </div>
+          {{ end }}
+        {{ end }}
+      </div>
+
       <div class="section">
-        <h3>Agents</h3>
+        <h3>Open tasks</h3>
+        {{ if not .OpenTasks }}<div class="empty">no open tasks — the leader hasn't broken work down yet</div>{{ end }}
+        {{ if .OpenTasks }}
+        <table class="tasks">
+          <thead><tr><th>Task</th><th>Title</th><th>Stage</th><th>Assignee</th><th>In stage</th></tr></thead>
+          <tbody>
+            {{ range .OpenTasks }}
+              <tr>
+                <td class="id"><a href="{{ .URL }}">{{ .ID }}</a></td>
+                <td><a href="{{ .URL }}">{{ .Title }}</a></td>
+                <td>{{ if .Stage }}<span class="stage {{ .Stage }}">{{ .Stage }}</span>{{ end }}</td>
+                <td class="assignee">{{ if .AssignedTo }}{{ .AssignedTo }}{{ else }}—{{ end }}</td>
+                <td class="when">{{ .StageAgo }}</td>
+              </tr>
+            {{ end }}
+          </tbody>
+        </table>
+        {{ end }}
+      </div>
+
+      {{ if .RecentDone }}
+      <div class="section">
+        <h3>Recently completed</h3>
+        <table class="tasks">
+          <tbody>
+            {{ range .RecentDone }}
+              <tr>
+                <td class="id"><a href="{{ .URL }}">{{ .ID }}</a></td>
+                <td><a href="{{ .URL }}">{{ .Title }}</a></td>
+                <td>{{ if .Stage }}<span class="stage {{ .Stage }}">{{ .Stage }}</span>{{ end }}</td>
+                <td class="assignee">{{ if .AssignedTo }}{{ .AssignedTo }}{{ end }}</td>
+                <td class="when">{{ .StageAgo }}</td>
+              </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+      {{ end }}
+
+      <div class="section">
+        <h3>Active agents</h3>
         {{ if not .Agents }}<div class="empty">none running</div>{{ end }}
-        <div class="agents">
+        {{ if .Agents }}
+        <div class="agents-mini">
           {{ range .Agents }}
             <div class="agent">
-              <span class="id"><a href="{{ .JobsURL }}">{{ .ID }}</a></span>
+              <a class="id" href="{{ .JobsURL }}">{{ .ID }}</a>
               <span class="role">{{ .Role }}</span>
+              <span class="placement">{{ .Placement }}</span>
               <span class="state {{ .State }}">{{ .State }}</span>
               <span class="seen">{{ .LastSeen }}</span>
             </div>
           {{ end }}
         </div>
+        {{ end }}
       </div>
-
-      {{ if .PendingTasks }}
-      <div class="section">
-        <h3>Open tasks</h3>
-        <div class="tasks">
-          {{ range .PendingTasks }}
-            <div class="task">
-              <span class="id">{{ .ID }}</span>
-              <span class="title">{{ .Title }}</span>
-              <span class="status">{{ .Status }}</span>
-              {{ if .AssignedTo }}<span class="assignee">→ {{ .AssignedTo }}</span>{{ end }}
-            </div>
-          {{ end }}
-        </div>
-      </div>
-      {{ end }}
 
       <div class="section">
         <h3>Recent activity</h3>
@@ -267,7 +291,7 @@
               <span class="kind">
                 {{ if .JobURL }}<a href="{{ .JobURL }}">{{ .Kind }}</a>{{ else }}{{ .Kind }}{{ end }}
               </span>
-              <span class="msg">{{ .Message }}</span>
+              <span class="msg">{{ expandable .Message }}</span>
             </div>
           {{ end }}
         </div>
@@ -275,8 +299,6 @@
     </section>
   {{ end }}
 
-  <footer>
-    teem · refreshing every 10s · uptime {{ .UptimeAgo }}
-  </footer>
+  <footer>teem · refreshing every 10s · uptime {{ .UptimeAgo }}</footer>
 </body>
 </html>

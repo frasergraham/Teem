@@ -365,6 +365,9 @@ func (s *Server) handleListTasks(_ context.Context, req mcpgo.CallToolRequest) (
 	if v := req.GetString("status", ""); v != "" {
 		f.Status = plan.Status(v)
 	}
+	if v := req.GetString("stage", ""); v != "" {
+		f.Stage = plan.Stage(v)
+	}
 	if req.GetString("open_only", "") == "true" {
 		f.OpenOnly = true
 	}
@@ -452,6 +455,156 @@ func (s *Server) handleRecallJobs(_ context.Context, req mcpgo.CallToolRequest) 
 	if err != nil {
 		return mcpgo.NewToolResultErrorFromErr("marshal jobs", err), nil
 	}
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+// --- leader-status & stage / decision / blocker tools --------------------
+
+func (s *Server) handleUpdateLeaderStatus(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.leaderStatus == nil {
+		return mcpgo.NewToolResultError("leader_status store is not configured"), nil
+	}
+	text, err := req.RequireString("text")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	agentID := req.GetString("agent_id", "leader")
+	var taskIDs []string
+	if v := req.GetString("current_task_ids", ""); v != "" {
+		taskIDs = splitCSV(v)
+	}
+	if err := s.leaderStatus.Set(agentID, text, taskIDs); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("update_leader_status", err), nil
+	}
+	entry, _ := s.leaderStatus.Get(agentID)
+	body, _ := json.Marshal(entry)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleGetLeaderStatus(_ context.Context, _ mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.leaderStatus == nil {
+		return mcpgo.NewToolResultError("leader_status store is not configured"), nil
+	}
+	entries := s.leaderStatus.All()
+	out := map[string]any{}
+	for _, e := range entries {
+		out[e.AgentID] = e
+	}
+	body, _ := json.Marshal(out)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleSetTaskStage(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	stage, err := req.RequireString("stage")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	st := plan.Stage(stage)
+	if !plan.IsValidStage(st) {
+		return mcpgo.NewToolResultErrorf("unknown stage %q (valid: proposed, specced, building, in_review, merging, verified, blocked, abandoned)", stage), nil
+	}
+	task, err := s.plan.UpdateTask(taskID, plan.UpdateInput{Stage: st})
+	if err != nil {
+		switch {
+		case errors.Is(err, plan.ErrTaskNotFound):
+			return mcpgo.NewToolResultErrorf("task %q not found", taskID), nil
+		case errors.Is(err, plan.ErrInvalidStage):
+			return mcpgo.NewToolResultErrorf("illegal stage transition to %q", stage), nil
+		default:
+			return mcpgo.NewToolResultErrorFromErr("set_task_stage", err), nil
+		}
+	}
+	body, _ := json.Marshal(task)
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleRecordDecision(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.audit == nil {
+		return mcpgo.NewToolResultError("audit sink is not configured"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	text, err := req.RequireString("text")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	// Sanity check: the task should exist when plan is wired. Lets
+	// the caller catch typos before scattering notes against
+	// nonexistent ids.
+	if s.plan != nil {
+		if _, ok := s.plan.Get(taskID); !ok {
+			return mcpgo.NewToolResultErrorf("task %q not found", taskID), nil
+		}
+	}
+	ev := audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "leader",
+		Kind:      audit.KindDecisionNote,
+		Message:   text,
+		Meta:      map[string]any{"task_id": taskID},
+	}
+	if err := s.audit.Write(ev); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("record_decision", err), nil
+	}
+	body, _ := json.Marshal(map[string]string{"recorded": taskID})
+	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+func (s *Server) handleRecordBlocker(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.audit == nil {
+		return mcpgo.NewToolResultError("audit sink is not configured"), nil
+	}
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured"), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	text, err := req.RequireString("text")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if _, ok := s.plan.Get(taskID); !ok {
+		return mcpgo.NewToolResultErrorf("task %q not found", taskID), nil
+	}
+	// Atomic-effect intent: move the task to blocked stage AND
+	// status, then write a single audit event. UpdateTask is a single
+	// write under the plan mutex; the audit write is a separate file.
+	// We accept that interleaving order — the audit_kind=blocker_note
+	// event with task_id meta is what the dashboard joins on, not the
+	// plan store.
+	if _, err := s.plan.UpdateTask(taskID, plan.UpdateInput{
+		Status: plan.StatusBlocked,
+		Stage:  plan.StageBlocked,
+	}); err != nil {
+		// If the transition is rejected (e.g. already blocked), fall
+		// through and still emit the audit note — but report the
+		// underlying error.
+		if !errors.Is(err, plan.ErrInvalidStage) {
+			return mcpgo.NewToolResultErrorFromErr("record_blocker", err), nil
+		}
+	}
+	ev := audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "leader",
+		Kind:      audit.KindBlockerNote,
+		Message:   text,
+		Meta:      map[string]any{"task_id": taskID},
+	}
+	if err := s.audit.Write(ev); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("record_blocker: audit", err), nil
+	}
+	body, _ := json.Marshal(map[string]string{"blocked": taskID})
 	return mcpgo.NewToolResultText(string(body)), nil
 }
 

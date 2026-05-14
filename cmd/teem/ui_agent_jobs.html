@@ -92,6 +92,13 @@
 
     .empty { color: var(--muted); font-style: italic; padding: 12px 0; }
     .preview { color: var(--muted); }
+    td.prompt-cell { white-space: normal; word-break: break-word; max-width: 0; }
+
+    details.expandable { display: inline; }
+    details.expandable > summary { cursor: pointer; list-style: none; display: inline; color: inherit; }
+    details.expandable > summary::-webkit-details-marker { display: none; }
+    details.expandable[open] > summary { color: var(--muted); }
+    details.expandable .expanded { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -121,8 +128,8 @@
           <td class="mono"><a href="{{ .JobURL }}">{{ .JobID }}</a></td>
           <td class="status {{ .Status }}">{{ .Status }}</td>
           <td>{{ .Duration }}</td>
-          <td>
-            {{ if .Summary }}{{ .Summary }}{{ else }}<span class="preview">{{ .Prompt }}</span>{{ end }}
+          <td class="prompt-cell">
+            {{ if .Summary }}{{ expandable .Summary }}{{ else }}<span class="preview">{{ expandable .Prompt }}</span>{{ end }}
           </td>
         </tr>
       {{ end }}

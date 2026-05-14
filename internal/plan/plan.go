@@ -46,32 +46,38 @@ func (s Status) IsOpen() bool {
 // events. The leader sees this shape via list_tasks; the daemon uses
 // it to decide whether to keep ticking.
 type Task struct {
-	ID         string    `json:"id"`
-	Title      string    `json:"title"`
-	Status     Status    `json:"status"`
-	AssignedTo string    `json:"assigned_to,omitempty"`
-	ParentID   string    `json:"parent_id,omitempty"`
-	DependsOn  []string  `json:"depends_on,omitempty"`
-	Notes      string    `json:"notes,omitempty"`
-	Evidence   []string  `json:"evidence,omitempty"` // job_ids
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status Status `json:"status"`
+	Stage  Stage  `json:"stage,omitempty"`
+	// StageEnteredAt records when the task most recently moved into
+	// its current Stage. Used by the dashboard to render "in_review
+	// for 3h" and by reviewers chasing staleness.
+	StageEnteredAt time.Time `json:"stage_entered_at,omitempty"`
+	AssignedTo     string    `json:"assigned_to,omitempty"`
+	ParentID       string    `json:"parent_id,omitempty"`
+	DependsOn      []string  `json:"depends_on,omitempty"`
+	Notes          string    `json:"notes,omitempty"`
+	Evidence       []string  `json:"evidence,omitempty"` // job_ids
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // Event is one mutation written to the JSONL file. Op is either
 // "create" or "update"; update events carry only the fields they
 // change. AddEvidence is additive; everything else is replace-or-keep.
 type Event struct {
-	Op         string    `json:"op"`
-	ID         string    `json:"id"`
-	Timestamp  time.Time `json:"ts"`
-	Title      string    `json:"title,omitempty"`
-	ParentID   string    `json:"parent_id,omitempty"`
-	Status     Status    `json:"status,omitempty"`
-	AssignedTo *string   `json:"assigned_to,omitempty"`
-	DependsOn  *[]string `json:"depends_on,omitempty"`
-	Notes      *string   `json:"notes,omitempty"`
-	AddEvidence []string `json:"add_evidence,omitempty"`
+	Op          string    `json:"op"`
+	ID          string    `json:"id"`
+	Timestamp   time.Time `json:"ts"`
+	Title       string    `json:"title,omitempty"`
+	ParentID    string    `json:"parent_id,omitempty"`
+	Status      Status    `json:"status,omitempty"`
+	Stage       Stage     `json:"stage,omitempty"`
+	AssignedTo  *string   `json:"assigned_to,omitempty"`
+	DependsOn   *[]string `json:"depends_on,omitempty"`
+	Notes       *string   `json:"notes,omitempty"`
+	AddEvidence []string  `json:"add_evidence,omitempty"`
 }
 
 // Plan is the live snapshot + appender. Safe for concurrent calls;
@@ -88,6 +94,10 @@ type Plan struct {
 // ErrTaskNotFound is returned by UpdateTask when no task has the
 // supplied id. Distinct from a generic error so callers can react.
 var ErrTaskNotFound = errors.New("plan: task not found")
+
+// ErrInvalidStage is returned by UpdateTask when the caller asks for
+// a stage transition that the allowed-transitions matrix forbids.
+var ErrInvalidStage = errors.New("plan: invalid stage transition")
 
 // Open opens (creating if needed) the JSONL file at path. Replays
 // every event into the snapshot so callers can immediately list/get.
@@ -128,7 +138,42 @@ func (p *Plan) replay() error {
 		}
 		p.apply(ev)
 	}
-	return sc.Err()
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	// Backfill: tasks written before Stage existed read back with
+	// empty Stage. Map their Status to the closest stage so the new
+	// dashboard view doesn't show a column of "—" for legacy plans.
+	for _, t := range p.tasks {
+		if t.Stage != "" {
+			continue
+		}
+		t.Stage = stageFromLegacyStatus(t.Status)
+		if t.StageEnteredAt.IsZero() {
+			t.StageEnteredAt = t.UpdatedAt
+		}
+	}
+	return nil
+}
+
+// stageFromLegacyStatus picks a default stage for tasks that
+// pre-date the Stage field. Best-effort: a task whose Status was
+// "in_progress" probably means "building"; "done" lands at
+// "verified" so it appears in the right bucket of the new board.
+func stageFromLegacyStatus(s Status) Stage {
+	switch s {
+	case StatusPending:
+		return StageProposed
+	case StatusInProgress:
+		return StageBuilding
+	case StatusBlocked:
+		return StageBlocked
+	case StatusDone:
+		return StageVerified
+	case StatusAbandoned:
+		return StageAbandoned
+	}
+	return StageProposed
 }
 
 // apply folds an event into the snapshot. Caller must hold p.mu (or
@@ -150,6 +195,13 @@ func (p *Plan) apply(ev Event) {
 		if ev.Status != "" {
 			t.Status = ev.Status
 		}
+		if ev.Stage != "" {
+			// New-format create event carries the stage explicitly.
+			// Legacy events leave Stage empty; replay()'s backfill
+			// fills those in once the whole file has been folded.
+			t.Stage = ev.Stage
+			t.StageEnteredAt = ev.Timestamp
+		}
 		if ev.DependsOn != nil {
 			t.DependsOn = append([]string(nil), (*ev.DependsOn)...)
 		}
@@ -168,6 +220,10 @@ func (p *Plan) apply(ev Event) {
 		}
 		if ev.Status != "" {
 			t.Status = ev.Status
+		}
+		if ev.Stage != "" && ev.Stage != t.Stage {
+			t.Stage = ev.Stage
+			t.StageEnteredAt = ev.Timestamp
 		}
 		if ev.AssignedTo != nil {
 			t.AssignedTo = *ev.AssignedTo
@@ -198,6 +254,10 @@ func (p *Plan) AddTask(in NewTaskInput) (Task, error) {
 		Timestamp: now,
 		Title:     in.Title,
 		ParentID:  in.ParentID,
+		// Fresh tasks land in "proposed". Recorded in the event so
+		// replay sees it; legacy events without a stage flow through
+		// the replay-time backfill.
+		Stage: StageProposed,
 	}
 	if len(in.DependsOn) > 0 {
 		deps := append([]string(nil), in.DependsOn...)
@@ -225,7 +285,12 @@ type NewTaskInput struct {
 
 // UpdateInput is a sparse mutation; nil pointers mean "leave alone".
 type UpdateInput struct {
-	Status      Status
+	Status Status
+	// Stage moves the task to a new pipeline stage. Caller is
+	// responsible for checking CanTransition first; UpdateTask
+	// enforces the transition matrix and returns ErrInvalidStage if
+	// the move is illegal.
+	Stage       Stage
 	AssignedTo  *string
 	Notes       *string
 	DependsOn   *[]string
@@ -233,22 +298,33 @@ type UpdateInput struct {
 }
 
 // UpdateTask applies a sparse mutation. ErrTaskNotFound when the id
-// doesn't exist.
+// doesn't exist; ErrInvalidStage when in.Stage is set and the move
+// isn't allowed by the transitions matrix.
 func (p *Plan) UpdateTask(id string, in UpdateInput) (Task, error) {
 	if id == "" {
 		return Task{}, errors.New("plan: id is required")
 	}
 	p.mu.Lock()
-	_, ok := p.tasks[id]
+	existing, ok := p.tasks[id]
+	var currentStage Stage
+	if ok {
+		currentStage = existing.Stage
+	}
 	p.mu.Unlock()
 	if !ok {
 		return Task{}, ErrTaskNotFound
+	}
+	if in.Stage != "" && in.Stage != currentStage {
+		if !CanTransition(currentStage, in.Stage) {
+			return Task{}, ErrInvalidStage
+		}
 	}
 	ev := Event{
 		Op:          "update",
 		ID:          id,
 		Timestamp:   time.Now().UTC(),
 		Status:      in.Status,
+		Stage:       in.Stage,
 		AssignedTo:  in.AssignedTo,
 		DependsOn:   in.DependsOn,
 		Notes:       in.Notes,
@@ -281,6 +357,7 @@ func (p *Plan) Get(id string) (Task, bool) {
 // Filter narrows List results.
 type Filter struct {
 	Status   Status // "" = any
+	Stage    Stage  // "" = any
 	ParentID string // "" = any
 	OpenOnly bool   // skip done/abandoned
 }
@@ -296,6 +373,9 @@ func (p *Plan) List(f Filter) []Task {
 			continue
 		}
 		if f.Status != "" && t.Status != f.Status {
+			continue
+		}
+		if f.Stage != "" && t.Stage != f.Stage {
 			continue
 		}
 		if f.ParentID != "" && t.ParentID != f.ParentID {
