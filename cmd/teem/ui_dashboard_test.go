@@ -431,7 +431,7 @@ func TestSummaryIndex_RendersTilePerTeam(t *testing.T) {
 	}
 	body := w.Body.String()
 
-	// Each team has a tile that deep-links to /teams/<id>.
+	// Each team has a tile that deep-links to /teams/<slug>.
 	for _, want := range []string{
 		`href="/teams/alpha"`,
 		`href="/teams/beta"`,
@@ -466,9 +466,9 @@ func TestSummaryIndex_RendersTilePerTeam(t *testing.T) {
 	}
 }
 
-// TestTeamDetail_RendersSingleTeam verifies /teams/<id> renders the
+// TestTeamDetail_RendersSingleTeam verifies /teams/<slug> renders the
 // deep view for that team and the deep view alone. The team is keyed
-// by its stable id; the display name can still contain spaces or
+// by its slug; the display name can still contain spaces or
 // capitals without affecting routing.
 func TestTeamDetail_RendersSingleTeam(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}}
@@ -513,11 +513,11 @@ func TestTeamDetail_RendersSingleTeam(t *testing.T) {
 		t.Errorf("other team leaked into detail page: %s", body)
 	}
 
-	// Unknown id → 404.
+	// Unknown slug → 404.
 	req2 := httptest.NewRequest(http.MethodGet, "/teams/nonesuch", nil)
 	w2 := httptest.NewRecorder()
 	d.handler().ServeHTTP(w2, req2)
 	if w2.Code != http.StatusNotFound {
-		t.Errorf("unknown id should 404, got %d", w2.Code)
+		t.Errorf("unknown slug should 404, got %d", w2.Code)
 	}
 }

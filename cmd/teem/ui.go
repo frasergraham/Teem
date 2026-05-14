@@ -209,7 +209,7 @@ type dashboardEvent struct {
 }
 
 // renderDashboard composes the summary index — a tile per registered
-// team, each linking to /teams/<id> for the deep view. Designed to
+// team, each linking to /teams/<slug> for the deep view. Designed to
 // read at-a-glance across the room: counters in big bold numerals.
 func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 	d.mu.Lock()
@@ -243,7 +243,7 @@ func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 }
 
 // renderTeamPage serves the deep view for a single team at
-// /teams/<id>. The id is the canonical filesystem / routing key
+// /teams/<slug>. The slug is the canonical filesystem / routing key
 // (display name lives inside the page body). Returns 404 when no team
 // matches.
 func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID string) {
