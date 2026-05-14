@@ -252,6 +252,34 @@
 
   footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; text-align: center; }
 
+  /* "Ping leader" form sits in the team-card header row. The button
+     looks like a small accent-coloured pill so it reads as an action
+     without dominating the page. */
+  form.ping-leader { margin-left: auto; }
+  form.ping-leader button {
+    appearance: none;
+    background: var(--accent); color: white;
+    border: none; border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 12px; font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  form.ping-leader button:hover { filter: brightness(1.1); }
+
+  /* Flash banner surfaces the ping outcome on the team-detail page. */
+  .flash {
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    border: 1px solid var(--border);
+    background: var(--card);
+  }
+  .flash.pinged { border-color: var(--accent); color: var(--accent); }
+  .flash.busy   { border-color: var(--info); color: var(--info); }
+  .flash.paused { border-color: var(--warn); color: var(--warn); }
+
   /* --- Mobile (≤ 720px) ----------------------------------------
      Strategy: tables and event rows turn into stacked cards. Long
      lines wrap. Tap targets get bigger. Side-by-side header bits
@@ -421,6 +449,10 @@
     <span class="clock">{{ .NowFormatted }}</span>
   </header>
 
+  {{ if eq .Flash "pinged" }}<div class="flash pinged">Ping queued — the leader will pick it up on the next tick.</div>
+  {{ else if eq .Flash "busy" }}<div class="flash busy">A tick is already in progress; this ping was ignored.</div>
+  {{ else if eq .Flash "paused" }}<div class="flash paused">Pulse is paused — run <code>teem pulse resume</code> before pinging.</div>{{ end }}
+
   {{ with .Team }}
     <section class="team">
       <h2>
@@ -430,6 +462,9 @@
           {{ else }}<span class="pill running">pulse running</span>{{ end }}
         {{ else }}<span class="pill">pulse off</span>{{ end }}
         {{ if gt .UnreadNotes 0 }}<span class="pill notes">{{ .UnreadNotes }} note{{ if gt .UnreadNotes 1 }}s{{ end }}</span>{{ end }}
+        <form class="ping-leader" method="POST" action="/control/teams/{{ .ID }}/ping">
+          <button type="submit" title="Wake the leader immediately for one pulse tick">Ping leader</button>
+        </form>
       </h2>
       <div class="meta">
         registered {{ .RegisteredAgo }}

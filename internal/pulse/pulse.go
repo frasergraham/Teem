@@ -195,6 +195,22 @@ func (p *Pulse) TickCount() int64 { return p.tickN.Load() }
 // Interval returns the current timer cadence.
 func (p *Pulse) Interval() time.Duration { return p.cfg.Interval }
 
+// Busy peeks at the tick mutex and reports whether a tick is currently
+// executing. Useful for HTTP handlers that want a quick "already in
+// flight" response without blocking on a full tick.
+//
+// There is an inherent race: Busy may return false and a tick may
+// start before the caller acts on the result. Callers should treat
+// the answer as a UX hint, not a hard guarantee — the mutex inside
+// Tick is what actually serializes execution.
+func (p *Pulse) Busy() bool {
+	if !p.mu.TryLock() {
+		return true
+	}
+	p.mu.Unlock()
+	return false
+}
+
 // SetInterval changes the cadence. If Pulse is already running, the
 // change takes effect on the next tick wakeup.
 func (p *Pulse) SetInterval(d time.Duration) {

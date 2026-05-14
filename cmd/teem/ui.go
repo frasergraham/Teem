@@ -131,9 +131,18 @@ type teamPageSnapshot struct {
 	UptimeAgo    string
 	NowFormatted string
 	Team         dashboardTeam
+	// Flash is the optional one-shot message surfaced after a POST
+	// (e.g. the "Ping leader" button). Values: "pinged" / "busy" /
+	// "paused" — anything else is rendered verbatim, so unknown
+	// strings degrade gracefully.
+	Flash string
 }
 
 type dashboardTeam struct {
+	// ID is the canonical team id used in URLs (e.g. the ping form
+	// posts to /control/teams/<id>/ping). Name is the human-readable
+	// display label.
+	ID             string
 	Name           string
 	RegisteredAgo  string
 	Agents         []dashboardAgent
@@ -261,6 +270,7 @@ func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID s
 		UptimeAgo:    agoShort(state.StartedAt),
 		NowFormatted: time.Now().Local().Format("Mon Jan 2 15:04:05"),
 		Team:         teamSnapshot(found),
+		Flash:        flashFromQuery(r.URL.Query().Get("flash")),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -320,6 +330,19 @@ func teamTileSnapshot(rt *registeredTeam) summaryTile {
 // startOfLocalDay returns the most recent midnight in the local zone.
 // Used for the "completed today" counter so a task finished at 23:59
 // drops out at midnight.
+// flashFromQuery whitelists the ?flash= values the ping handler can
+// set, so an attacker can't inject arbitrary text into the dashboard
+// via the URL. Unknown values fall back to the empty string (no
+// flash rendered).
+func flashFromQuery(v string) string {
+	switch v {
+	case "pinged", "busy", "paused":
+		return v
+	default:
+		return ""
+	}
+}
+
 func startOfLocalDay(now time.Time) time.Time {
 	loc := now.Location()
 	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
@@ -350,7 +373,7 @@ func readDaemonStateFileSafe() daemonStateFile {
 // registry, plan, audit (last ~20 events), pulse, and notes inbox.
 // All read-only and cheap enough to do every page load.
 func teamSnapshot(rt *registeredTeam) dashboardTeam {
-	out := dashboardTeam{Name: rt.team.Name}
+	out := dashboardTeam{ID: rt.team.ID, Name: rt.team.Name}
 	out.RegisteredAgo = agoShort(rt.registered)
 
 	// Agents from the registry — hide fully-stopped agents only.

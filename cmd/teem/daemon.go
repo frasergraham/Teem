@@ -505,6 +505,13 @@ func (d *daemon) handler() http.Handler {
 			_, _ = io.WriteString(w, `{"ok":true}`)
 		case path == "/control/teams":
 			d.requireAuth(w, r, d.handleControlTeamsCollection)
+		case strings.HasPrefix(path, "/control/teams/") && strings.HasSuffix(path, "/ping"):
+			// Dashboard "Ping leader" button. Unauth on purpose: shares
+			// the dashboard's localhost-only security model (no
+			// per-user auth yet). When the daemon binds to tailnet
+			// rather than 127.0.0.1, anyone on the tailnet can hit
+			// this — same boundary as the dashboard itself.
+			d.handlePingTeam(w, r)
 		case strings.HasPrefix(path, "/control/teams/"):
 			d.requireAuth(w, r, d.handleControlTeamsItem)
 		case strings.HasPrefix(path, "/teams/"):
@@ -929,6 +936,74 @@ func (d *daemon) handlePulseControl(w http.ResponseWriter, r *http.Request, rt *
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handlePingTeam serves POST /control/teams/<id>/ping — the dashboard's
+// manual "Ping leader" button. Fires one pulse tick (trigger=manual)
+// when the team isn't paused and no tick is in flight, otherwise
+// returns a status that the dashboard turns into a flash message.
+//
+// Auth: localhost-only dashboard, no per-user auth yet. Operator
+// identity isn't carried; the audit event uses agent_id="operator" as
+// a placeholder until we have real auth.
+func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Path is /control/teams/<id>/ping.
+	rest := strings.TrimPrefix(r.URL.Path, "/control/teams/")
+	id := strings.TrimSuffix(rest, "/ping")
+	if id == "" || strings.ContainsRune(id, '/') {
+		http.Error(w, "bad team id", http.StatusBadRequest)
+		return
+	}
+	d.mu.Lock()
+	rt, ok := d.teams[id]
+	d.mu.Unlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	if rt.pulse == nil {
+		http.Error(w, "pulse not configured", http.StatusInternalServerError)
+		return
+	}
+	if rt.pulse.Paused() {
+		d.pingRespond(w, r, id, http.StatusConflict, "paused",
+			"pulse paused; `teem pulse resume` first")
+		return
+	}
+	if rt.pulse.Busy() {
+		d.pingRespond(w, r, id, http.StatusAccepted, "busy",
+			"tick already in progress")
+		return
+	}
+
+	if rt.auditSink != nil {
+		_ = rt.auditSink.Write(audit.Event{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "operator",
+			Kind:      audit.Kind("pulse_tick"),
+			Message:   "manual ping from dashboard",
+			Meta:      map[string]any{"trigger": "manual"},
+		})
+	}
+	safeGo("pulse.ping:"+rt.team.ID, func() { _ = rt.pulse.Tick(d.baseCtx, "manual") })
+	d.pingRespond(w, r, id, http.StatusOK, "pinged", "ping queued")
+}
+
+// pingRespond emits the right shape based on the request's Accept
+// header: a redirect with ?flash=<tag> for form posts (so the dashboard
+// surfaces a flash), or a plain text body for curl / fetch callers.
+func (d *daemon) pingRespond(w http.ResponseWriter, r *http.Request, teamID string, code int, flash, body string) {
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		http.Redirect(w, r, "/teams/"+teamID+"?flash="+flash, http.StatusSeeOther)
+		return
+	}
+	w.WriteHeader(code)
+	_, _ = io.WriteString(w, body)
 }
 
 func currentPulseStatus(rt *registeredTeam) pulseStatus {
