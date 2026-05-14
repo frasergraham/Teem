@@ -189,9 +189,17 @@ new workers have?".
   for short description edits; reserve `append_prompt` for multi-line
   guidance or rules.
 
-The operator can also tune these from the CLI with
-`teem prompt show|append|edit --role <role>` — show with `--raw`
-prints just the override layer.
+The operator can also tune these from the CLI with the `teem agent`
+command:
+
+- `teem agent list` — shows every archetype (including the synthetic
+  `leader`) with whether each has a prompt override or memory file.
+- `teem agent show <archetype>` — prints both the assembled prompt and
+  the memory markdown. `--prompt` or `--memory` narrows the output.
+- `teem agent update <archetype> --prompt` — opens the prompt override
+  in `$EDITOR`. `--memory` does the same for the memory markdown. The
+  two flags are mutually exclusive; pass one per invocation. With
+  neither flag, `update` defaults to `--prompt`.
 
 ## When to delegate vs. do it yourself
 

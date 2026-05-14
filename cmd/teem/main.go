@@ -51,10 +51,8 @@ func main() {
 		err = runStatus(args)
 	case "pulse":
 		err = runPulse(args)
-	case "memory":
-		err = runMemory(args)
-	case "prompt":
-		err = runPrompt(args)
+	case "agent":
+		err = runAgent(args)
 	case "version":
 		fmt.Println(versionString())
 	case "-h", "--help", "help":
@@ -81,8 +79,7 @@ Usage:
   teem chat    [--team teem.yaml] [--new-session]      register the current team with the daemon, launch Claude
   teem audit   [--agent ID] [--since RFC3339] [--limit 50] [--follow]
   teem pulse   <start|stop|pause|resume|tick|status> [--team t] [--interval 5m]
-  teem memory  <show|append|edit> --role X [--team t] [text]
-  teem prompt  <show|append|edit> [--role leader|<role>] [--team t]
+  teem agent   <list|show|update> [<archetype>] [--prompt|--memory] [--team t]
   teem version
 
 Run 'teem <subcommand> -h' for flags.

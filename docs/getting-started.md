@@ -276,10 +276,11 @@ teem audit --agent worker-1 --follow
 teem pulse status                  # autonomy state for this team
 teem pulse pause                   # halt the autonomous loop
 teem pulse tick                    # force one autonomous turn now
-teem prompt show --role leader     # see the assembled leader prompt
-teem prompt show --role worker --raw   # see only the operator override
-teem prompt append --role worker "Always run go vet before commit"
-teem prompt edit --role reviewer   # opens $EDITOR on the override file
+teem agent list                    # archetypes incl. leader, with override + memory flags
+teem agent show leader             # assembled prompt + memory for the leader
+teem agent show worker --prompt    # just the prompt for the worker archetype
+teem agent update reviewer --prompt    # opens $EDITOR on the reviewer prompt override
+teem agent update worker --memory      # opens $EDITOR on the worker memory markdown
 teem stop                          # shut down the daemon
 ```
 
@@ -288,7 +289,7 @@ teem stop                          # shut down the daemon
 The leader and each archetype get a system prompt assembled from two
 layers: the team YAML and an operator-authored override on disk at
 `~/.teem/state/<team-slug>/prompt-overrides/<role>.md`. Use `teem
-prompt` to inspect or extend either layer without editing YAML or
+agent` to inspect or update either layer without editing YAML or
 restarting the daemon. Same data is available to the leader at runtime
 via the `read_prompt` / `append_prompt` MCP tools.
 
