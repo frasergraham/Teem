@@ -189,3 +189,146 @@ func TestPlan_TolerantOfGarbage(t *testing.T) {
 		t.Errorf("status = %q want done (replay should skip garbage line, not abort)", got.Status)
 	}
 }
+
+// TestPlan_NormalizesStatusStagePair locks in the rule that we never
+// persist a contradictory (Stage, Status) — the bug a user hit where
+// a task showed stage=building / status=shelved.
+func TestPlan_NormalizesStatusStagePair(t *testing.T) {
+	cases := []struct {
+		name      string
+		fromStage Stage
+		input     UpdateInput
+		wantStage Stage
+		wantStat  Status
+	}{
+		{
+			name:      "status=shelved on a building task snaps stage to shelved",
+			fromStage: StageBuilding,
+			input:     UpdateInput{Status: StatusShelved},
+			wantStage: StageShelved,
+			wantStat:  StatusShelved,
+		},
+		{
+			name:      "status=done on a proposed task jumps directly to verified",
+			fromStage: StageProposed,
+			input:     UpdateInput{Status: StatusDone},
+			wantStage: StageVerified,
+			wantStat:  StatusDone,
+		},
+		{
+			name:      "status=in_progress on a proposed task advances stage to building",
+			fromStage: StageProposed,
+			input:     UpdateInput{Status: StatusInProgress},
+			wantStage: StageBuilding,
+			wantStat:  StatusInProgress,
+		},
+		{
+			name:      "stage move alone derives canonical status",
+			fromStage: StageBuilding,
+			input:     UpdateInput{Stage: StageInReview},
+			wantStage: StageInReview,
+			wantStat:  StatusInProgress,
+		},
+		{
+			name:      "contradictory pair: terminal status wins",
+			fromStage: StageBuilding,
+			input:     UpdateInput{Stage: StageBuilding, Status: StatusShelved},
+			wantStage: StageShelved,
+			wantStat:  StatusShelved,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := openTest(t)
+			defer p.Close()
+			task, _ := p.AddTask(NewTaskInput{Title: tc.name})
+			if tc.fromStage != StageProposed {
+				if _, err := p.UpdateTask(task.ID, UpdateInput{Stage: tc.fromStage}); err != nil {
+					t.Fatalf("seed stage %q: %v", tc.fromStage, err)
+				}
+			}
+			got, err := p.UpdateTask(task.ID, tc.input)
+			if err != nil {
+				t.Fatalf("UpdateTask: %v", err)
+			}
+			if got.Stage != tc.wantStage {
+				t.Errorf("stage = %q want %q", got.Stage, tc.wantStage)
+			}
+			if got.Status != tc.wantStat {
+				t.Errorf("status = %q want %q", got.Status, tc.wantStat)
+			}
+		})
+	}
+}
+
+func TestPlan_DeleteRemovesFromSnapshotAndReplay(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.jsonl")
+	p, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep, _ := p.AddTask(NewTaskInput{Title: "stays"})
+	doomed, _ := p.AddTask(NewTaskInput{Title: "delete me"})
+
+	if err := p.DeleteTask(doomed.ID); err != nil {
+		t.Fatalf("DeleteTask: %v", err)
+	}
+	if _, ok := p.Get(doomed.ID); ok {
+		t.Error("deleted task still present in snapshot")
+	}
+	if _, ok := p.Get(keep.ID); !ok {
+		t.Error("DeleteTask must not affect other tasks")
+	}
+	// List should also drop the deleted task.
+	all := p.List(Filter{})
+	if len(all) != 1 || all[0].ID != keep.ID {
+		t.Errorf("List after delete: %+v", all)
+	}
+	// Deleting again returns ErrTaskNotFound, not a silent success.
+	if err := p.DeleteTask(doomed.ID); err != ErrTaskNotFound {
+		t.Errorf("double-delete: want ErrTaskNotFound, got %v", err)
+	}
+	_ = p.Close()
+
+	// Replay must reproduce the deletion.
+	p2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.Close()
+	if _, ok := p2.Get(doomed.ID); ok {
+		t.Error("deleted task came back after replay — tombstone not honored")
+	}
+	if _, ok := p2.Get(keep.ID); !ok {
+		t.Error("non-deleted task missing after replay")
+	}
+}
+
+// TestPlan_LegacyContradictionHealsOnReplay covers the exact scenario
+// the operator hit: a JSONL on disk with stage=building, status=shelved
+// (produced by an older pre-normalize daemon). Open() should heal it.
+func TestPlan_LegacyContradictionHealsOnReplay(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.jsonl")
+	body := `{"op":"create","id":"t-old","title":"orphan","stage":"building","status":"in_progress","ts":"2026-01-01T00:00:00Z"}` + "\n" +
+		`{"op":"update","id":"t-old","status":"shelved","ts":"2026-01-01T00:00:01Z"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	got, ok := p.Get("t-old")
+	if !ok {
+		t.Fatal("task missing after replay")
+	}
+	if got.Stage != StageShelved {
+		t.Errorf("legacy contradiction not healed: stage=%q want shelved", got.Stage)
+	}
+	if got.Status != StatusShelved {
+		t.Errorf("status=%q want shelved", got.Status)
+	}
+}

@@ -34,8 +34,16 @@ The `teem` MCP server exposes these tools.
   the team is going to work on. Returns a `task_id` like `t-3b9f`.
 - `update_task(id, status?, assigned_to?, notes?, depends_on?,
   add_evidence?)` — mark progress. Statuses: pending, in_progress,
-  blocked, done, abandoned. `add_evidence` appends job_ids. *Stage*
-  changes go through `set_task_stage` (below), not here.
+  blocked, shelved, done, abandoned. `add_evidence` appends job_ids.
+  Setting a terminal status (done/shelved/abandoned/blocked) snaps the
+  task's stage to match server-side, so you don't end up with a task
+  in `building` that's also `shelved`. Forward stage moves still go
+  through `set_task_stage` — it enforces the transitions matrix.
+- `delete_task(id)` — permanently remove a typo, duplicate, or stub
+  task that should never have been recorded. For work the team
+  decided not to do, prefer `status=abandoned` (kept on the dashboard
+  for context). Delete is the escape hatch for noise you don't want to
+  scroll past.
 - `set_task_stage(task_id, stage)` — move a task along the pipeline:
   `proposed → specced → building → in_review → merging → verified`,
   plus `blocked` and `abandoned`. The transitions matrix rejects

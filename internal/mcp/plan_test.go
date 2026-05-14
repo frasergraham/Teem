@@ -152,6 +152,38 @@ func TestLinkTaskToJob(t *testing.T) {
 	}
 }
 
+func TestDeleteTask(t *testing.T) {
+	srv, p := newTestServerWithPlan(t)
+	task, _ := p.AddTask(plan.NewTaskInput{Title: "doomed"})
+	keep, _ := p.AddTask(plan.NewTaskInput{Title: "stays"})
+
+	req := mcpgo.CallToolRequest{}
+	req.Params.Name = "delete_task"
+	req.Params.Arguments = map[string]any{"id": task.ID}
+	res, err := srv.handleDeleteTask(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("delete_task error: %s", textOf(t, res))
+	}
+	if _, ok := p.Get(task.ID); ok {
+		t.Error("task still present after delete_task")
+	}
+	if _, ok := p.Get(keep.ID); !ok {
+		t.Error("delete_task removed an unrelated task")
+	}
+
+	// Re-deleting the same id should surface a clear not-found error.
+	res2, err := srv.handleDeleteTask(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res2.IsError {
+		t.Error("second delete should return an error result")
+	}
+}
+
 func textOf(t *testing.T, r *mcpgo.CallToolResult) string {
 	t.Helper()
 	if r == nil || len(r.Content) == 0 {

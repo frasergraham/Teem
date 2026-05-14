@@ -413,6 +413,23 @@ func (s *Server) handleUpdateTask(_ context.Context, req mcpgo.CallToolRequest) 
 	return mcpgo.NewToolResultText(string(body)), nil
 }
 
+func (s *Server) handleDeleteTask(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured"), nil
+	}
+	id, err := req.RequireString("id")
+	if err != nil {
+		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	if err := s.plan.DeleteTask(id); err != nil {
+		if errors.Is(err, plan.ErrTaskNotFound) {
+			return mcpgo.NewToolResultErrorf("task %q not found", id), nil
+		}
+		return mcpgo.NewToolResultErrorFromErr("delete_task", err), nil
+	}
+	return mcpgo.NewToolResultText("deleted " + id), nil
+}
+
 func (s *Server) handleListTasks(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 	if s.plan == nil {
 		return mcpgo.NewToolResultError("plan store is not configured"), nil

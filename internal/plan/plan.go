@@ -156,13 +156,20 @@ func (p *Plan) replay() error {
 	// empty Stage. Map their Status to the closest stage so the new
 	// dashboard view doesn't show a column of "—" for legacy plans.
 	for _, t := range p.tasks {
-		if t.Stage != "" {
-			continue
+		if t.Stage == "" {
+			t.Stage = stageFromLegacyStatus(t.Status)
+			if t.StageEnteredAt.IsZero() {
+				t.StageEnteredAt = t.UpdatedAt
+			}
 		}
-		t.Stage = stageFromLegacyStatus(t.Status)
-		if t.StageEnteredAt.IsZero() {
-			t.StageEnteredAt = t.UpdatedAt
-		}
+		// Snap any (stage, status) pair we replayed off disk to a
+		// canonical combination. Older log lines may have written
+		// status=shelved without touching stage, or vice versa — replay
+		// silently reconciles those rather than surfacing the
+		// inconsistency. Brand-new writes go through UpdateTask which
+		// normalises before persisting, so this is purely a heal-on-load
+		// path for legacy data.
+		t.Stage, t.Status = normalizePair(t.Stage, t.Status)
 	}
 	return nil
 }
@@ -187,6 +194,70 @@ func stageFromLegacyStatus(s Status) Stage {
 		return StageShelved
 	}
 	return StageProposed
+}
+
+// isTerminalStatus reports whether s is one of the operator-override
+// values that should bypass the normal stage transition matrix. The
+// leader is allowed to mark any task done/shelved/abandoned/blocked
+// regardless of where it sits in the pipeline.
+func isTerminalStatus(s Status) bool {
+	switch s {
+	case StatusDone, StatusShelved, StatusAbandoned, StatusBlocked:
+		return true
+	}
+	return false
+}
+
+// statusForStage returns the Status that canonically pairs with a
+// Stage. Stage is the granular pipeline cursor; Status is the
+// coarse-grained open/closed/paused classification derived from it.
+// Keeping a single mapping function here means UpdateTask and replay
+// can't disagree about what "in_review" implies for "open".
+func statusForStage(st Stage) Status {
+	switch st {
+	case StageProposed, StageSpecced:
+		return StatusPending
+	case StageBuilding, StageInReview, StageMerging:
+		return StatusInProgress
+	case StageBlocked:
+		return StatusBlocked
+	case StageVerified:
+		return StatusDone
+	case StageShelved:
+		return StatusShelved
+	case StageAbandoned:
+		return StatusAbandoned
+	}
+	return StatusPending
+}
+
+// normalizePair reconciles a (Stage, Status) pair so a task can never
+// land in a contradictory state like Stage=building + Status=shelved.
+//
+// Terminal/paused Status values (shelved/done/abandoned/blocked) carry
+// strong operator intent ("I'm pausing this") and override Stage —
+// they pin the task to the matching terminal stage.
+//
+// For non-terminal Status: if the current Stage already maps to that
+// Status, keep the Stage (it's the more granular cursor). Otherwise
+// snap to the canonical Stage for that Status — so Status=in_progress
+// on a Proposed task advances to Building rather than leaving Stage
+// behind.
+func normalizePair(st Stage, status Status) (Stage, Status) {
+	switch status {
+	case StatusShelved:
+		return StageShelved, StatusShelved
+	case StatusDone:
+		return StageVerified, StatusDone
+	case StatusAbandoned:
+		return StageAbandoned, StatusAbandoned
+	case StatusBlocked:
+		return StageBlocked, StatusBlocked
+	}
+	if st != "" && statusForStage(st) == status {
+		return st, status
+	}
+	return stageFromLegacyStatus(status), status
 }
 
 // apply folds an event into the snapshot. Caller must hold p.mu (or
@@ -251,6 +322,20 @@ func (p *Plan) apply(ev Event) {
 			t.Evidence = append(t.Evidence, ev.AddEvidence...)
 		}
 		t.UpdatedAt = ev.Timestamp
+	case "delete":
+		// Tombstone. The event stays in the JSONL forever so replay
+		// reproduces the deletion deterministically; the in-memory
+		// snapshot drops the task and its slot in `order`.
+		if _, ok := p.tasks[ev.ID]; !ok {
+			return
+		}
+		delete(p.tasks, ev.ID)
+		for i, id := range p.order {
+			if id == ev.ID {
+				p.order = append(p.order[:i], p.order[i+1:]...)
+				break
+			}
+		}
 	}
 }
 
@@ -320,24 +405,67 @@ func (p *Plan) UpdateTask(id string, in UpdateInput) (Task, error) {
 	p.mu.Lock()
 	existing, ok := p.tasks[id]
 	var currentStage Stage
+	var currentStatus Status
 	if ok {
 		currentStage = existing.Stage
+		currentStatus = existing.Status
 	}
 	p.mu.Unlock()
 	if !ok {
 		return Task{}, ErrTaskNotFound
 	}
-	if in.Stage != "" && in.Stage != currentStage {
-		if !CanTransition(currentStage, in.Stage) {
+	// Resolve the *effective* (stage, status) the caller is asking for.
+	// We treat which field was explicitly set as a signal of intent —
+	// otherwise a status-only mutation with a stale Stage would silently
+	// no-op, and a stage move on a terminal-Status task would snap back
+	// to where it was.
+	//
+	//   stage set + status set     → normalise the pair (terminal status wins)
+	//   stage set, status empty    → stage drives; status snaps canonical
+	//   stage empty, status set    → status drives; terminal snaps stage,
+	//                                 otherwise keep current stage + canonical status
+	//   neither set                → orthogonal update (notes/assignee/etc),
+	//                                 leave (stage,status) alone
+	//
+	// This closes the "tasks in weird states" hole the operator hit:
+	// status=shelved on a building task now snaps the task to shelved
+	// instead of leaving Stage=Building behind.
+	effStage, effStatus := currentStage, currentStatus
+	switch {
+	case in.Stage != "" && in.Status != "":
+		effStage, effStatus = normalizePair(in.Stage, in.Status)
+	case in.Stage != "":
+		effStage = in.Stage
+		effStatus = statusForStage(in.Stage)
+	case in.Status != "":
+		effStage, effStatus = normalizePair(currentStage, in.Status)
+	}
+
+	// Only enforce the transition matrix on the *stage* the caller
+	// actually moved to (either via Stage= or via a Status= that
+	// implies a stage move). If neither moved, skip the check so
+	// orthogonal updates (notes, assignee, evidence) don't trip it.
+	//
+	// Terminal/paused operator overrides (status=done/shelved/abandoned/
+	// blocked) bypass the matrix entirely — the leader is allowed to
+	// pause or close a task from any state, regardless of the normal
+	// forward pipeline graph.
+	terminalOverride := isTerminalStatus(in.Status)
+	if effStage != currentStage && !terminalOverride {
+		if !CanTransition(currentStage, effStage) {
 			return Task{}, ErrInvalidStage
 		}
 	}
+
 	ev := Event{
-		Op:          "update",
-		ID:          id,
-		Timestamp:   time.Now().UTC(),
-		Status:      in.Status,
-		Stage:       in.Stage,
+		Op:        "update",
+		ID:        id,
+		Timestamp: time.Now().UTC(),
+		// Write the *normalised* pair, not the raw caller input —
+		// otherwise a status-only mutation would leave Stage stale on
+		// disk and the next replay would see the same contradiction.
+		Status:      effStatus,
+		Stage:       effStage,
 		AssignedTo:  in.AssignedTo,
 		DependsOn:   in.DependsOn,
 		Notes:       in.Notes,
@@ -354,6 +482,34 @@ func (p *Plan) UpdateTask(id string, in UpdateInput) (Task, error) {
 // UpdateTask with AddEvidence.
 func (p *Plan) LinkJob(taskID, jobID string) (Task, error) {
 	return p.UpdateTask(taskID, UpdateInput{AddEvidence: []string{jobID}})
+}
+
+// DeleteTask removes a task from the snapshot and writes a tombstone
+// event to the JSONL so future replays reproduce the deletion. The
+// tombstone is small (id + ts) and stays in the log forever — we never
+// rewrite history. Returns ErrTaskNotFound when the id isn't present.
+//
+// Why allow deletion at all on an event-sourced store? Because the
+// leader sometimes creates tasks that turn out to be noise — a typo, a
+// duplicate of an existing task, or a stub that should never have been
+// proposed. Shelving keeps them visible; abandoning leaves them in the
+// "recently completed" rail. Delete is the escape hatch for tasks the
+// operator wants to forget about entirely.
+func (p *Plan) DeleteTask(id string) error {
+	if id == "" {
+		return errors.New("plan: id is required")
+	}
+	p.mu.Lock()
+	_, ok := p.tasks[id]
+	p.mu.Unlock()
+	if !ok {
+		return ErrTaskNotFound
+	}
+	return p.write(Event{
+		Op:        "delete",
+		ID:        id,
+		Timestamp: time.Now().UTC(),
+	})
 }
 
 // Get returns the task with the given id and whether it existed.

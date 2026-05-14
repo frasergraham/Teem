@@ -273,6 +273,13 @@ func (s *Server) registerTools() {
 		s.handleUpdateTask,
 	)
 	s.core.AddTool(
+		mcpgo.NewTool("delete_task",
+			mcpgo.WithDescription("Permanently remove a task from the plan. Use for typos, duplicates, or stub tasks that should never have been recorded — anything you'd otherwise have to look at and ignore. For work the team explicitly decided not to do, use status='abandoned' (kept visible in the recently-completed rail); for work paused mid-flight, use status='shelved'. The tombstone is appended to the log; replays reproduce the deletion."),
+			mcpgo.WithString("id", mcpgo.Required(), mcpgo.Description("Task id to delete.")),
+		),
+		s.handleDeleteTask,
+	)
+	s.core.AddTool(
 		mcpgo.NewTool("list_tasks",
 			mcpgo.WithDescription("List tasks in the plan, optionally filtered. Returns the materialised view (title, status, stage, stage_entered_at, assigned_to, depends_on, evidence, timestamps)."),
 			mcpgo.WithString("status", mcpgo.Description("Restrict to one status.")),
