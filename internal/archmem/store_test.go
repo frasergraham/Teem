@@ -291,3 +291,49 @@ func TestSummarizerPreservesConcurrentAppends(t *testing.T) {
 		t.Errorf("rewrite dropped a concurrent append; have job_ids=%v", jobs)
 	}
 }
+
+// TestSummarizer_NilClientIsTolerated locks in the fix for a daemon
+// crash: when the LLM client is genuinely nil (key unset), summarizeRole
+// must skip the LLM call and not panic. Earlier we passed a typed-nil
+// *AnthropicClient via interface, which made `s.Client != nil` true and
+// triggered a nil-deref on the next call.
+func TestSummarizer_NilClientIsTolerated(t *testing.T) {
+	s := newStore(t, "worker")
+	now := time.Now().UTC()
+	_ = s.AppendEntry("worker", Entry{Timestamp: now.Add(-1 * time.Hour), AgentID: "worker-1", JobID: "a", Status: "done", Summary: "recent"})
+	sm := &Summarizer{
+		Store:           s,
+		Client:          nil,
+		Roles:           func() []string { return []string{"worker"} },
+		RetentionWindow: 7 * 24 * time.Hour,
+	}
+	if err := sm.summarizeRole(context.Background(), "worker"); err != nil {
+		t.Fatalf("summarize with nil client should be a no-op, got: %v", err)
+	}
+}
+
+// panicLLM unconditionally panics — proves the per-role recover keeps
+// the summarizer loop alive even if a client misbehaves catastrophically.
+type panicLLM struct{}
+
+func (panicLLM) Complete(context.Context, llm.CompletionRequest) (llm.CompletionResponse, error) {
+	panic("LLM exploded")
+}
+func (panicLLM) Stream(context.Context, llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
+	panic("LLM exploded")
+}
+
+func TestSummarizer_RecoversFromClientPanic(t *testing.T) {
+	s := newStore(t, "worker")
+	now := time.Now().UTC()
+	_ = s.AppendEntry("worker", Entry{Timestamp: now.Add(-1 * time.Hour), AgentID: "worker-1", JobID: "a", Status: "done", Summary: "x"})
+	sm := &Summarizer{
+		Store:           s,
+		Client:          panicLLM{},
+		Roles:           func() []string { return []string{"worker"} },
+		RetentionWindow: 7 * 24 * time.Hour,
+	}
+	// runOnce must NOT propagate the panic. If it did, this test would
+	// crash the test binary instead of failing cleanly.
+	sm.runOnce(context.Background())
+}

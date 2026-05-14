@@ -407,7 +407,7 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 	if retCfg.Enabled() {
 		fmt.Fprintf(os.Stderr, "[teemd] retention: stopped_agent_ttl=%s transcript_ttl=%s sweep=%s\n",
 			retCfg.StoppedAgentTTL, retCfg.TranscriptTTL, retentionSweepInterval(retCfg))
-		go d.runRetentionGC(retCfg)
+		safeGo("retention.gc", func() { d.runRetentionGC(retCfg) })
 	}
 
 	serverErr := make(chan error, 1)
@@ -603,14 +603,15 @@ func (d *daemon) restoreTeams() {
 		fmt.Fprintf(os.Stderr, "[teemd] restored team %q (pulse %s)\n", t.Name, pulseStateLabel(rt))
 		// Reconcile workers and persistent agents asynchronously so a
 		// slow Fargate API call doesn't block boot.
-		go func(rt *registeredTeam) {
-			if n := rt.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
-				fmt.Fprintf(os.Stderr, "[teemd] %s: reattached %d local worker(s)\n", rt.team.Name, n)
+		rtRef := rt
+		safeGo("reconcile.restored:"+rtRef.team.Name, func() {
+			if n := rtRef.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: reattached %d local worker(s)\n", rtRef.team.Name, n)
 			}
-			if n := rt.spawner.Reconcile(context.Background()); n > 0 {
-				fmt.Fprintf(os.Stderr, "[teemd] %s: reconciled %d persistent agent(s)\n", rt.team.Name, n)
+			if n := rtRef.spawner.Reconcile(context.Background()); n > 0 {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: reconciled %d persistent agent(s)\n", rtRef.team.Name, n)
 			}
-		}(rt)
+		})
 	}
 	d.persistStateSnapshot()
 }
@@ -752,7 +753,7 @@ func (d *daemon) handlePulseControl(w http.ResponseWriter, r *http.Request, rt *
 			// Synchronous one-off tick — useful for `teem pulse tick`
 			// and for testing. Runs on a background context so the
 			// HTTP request returning doesn't cancel the tick.
-			go func() { _ = rt.pulse.Tick(d.baseCtx, "manual") }()
+			safeGo("pulse.tick:"+rt.team.Name, func() { _ = rt.pulse.Tick(d.baseCtx, "manual") })
 		default:
 			http.Error(w, "unknown action: "+cmd.Action, http.StatusBadRequest)
 			return
@@ -853,14 +854,14 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 	//    sweep stale.
 	// 2. Persistent agents from the team YAML (tailnet-hosted; either
 	//    operator-managed local or Fargate).
-	go func() {
+	safeGo("reconcile.registered:"+t.Name, func() {
 		if n := rt.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
 			fmt.Fprintf(os.Stderr, "[teemd] reattached %d local worker(s) for %s\n", n, t.Name)
 		}
 		if n := rt.spawner.Reconcile(context.Background()); n > 0 {
 			fmt.Fprintf(os.Stderr, "[teemd] reconciled %d persistent agent(s) for %s\n", n, t.Name)
 		}
-	}()
+	})
 
 	writeJSON(w, http.StatusCreated, registerResponse{
 		Team:     t.Name,
@@ -1139,13 +1140,20 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// digest needs the LLM; appends still happen so the file isn't
 	// silently empty.
 	archMemCtx, archMemCancel := context.WithCancel(d.baseCtx)
-	llmClient, llmErr := llm.NewAnthropic("")
-	if llmErr != nil {
-		fmt.Fprintf(os.Stderr, "[archmem] LLM unavailable, digest will be skipped: %v\n", llmErr)
+	// Important: NewAnthropic returns a *typed* nil when the key is unset.
+	// Assigning that directly to llm.Client (interface) yields a non-nil
+	// interface holding a nil pointer — `s.Client != nil` then passes and
+	// any method call panics. Keep llm.Client nil unless construction
+	// actually succeeded.
+	var sumClient llm.Client
+	if c, err := llm.NewAnthropic(""); err == nil {
+		sumClient = c
+	} else {
+		fmt.Fprintf(os.Stderr, "[archmem] LLM unavailable, digest will be skipped: %v\n", err)
 	}
-	go (&archmem.Summarizer{
+	summarizer := &archmem.Summarizer{
 		Store:  archMemStore,
-		Client: llmClient,
+		Client: sumClient,
 		Roles: func() []string {
 			archs := t.SnapshotArchetypes()
 			roles := make([]string, 0, len(archs))
@@ -1154,7 +1162,8 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 			}
 			return roles
 		},
-	}).Run(archMemCtx)
+	}
+	safeGo("archmem.summarizer:"+t.Name, func() { _ = summarizer.Run(archMemCtx) })
 
 	return &registeredTeam{
 		team:      t,

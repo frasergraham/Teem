@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -65,16 +66,27 @@ func (s *Summarizer) Run(ctx context.Context) error {
 }
 
 // runOnce summarises every current role. Errors are logged and not
-// fatal — the next tick retries.
+// fatal — the next tick retries. Each role is wrapped in a recover so
+// a panic on one role (e.g. an LLM client misbehaving) does not kill
+// the summarizer goroutine — the next tick still happens.
 func (s *Summarizer) runOnce(ctx context.Context) {
 	roles := []string{}
 	if s.Roles != nil {
 		roles = s.Roles()
 	}
 	for _, role := range roles {
-		if err := s.summarizeRole(ctx, role); err != nil {
-			fmt.Fprintf(os.Stderr, "%s summarize role %q: %v\n", s.LogPrefix, role, err)
+		s.runRoleSafely(ctx, role)
+	}
+}
+
+func (s *Summarizer) runRoleSafely(ctx context.Context, role string) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "%s PANIC summarising role %q: %v\n%s\n", s.LogPrefix, role, r, debug.Stack())
 		}
+	}()
+	if err := s.summarizeRole(ctx, role); err != nil {
+		fmt.Fprintf(os.Stderr, "%s summarize role %q: %v\n", s.LogPrefix, role, err)
 	}
 }
 
