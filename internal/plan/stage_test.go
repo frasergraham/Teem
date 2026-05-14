@@ -31,6 +31,30 @@ func TestCanTransition_RejectsUnknownStage(t *testing.T) {
 	}
 }
 
+func TestStatusShelved_IsNeitherOpenNorDone(t *testing.T) {
+	if StatusShelved.IsOpen() {
+		t.Error("shelved should not be open — it's intentionally paused")
+	}
+	if !StatusShelved.IsShelved() {
+		t.Error("StatusShelved.IsShelved() must return true")
+	}
+}
+
+func TestCanTransition_ShelvedRoundTrip(t *testing.T) {
+	// Any active stage should be able to shelve.
+	for _, from := range []Stage{StageProposed, StageSpecced, StageBuilding, StageInReview, StageMerging} {
+		if !CanTransition(from, StageShelved) {
+			t.Errorf("%q → shelved should be allowed (operator pause)", from)
+		}
+	}
+	// And come back to any active stage from shelved.
+	for _, to := range []Stage{StageProposed, StageSpecced, StageBuilding, StageInReview} {
+		if !CanTransition(StageShelved, to) {
+			t.Errorf("shelved → %q should be allowed (operator resumes)", to)
+		}
+	}
+}
+
 func TestUpdateTask_RejectsInvalidStageTransition(t *testing.T) {
 	p := openTest(t)
 	defer p.Close()

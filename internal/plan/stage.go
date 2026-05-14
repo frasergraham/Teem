@@ -16,6 +16,10 @@ const (
 	StageVerified  Stage = "verified"
 	StageBlocked   Stage = "blocked"
 	StageAbandoned Stage = "abandoned"
+	// StageShelved pairs with StatusShelved: an explicit "paused for
+	// later" pipeline cell, distinct from blocked (stuck on something)
+	// or abandoned (won't do).
+	StageShelved Stage = "shelved"
 )
 
 // AllStages enumerates the canonical stages for UI rendering and
@@ -29,6 +33,7 @@ var AllStages = []Stage{
 	StageMerging,
 	StageVerified,
 	StageBlocked,
+	StageShelved,
 	StageAbandoned,
 }
 
@@ -52,24 +57,28 @@ var allowedTransitions = map[Stage]map[Stage]bool{
 		StageSpecced:   true,
 		StageBuilding:  true,
 		StageBlocked:   true,
+		StageShelved:   true,
 		StageAbandoned: true,
 	},
 	StageSpecced: {
 		StageProposed:  true,
 		StageBuilding:  true,
 		StageBlocked:   true,
+		StageShelved:   true,
 		StageAbandoned: true,
 	},
 	StageBuilding: {
 		StageSpecced:   true,
 		StageInReview:  true,
 		StageBlocked:   true,
+		StageShelved:   true,
 		StageAbandoned: true,
 	},
 	StageInReview: {
 		StageBuilding:  true,
 		StageMerging:   true,
 		StageBlocked:   true,
+		StageShelved:   true,
 		StageAbandoned: true,
 	},
 	StageMerging: {
@@ -77,6 +86,7 @@ var allowedTransitions = map[Stage]map[Stage]bool{
 		StageBuilding:  true,
 		StageVerified:  true,
 		StageBlocked:   true,
+		StageShelved:   true,
 		StageAbandoned: true,
 	},
 	StageVerified: {
@@ -91,6 +101,16 @@ var allowedTransitions = map[Stage]map[Stage]bool{
 		StageBuilding:  true,
 		StageInReview:  true,
 		StageMerging:   true,
+		StageShelved:   true,
+		StageAbandoned: true,
+	},
+	StageShelved: {
+		// Coming off the shelf — operator picks where to resume.
+		StageProposed:  true,
+		StageSpecced:   true,
+		StageBuilding:  true,
+		StageInReview:  true,
+		StageBlocked:   true,
 		StageAbandoned: true,
 	},
 	StageAbandoned: {
