@@ -64,7 +64,7 @@ func TestSpawnInjectsArchetypeMemory(t *testing.T) {
 		},
 	})
 
-	id, err := sp.SpawnByRole(context.Background(), "worker")
+	id, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestSpawnWithoutArchetypeMemoryHook(t *testing.T) {
 	reg := mcpsrv.NewRegistry()
 	sp := NewSpawner(context.Background(), tm, bs, reg, Config{})
 
-	id, err := sp.SpawnByRole(context.Background(), "worker")
+	id, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

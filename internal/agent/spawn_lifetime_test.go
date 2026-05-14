@@ -72,7 +72,7 @@ func TestSpawnAndAssign_WorkerOutlivesRequest(t *testing.T) {
 	// cancel immediately after spawn returns — this is what MCP does
 	// in practice.
 	reqCtx, cancelReq := context.WithCancel(context.Background())
-	id, err := sp.SpawnByRole(reqCtx, "worker")
+	id, err := sp.Spawn(reqCtx, "worker", "")
 	if err != nil {
 		t.Fatalf("SpawnByRole: %v", err)
 	}

@@ -64,7 +64,7 @@ func TestDrain_BlocksUntilJobsFinish(t *testing.T) {
 		AuditSink: sink,
 		InFlight:  ifl,
 	})
-	if _, err := sp.SpawnByRole(context.Background(), "worker"); err != nil {
+	if _, err := sp.Spawn(context.Background(), "worker", ""); err != nil {
 		t.Fatal(err)
 	}
 

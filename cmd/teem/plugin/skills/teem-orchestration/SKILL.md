@@ -109,9 +109,26 @@ overhead:
   `agent.be-1.log`). Lower-level than audit; use audit first.
 
 **Spawning and assigning work:**
-- `spawn_agent(role)` — provision a worker for a role from the roster.
-  Returns its `agent_id`. Cheap for local agents; takes ~30–60s for
-  fargate cold starts (state will be `provisioning` until ready).
+- `spawn_agent(role, name?)` — provision a worker for a role from the
+  roster. Returns its `agent_id`. Cheap for local agents; takes
+  ~30–60s for fargate cold starts (state will be `provisioning`
+  until ready). Pass `name` to bring a worker back from a prior
+  project with their history attached: the same `agent_id` is
+  reused, the worktree branch `teem/<name>` is reused, and the
+  worker's roster entry retains its `first_seen` and `source`. If
+  a worker with that name is already running this call is
+  idempotent. A name that's already a `reviewer` cannot be
+  re-bound as a `worker` (and vice versa). Example:
+  `spawn_agent(role="reviewer", name="bob")` brings back reviewer
+  `bob` with the same branch they were last working on, or
+  registers `bob` fresh if no such entry exists. Call
+  `list_roster` first to see who's available.
+- `list_roster(role?)` — return the persistent roster of named
+  workers for this team. Use before `spawn_agent` to pick a
+  previously-used name (reincarnation) or to see what's taken.
+  Each entry: `{name, role, first_seen, last_seen, in_use,
+  source}` where `source` is `wordlist` (allocator-picked),
+  `named` (you supplied it), or `legacy` (migrated pre-T9 id).
 - `assign_job(agent_id, prompt, context?)` — hand a job to a worker.
   Returns a `job_id` immediately; the job runs in the worker's own
   Claude Code process.

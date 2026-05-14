@@ -36,7 +36,7 @@ func TestSpawnByRole_GeneratesArchetypeIDs(t *testing.T) {
 	}
 	sp := archetypeTestSpawner(t, tm)
 
-	id1, err := sp.SpawnByRole(context.Background(), "worker")
+	id1, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn 1: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestSpawnByRole_GeneratesArchetypeIDs(t *testing.T) {
 	// next assignment. (The Worker is started inside SpawnByRole.)
 	swapExecutor(t, sp, id1)
 
-	id2, err := sp.SpawnByRole(context.Background(), "worker")
+	id2, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn 2: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestSpawnByRole_GeneratesArchetypeIDs(t *testing.T) {
 	}
 	swapExecutor(t, sp, id2)
 
-	id3, err := sp.SpawnByRole(context.Background(), "worker")
+	id3, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn 3: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestSpawnByRole_GeneratesArchetypeIDs(t *testing.T) {
 	swapExecutor(t, sp, id3)
 
 	// Fourth spawn should refuse — at capacity.
-	_, err = sp.SpawnByRole(context.Background(), "worker")
+	_, err = sp.Spawn(context.Background(), "worker", "")
 	if err == nil || !strings.Contains(err.Error(), "capacity") {
 		t.Errorf("expected capacity error, got: %v", err)
 	}
@@ -82,9 +82,9 @@ func TestSpawnByRole_MonotonicAfterStop(t *testing.T) {
 	}
 	sp := archetypeTestSpawner(t, tm)
 
-	id1, _ := sp.SpawnByRole(context.Background(), "worker")
+	id1, _ := sp.Spawn(context.Background(), "worker", "")
 	swapExecutor(t, sp, id1)
-	id2, _ := sp.SpawnByRole(context.Background(), "worker")
+	id2, _ := sp.Spawn(context.Background(), "worker", "")
 	swapExecutor(t, sp, id2)
 
 	// Stopping the first worker releases its name back to the pool,
@@ -96,7 +96,7 @@ func TestSpawnByRole_MonotonicAfterStop(t *testing.T) {
 		t.Fatalf("stop %s: %v", id1, err)
 	}
 
-	id3, err := sp.SpawnByRole(context.Background(), "worker")
+	id3, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn after stop: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestSpawnByRole_UnknownRole(t *testing.T) {
 		Archetypes: []team.ArchetypeSpec{{Role: "worker", Placement: "local", MaxConcurrent: 1, WorkingDir: t.TempDir()}},
 	}
 	sp := archetypeTestSpawner(t, tm)
-	_, err := sp.SpawnByRole(context.Background(), "unknown")
+	_, err := sp.Spawn(context.Background(), "unknown", "")
 	if err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Errorf("expected unknown role error, got: %v", err)
 	}

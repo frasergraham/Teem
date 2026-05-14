@@ -26,12 +26,65 @@ func (s *Server) handleSpawnAgent(ctx context.Context, req mcpgo.CallToolRequest
 	if s.team.FindArchetypeByRole(role) == nil {
 		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
 	}
-	id, err := s.spawner.SpawnByRole(ctx, role)
+	name := req.GetString("name", "")
+	id, err := s.spawner.Spawn(ctx, role, name)
 	if err != nil {
 		return mcpgo.NewToolResultErrorFromErr("spawn failed", err), nil
 	}
 	out, _ := json.Marshal(map[string]string{"agent_id": id})
 	return mcpgo.NewToolResultText(string(out)), nil
+}
+
+// handleListRoster returns the persistent roster, optionally
+// filtered by role. The wire shape uses `name` / `last_seen` to
+// match MCP-facing terminology; `name` is the bare suffix when the
+// id has the role prefix and the full id for operator-supplied
+// (named) entries. in_use ORs the roster bit with a live
+// registry check so a never-cleared roster entry can't masquerade
+// as a still-running worker.
+func (s *Server) handleListRoster(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+	role := req.GetString("role", "")
+	entries := s.spawner.RosterSnapshot(role)
+	type wire struct {
+		Name      string    `json:"name"`
+		Role      string    `json:"role"`
+		FirstSeen time.Time `json:"first_seen,omitempty"`
+		LastSeen  time.Time `json:"last_seen"`
+		InUse     bool      `json:"in_use"`
+		Source    string    `json:"source,omitempty"`
+	}
+	out := make([]wire, 0, len(entries))
+	for _, e := range entries {
+		name := e.ID
+		if prefix := e.Role + "-"; strings.HasPrefix(e.ID, prefix) {
+			name = e.ID[len(prefix):]
+		}
+		// in_use derives from the live registry — provisioning,
+		// running, and busy all count; stopped, error, and unknown
+		// do not. The roster's own in_use bit can lag behind a
+		// crashed worker, so we don't trust it as the source of
+		// truth here.
+		inUse := false
+		if entry, ok := s.registry.Get(e.ID); ok {
+			switch entry.State {
+			case StateProvisioning, StateRunning, StateBusy:
+				inUse = true
+			}
+		}
+		out = append(out, wire{
+			Name:      name,
+			Role:      e.Role,
+			FirstSeen: e.FirstSeen,
+			LastSeen:  e.LastUsedAt,
+			InUse:     inUse,
+			Source:    e.Source,
+		})
+	}
+	body, err := json.Marshal(out)
+	if err != nil {
+		return mcpgo.NewToolResultErrorFromErr("marshal roster", err), nil
+	}
+	return mcpgo.NewToolResultText(string(body)), nil
 }
 
 func (s *Server) handleAssignJob(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

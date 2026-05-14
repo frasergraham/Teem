@@ -41,14 +41,14 @@ func TestRoster_PersistsAcrossSpawner(t *testing.T) {
 	}
 
 	sp := makeSpawner()
-	id1, err := sp.SpawnByRole(context.Background(), "worker")
+	id1, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn 1: %v", err)
 	}
 	if id1 != "worker-ada" {
 		t.Errorf("id1 = %q, want worker-ada", id1)
 	}
-	id2, _ := sp.SpawnByRole(context.Background(), "worker")
+	id2, _ := sp.Spawn(context.Background(), "worker", "")
 	if id2 != "worker-blake" {
 		t.Errorf("id2 = %q, want worker-blake", id2)
 	}
@@ -58,7 +58,7 @@ func TestRoster_PersistsAcrossSpawner(t *testing.T) {
 	// already on disk.
 	sp.Stop()
 	sp = makeSpawner()
-	id3, err := sp.SpawnByRole(context.Background(), "worker")
+	id3, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn after restart: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestRoster_LegacyAuditMigration(t *testing.T) {
 	})
 	// First spawn should be a fresh wordlist entry — legacy ids
 	// don't steal the fresh path.
-	id, err := sp.SpawnByRole(context.Background(), "worker")
+	id, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestRoster_LegacyTranscriptsMigration(t *testing.T) {
 	defer bs.Close()
 	sp := NewSpawner(context.Background(), tm, bs, mcpsrv.NewRegistry(), Config{Roster: rost})
 
-	id, err := sp.SpawnByRole(context.Background(), "worker")
+	id, err := sp.Spawn(context.Background(), "worker", "")
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}

@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -37,15 +38,36 @@ import (
 )
 
 // Entry records one name in the roster. ID is the full agent id
-// (e.g. `worker-ada` or legacy `worker-3`). InUse == true means a
-// worker with this id is currently running; false means the name is
-// available for reincarnation.
+// (e.g. `worker-ada`, legacy `worker-3`, or a bare operator-supplied
+// name like `bob`). InUse == true means a worker with this id is
+// currently running; false means the name is available for
+// reincarnation.
+//
+// Source distinguishes how the entry was created:
+//
+//   - "wordlist"  — allocator chose from the role wordlist
+//   - "named"     — operator passed an explicit name to spawn_agent
+//   - "legacy"    — migrated from pre-T9 archetype-seq.json /
+//     transcripts/ layout
+//
+// FirstSeen / LastUsedAt are advisory; FirstSeen is the zero value
+// for entries persisted before the field was added.
 type Entry struct {
 	ID         string    `json:"id"`
 	Role       string    `json:"role"`
 	InUse      bool      `json:"in_use"`
+	FirstSeen  time.Time `json:"first_seen,omitempty"`
 	LastUsedAt time.Time `json:"last_used_at"`
+	Source     string    `json:"source,omitempty"`
 }
+
+// Source constants for Entry.Source. Stored as strings so the
+// persisted roster stays human-readable.
+const (
+	SourceWordlist = "wordlist"
+	SourceNamed    = "named"
+	SourceLegacy   = "legacy"
+)
 
 // Roster is the per-team allocator. Safe for concurrent use.
 type Roster struct {
@@ -110,7 +132,7 @@ func (r *Roster) Allocate(role string) string {
 	for _, base := range r.wordlist {
 		id := role + "-" + base
 		if _, exists := r.entries[id]; !exists {
-			r.entries[id] = Entry{ID: id, Role: role, InUse: true, LastUsedAt: now}
+			r.entries[id] = Entry{ID: id, Role: role, InUse: true, FirstSeen: now, LastUsedAt: now, Source: SourceWordlist}
 			_ = r.persistLocked()
 			return id
 		}
@@ -147,10 +169,99 @@ func (r *Roster) Allocate(role string) string {
 		if _, exists := r.entries[id]; exists {
 			continue
 		}
-		r.entries[id] = Entry{ID: id, Role: role, InUse: true, LastUsedAt: now}
+		r.entries[id] = Entry{ID: id, Role: role, InUse: true, FirstSeen: now, LastUsedAt: now, Source: SourceWordlist}
 		_ = r.persistLocked()
 		return id
 	}
+}
+
+// nameRe constrains operator-supplied names. Lowercase ASCII letter
+// followed by up to 30 lowercase alphanumerics — no hyphens (the
+// allocator uses `role-base`, and we don't want named entries to
+// collide with that namespace), no underscores, no dots.
+var nameRe = regexp.MustCompile(`^[a-z][a-z0-9]{0,30}$`)
+
+// reservedNames are top-level identifiers that have meaning elsewhere
+// in the system. Rejecting them at the boundary keeps audit lines
+// unambiguous (e.g. `agent_id=leader` always means the Leader).
+var reservedNames = map[string]struct{}{
+	"leader": {},
+	"daemon": {},
+	"teem":   {},
+	"system": {},
+}
+
+// rolePrefixes are bare-name patterns that collapse a legacy
+// `<role>-N` id into a single token (`worker1`, `reviewer7`).
+// Rejecting these prevents an operator-supplied name from later
+// being mistaken for a legacy allocator id once the hyphen is
+// squashed.
+var rolePrefixes = []string{"worker", "reviewer", "integrator", "pm"}
+
+// ValidateName checks an operator-supplied name against the allowed
+// shape, the reserved list, and the role-prefix collision rule.
+// Returns nil if acceptable; otherwise a clear error suitable for
+// surfacing at the MCP boundary.
+func ValidateName(name string) error {
+	if !nameRe.MatchString(name) {
+		return fmt.Errorf("name %q is invalid: must match ^[a-z][a-z0-9]{0,30}$ (lowercase letter then up to 30 lowercase alphanumerics)", name)
+	}
+	if _, ok := reservedNames[name]; ok {
+		return fmt.Errorf("name %q is reserved", name)
+	}
+	for _, p := range rolePrefixes {
+		if strings.HasPrefix(name, p) {
+			rest := name[len(p):]
+			if rest != "" && isAllDigits(rest) {
+				return fmt.Errorf("name %q collides with the legacy %q-N id shape; pick a name that doesn't end in digits-after-a-role-prefix", name, p)
+			}
+		}
+	}
+	return nil
+}
+
+func isAllDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Lookup returns the entry for id and whether it exists. Safe for
+// concurrent use.
+func (r *Roster) Lookup(id string) (Entry, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[id]
+	return e, ok
+}
+
+// ReserveNamed marks id (a bare operator-supplied name) as in-use
+// under role. If id already exists under a different role, returns
+// the existing entry and an error so the caller can surface a clear
+// "name belongs to another role" message. If id already exists
+// under role, this is a no-op for Source — a reincarnated `named`
+// entry stays `named`.
+func (r *Roster) ReserveNamed(id, role string) (Entry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now().UTC()
+	if e, ok := r.entries[id]; ok {
+		if e.Role != role {
+			return e, fmt.Errorf("%q is already a %s; pick a different name", id, e.Role)
+		}
+		e.InUse = true
+		e.LastUsedAt = now
+		r.entries[id] = e
+		_ = r.persistLocked()
+		return e, nil
+	}
+	e := Entry{ID: id, Role: role, InUse: true, FirstSeen: now, LastUsedAt: now, Source: SourceNamed}
+	r.entries[id] = e
+	_ = r.persistLocked()
+	return e, nil
 }
 
 // Release marks id as no longer in use. Bumps LastUsedAt so future
@@ -175,13 +286,20 @@ func (r *Roster) Release(id string) {
 func (r *Roster) MarkInUse(id, role string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e := r.entries[id]
+	now := time.Now().UTC()
+	e, existed := r.entries[id]
 	e.ID = id
 	if role != "" {
 		e.Role = role
 	}
 	e.InUse = true
-	e.LastUsedAt = time.Now().UTC()
+	e.LastUsedAt = now
+	if !existed {
+		e.FirstSeen = now
+		if e.Source == "" {
+			e.Source = SourceLegacy
+		}
+	}
 	r.entries[id] = e
 	if base, ok := numericSuffix(id, e.Role); ok {
 		if base > r.nextNumeric[e.Role] {
@@ -203,7 +321,7 @@ func (r *Roster) Register(id, role string, lastUsed time.Time) {
 	if lastUsed.IsZero() {
 		lastUsed = time.Now().UTC()
 	}
-	r.entries[id] = Entry{ID: id, Role: role, InUse: false, LastUsedAt: lastUsed}
+	r.entries[id] = Entry{ID: id, Role: role, InUse: false, FirstSeen: lastUsed, LastUsedAt: lastUsed, Source: SourceLegacy}
 	if base, ok := numericSuffix(id, role); ok {
 		if base > r.nextNumeric[role] {
 			r.nextNumeric[role] = base
