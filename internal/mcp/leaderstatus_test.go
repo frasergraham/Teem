@@ -167,6 +167,70 @@ func TestSetTaskStage_UnknownStage(t *testing.T) {
 	}
 }
 
+func TestSetTaskStage_EmitsAudit(t *testing.T) {
+	srv, p, _, a := newTestServerFull(t)
+	task, _ := p.AddTask(plan.NewTaskInput{Title: "X"})
+
+	req := mcpgo.CallToolRequest{}
+	req.Params.Name = "set_task_stage"
+	req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": "building"}
+	res, err := srv.handleSetTaskStage(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("set_task_stage: %v / %s", err, textOf(t, res))
+	}
+
+	events, _ := a.Query("", parseZero(), 100)
+	var found *audit.Event
+	for i := range events {
+		if events[i].Kind == audit.KindTaskStageChanged {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("task_stage_changed not written to audit")
+	}
+	if id, _ := found.Meta["task_id"].(string); id != task.ID {
+		t.Errorf("task_id meta: %v", found.Meta)
+	}
+	if stage, _ := found.Meta["stage"].(string); stage != "building" {
+		t.Errorf("stage meta: %v", found.Meta)
+	}
+	if from, _ := found.Meta["from"].(string); from != "proposed" {
+		t.Errorf("from meta: %v", found.Meta)
+	}
+}
+
+func TestSetTaskStage_SkipsAuditWhenStageUnchanged(t *testing.T) {
+	srv, p, _, a := newTestServerFull(t)
+	task, _ := p.AddTask(plan.NewTaskInput{Title: "X"})
+
+	req := mcpgo.CallToolRequest{}
+	req.Params.Name = "set_task_stage"
+	req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": "building"}
+	res, err := srv.handleSetTaskStage(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("first set_task_stage: %v / %s", err, textOf(t, res))
+	}
+
+	// Re-issuing the same stage must be a no-op for audit emission.
+	res, err = srv.handleSetTaskStage(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("second set_task_stage: %v / %s", err, textOf(t, res))
+	}
+
+	events, _ := a.Query("", parseZero(), 100)
+	count := 0
+	for _, e := range events {
+		if e.Kind == audit.KindTaskStageChanged {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 task_stage_changed event, got %d", count)
+	}
+}
+
 func TestRecordDecision_EmitsAudit(t *testing.T) {
 	srv, p, _, a := newTestServerFull(t)
 	task, _ := p.AddTask(plan.NewTaskInput{Title: "X"})

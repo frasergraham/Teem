@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -585,6 +586,13 @@ func (s *Server) handleSetTaskStage(_ context.Context, req mcpgo.CallToolRequest
 	if !plan.IsValidStage(st) {
 		return mcpgo.NewToolResultErrorf("unknown stage %q (valid: proposed, specced, building, in_review, merging, verified, blocked, abandoned)", stage), nil
 	}
+	// Capture the previous stage before mutating so the audit event
+	// can record from→to. A missing pre-image is harmless (we still
+	// emit the event with from="").
+	var fromStage plan.Stage
+	if prev, ok := s.plan.Get(taskID); ok {
+		fromStage = prev.Stage
+	}
 	task, err := s.plan.UpdateTask(taskID, plan.UpdateInput{Stage: st})
 	if err != nil {
 		switch {
@@ -595,6 +603,19 @@ func (s *Server) handleSetTaskStage(_ context.Context, req mcpgo.CallToolRequest
 		default:
 			return mcpgo.NewToolResultErrorFromErr("set_task_stage", err), nil
 		}
+	}
+	if s.audit != nil && fromStage != st {
+		_ = s.audit.Write(audit.Event{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "leader",
+			Kind:      audit.KindTaskStageChanged,
+			Message:   fmt.Sprintf("task %s: %s → %s", taskID, fromStage, st),
+			Meta: map[string]any{
+				"task_id": taskID,
+				"from":    string(fromStage),
+				"stage":   string(st),
+			},
+		})
 	}
 	body, _ := json.Marshal(task)
 	return mcpgo.NewToolResultText(string(body)), nil

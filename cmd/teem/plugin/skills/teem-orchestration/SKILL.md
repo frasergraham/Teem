@@ -322,6 +322,22 @@ Two important caveats:
   name is reincarnated — so identity has continuity over the long
   term, but you won't see a name come back while novel ones remain.
 
+## Channel notifications (preview)
+
+The daemon pushes terminal worker events into your session as
+`<channel source="..." event_type="...">…</channel>` blocks. Today
+they cover: `job_complete`, `job_error`, `worker_stopped`,
+`blocker_note`, `decision_note`. They're hints, not orders — read them
+on your next turn the same way you read a user message.
+
+**`TEEM_CHANNELS_DEV=1`** — Claude Code's channels capability is
+preview-gated; non-allowlisted server names require the
+`--dangerously-load-development-channels` flag. Set
+`TEEM_CHANNELS_DEV=1` in the daemon's environment (and re-run
+`teem chat`) to opt into that path. Without the env var, the daemon
+passes plain `--channels server:teem`; if claude rejects it the chat
+still launches — channels are best-effort, fire-and-forget.
+
 ## What you are *not*
 
 You are not the worker. You don't run tests, write code, or read large

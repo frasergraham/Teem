@@ -100,6 +100,12 @@ func New(cfg Config) (*Server, error) {
 		"teem-orchestrator",
 		"0.1.0",
 		mcpsrv.WithToolCapabilities(true),
+		// Advertise the Claude Code channel capability so a leader
+		// launched with `--channels server:teem` can subscribe to the
+		// notifications/claude/channel stream PushChannel emits.
+		mcpsrv.WithExperimental(map[string]any{
+			"claude/channel": map[string]any{},
+		}),
 	)
 	s := &Server{
 		core:           core,
@@ -136,6 +142,27 @@ func (s *Server) Serve(l net.Listener) error {
 		return fmt.Errorf("mcp: serve: %w", err)
 	}
 	return nil
+}
+
+// PushChannel emits a notifications/claude/channel notification on every
+// currently-connected MCP session. The params shape matches what Claude
+// Code expects when subscribed via `--channels server:teem`:
+//
+//	{ "content": "<body>", "meta": { ...flat string map... } }
+//
+// Fire-and-forget: there is no ack from the client. Safe to call with no
+// active sessions (the underlying SendNotificationToAllClients is a
+// no-op on an empty session set).
+func (s *Server) PushChannel(content string, meta map[string]string) {
+	params := map[string]any{"content": content}
+	if len(meta) > 0 {
+		m := make(map[string]any, len(meta))
+		for k, v := range meta {
+			m[k] = v
+		}
+		params["meta"] = m
+	}
+	s.core.SendNotificationToAllClients("notifications/claude/channel", params)
 }
 
 // Shutdown gracefully stops the HTTP server.

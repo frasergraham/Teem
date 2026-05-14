@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/audit"
+	"github.com/frasergraham/teem/internal/claudeflags"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/plan"
 )
@@ -580,8 +581,9 @@ func (p *Pulse) invokeClaude(ctx context.Context, sessionID, contextBody string)
 		"--mcp-config", p.cfg.MCPConfig,
 		"--append-system-prompt", contextBody,
 		"--dangerously-skip-permissions",
-		"Take your next turn.",
 	}
+	args = append(args, claudeflags.ChannelFlags()...)
+	args = append(args, "Take your next turn.")
 	cmd := exec.CommandContext(ctx, claudePath, args...)
 	cmd.Dir = p.cfg.RepoRoot
 	cmd.Stdin = nil

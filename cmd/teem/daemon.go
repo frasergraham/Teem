@@ -1100,6 +1100,13 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		}
 	}
 
+	// Channel hook: push a one-line summary of selected audit events
+	// into the leader's claude session via the team's MCP server
+	// (Claude Code "channels"). Fire-and-forget; safe when no leader is
+	// currently subscribed. The filter intentionally excludes
+	// high-volume kinds like heartbeats and pulse_tick echoes.
+	channelHook := makeChannelHook(srv.PushChannel)
+
 	// Summarizer goroutine: rolling digest + retention pruning per
 	// role. Best-effort — failures log to stderr and the next tick
 	// retries. Skipped when ANTHROPIC_API_KEY is unset since the
@@ -1141,7 +1148,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		// publish on bus topic "leader.wake" for terminal worker
 		// events. Note the double-publish: NudgeFromAudit + wakeHook
 		// run on every accepted POST.
-		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(pulseInst.NudgeFromAudit, combineHooks(wakeHook, combineHooks(stopHook, archMemHook)))),
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(pulseInst.NudgeFromAudit, wakeHook, stopHook, archMemHook, channelHook)),
 		plan:           planStore,
 		notes:          notesInbox,
 		pulse:          pulseInst,
@@ -1202,17 +1209,139 @@ func isWakeKind(k audit.Kind) bool {
 	return false
 }
 
-// combineHooks chains two audit hooks; either may be nil.
-func combineHooks(a, b auditHook) auditHook {
-	if a == nil {
-		return b
-	}
-	if b == nil {
-		return a
-	}
+// channelPushFn is the narrow surface makeChannelHook calls into. The
+// production binding is mcpsrv.Server.PushChannel; tests substitute a
+// recorder.
+type channelPushFn func(body string, meta map[string]string)
+
+// makeChannelHook returns the auditHook that fans selected events out
+// to the team MCP server as Claude Code channel notifications. Pulled
+// out of buildTeamServices so it can be unit-tested without the rest
+// of the per-team plumbing.
+func makeChannelHook(push channelPushFn) auditHook {
 	return func(events []audit.Event) {
-		a(events)
-		b(events)
+		for _, e := range events {
+			if !isChannelKind(e.Kind) {
+				continue
+			}
+			body := formatChannelBody(e)
+			meta := map[string]string{
+				"agent_id": e.AgentID,
+				"kind":     string(e.Kind),
+			}
+			if e.JobID != "" {
+				meta["job_id"] = e.JobID
+			}
+			if tid, ok := e.Meta["task_id"].(string); ok && tid != "" {
+				meta["task_id"] = tid
+			}
+			push(body, meta)
+		}
+	}
+}
+
+// isChannelKind decides whether an audit event should be pushed into
+// the leader's claude channel. The set mirrors the leader-relevant
+// signals the dashboard surfaces — terminal job state, blockers,
+// recorded decisions, worker shutdown, daemon-killed jobs, and
+// pipeline-stage movement — and intentionally excludes high-frequency
+// noise (heartbeats, pulse_tick echoes).
+func isChannelKind(k audit.Kind) bool {
+	switch k {
+	case audit.KindJobComplete,
+		audit.KindJobError,
+		audit.KindJobInterrupted,
+		audit.KindBlockerNote,
+		audit.KindDecisionNote,
+		audit.KindWorkerStopped,
+		audit.KindTaskStageChanged:
+		return true
+	}
+	return false
+}
+
+// formatChannelBody renders a short, human-readable one-liner for an
+// audit event suitable for surfacing inside the leader's claude
+// session. Body intentionally stays terse: full detail lives in the
+// audit log + query_audit tool, and the channel exists to nudge the
+// leader to look.
+func formatChannelBody(e audit.Event) string {
+	agent := e.AgentID
+	if agent == "" {
+		agent = "<unknown>"
+	}
+	taskID := ""
+	if tid, ok := e.Meta["task_id"].(string); ok {
+		taskID = tid
+	}
+	switch e.Kind {
+	case audit.KindJobComplete:
+		return fmt.Sprintf("%s finished job %s", agent, e.JobID)
+	case audit.KindJobError:
+		msg := strings.TrimSpace(e.Message)
+		if msg == "" {
+			msg = "(no message)"
+		}
+		return fmt.Sprintf("%s job %s errored: %s", agent, e.JobID, shortSummary(msg))
+	case audit.KindJobInterrupted:
+		return fmt.Sprintf("%s's job %s was interrupted", agent, e.JobID)
+	case audit.KindWorkerStopped:
+		return fmt.Sprintf("%s stopped", agent)
+	case audit.KindBlockerNote:
+		if taskID != "" {
+			return fmt.Sprintf("blocker on task %s: %s", taskID, shortSummary(e.Message))
+		}
+		return "blocker: " + shortSummary(e.Message)
+	case audit.KindDecisionNote:
+		if taskID != "" {
+			return fmt.Sprintf("decision on task %s: %s", taskID, shortSummary(e.Message))
+		}
+		return "decision: " + shortSummary(e.Message)
+	case audit.KindTaskStageChanged:
+		if taskID == "" {
+			return shortSummary(e.Message)
+		}
+		stage, _ := e.Meta["stage"].(string)
+		if stage == "" {
+			stage, _ = e.Meta["to"].(string)
+		}
+		from, _ := e.Meta["from"].(string)
+		switch {
+		case from != "" && stage != "":
+			return fmt.Sprintf("task %s: %s → %s", taskID, from, stage)
+		case stage != "":
+			return fmt.Sprintf("task %s moved to %s", taskID, stage)
+		default:
+			return "task " + taskID + " stage changed"
+		}
+	}
+	return fmt.Sprintf("%s: %s", e.Kind, shortSummary(e.Message))
+}
+
+// combineHooks chains any number of audit hooks left-to-right. nil
+// entries are skipped; returns nil only if every input is nil.
+func combineHooks(hooks ...auditHook) auditHook {
+	// hooks[:0] reuses the variadic backing array; safe today because no
+	// caller passes a slice with `...`. If that changes, copy into a fresh
+	// slice instead — silent mutation of a caller's slice is a footgun.
+	live := hooks[:0]
+	for _, h := range hooks {
+		if h != nil {
+			live = append(live, h)
+		}
+	}
+	if len(live) == 0 {
+		return nil
+	}
+	if len(live) == 1 {
+		return live[0]
+	}
+	chained := make([]auditHook, len(live))
+	copy(chained, live)
+	return func(events []audit.Event) {
+		for _, h := range chained {
+			h(events)
+		}
 	}
 }
 

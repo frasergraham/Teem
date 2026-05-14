@@ -51,6 +51,16 @@ process behind it. `claude -p --input-format stream-json --output-format
 stream-json` is the Anthropic Agent SDK exposed as a stdio process; the
 SSH transport just relays that stdio.
 
+### Optional environment variables
+
+- `TEEM_CHANNELS_DEV=1` — opt the leader's `claude` subprocess into the
+  Claude Code channels preview using
+  `--dangerously-load-development-channels server:teem` instead of the
+  production `--channels server:teem` flag. Channels remain preview-gated
+  upstream; set this only on a Claude Code build where the capability is
+  available but the server name is not yet allowlisted. Honored by both
+  the human chat path and the autonomous-tick Pulse invocation.
+
 ## Architecture
 
 ```

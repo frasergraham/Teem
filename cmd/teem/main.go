@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/agent"
+	"github.com/frasergraham/teem/internal/claudeflags"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/provisioner"
 	"github.com/frasergraham/teem/internal/state"
@@ -172,6 +173,7 @@ func runChat(args []string) error {
 		"--mcp-config", mcpCfgPath,
 		"--append-system-prompt", brief,
 	)
+	argv = append(argv, claudeflags.ChannelFlags()...)
 	fmt.Fprintf(os.Stderr, "[teem] team %q → %s — launching claude\n", t.Name, regResp.MCPURL)
 	return syscall.Exec(claudePath, argv, os.Environ())
 }

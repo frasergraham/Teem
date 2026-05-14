@@ -66,6 +66,11 @@ const (
 	// Emitted by record_blocker; the same tool also moves the task
 	// to Stage="blocked" and Status="blocked" atomically.
 	KindBlockerNote Kind = "blocker_note"
+	// KindTaskStageChanged is emitted by the set_task_stage MCP tool
+	// after a successful stage transition. Meta carries task_id, from,
+	// and to. Surfaced on the leader's channel stream so the leader
+	// notices pipeline movement without polling list_tasks.
+	KindTaskStageChanged Kind = "task_stage_changed"
 )
 
 // Event is one entry on the audit channel. Meta is a free-form bag for
