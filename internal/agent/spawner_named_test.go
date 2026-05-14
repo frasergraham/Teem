@@ -6,11 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/frasergraham/teem/internal/bus"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
-	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/team"
 )
 
@@ -31,8 +29,8 @@ func TestSpawnAgent_NameIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn 1: %v", err)
 	}
-	if id1 != "ada" {
-		t.Errorf("first spawn id = %q, want ada", id1)
+	if id1 != "worker-ada" {
+		t.Errorf("first spawn id = %q, want worker-ada", id1)
 	}
 	swapExecutor(t, sp, id1)
 
@@ -82,12 +80,12 @@ func TestSpawnAgent_NameReincarnates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first spawn: %v", err)
 	}
-	if id1 != "ada" {
-		t.Fatalf("first spawn id = %q, want ada", id1)
+	if id1 != "worker-ada" {
+		t.Fatalf("first spawn id = %q, want worker-ada", id1)
 	}
 	swapExecutor(t, sp, id1)
-	if !branchExists(t, repo, "teem/ada") {
-		t.Fatalf("branch teem/ada should exist after first spawn")
+	if !branchExists(t, repo, "teem/worker-ada") {
+		t.Fatalf("branch teem/worker-ada should exist after first spawn")
 	}
 
 	if err := sp.StopAgent(context.Background(), id1); err != nil {
@@ -95,8 +93,8 @@ func TestSpawnAgent_NameReincarnates(t *testing.T) {
 	}
 	// Branch survives the stop — that's what makes reincarnation
 	// meaningful.
-	if !branchExists(t, repo, "teem/ada") {
-		t.Fatalf("branch teem/ada should survive stop_agent (reincarnation depends on it)")
+	if !branchExists(t, repo, "teem/worker-ada") {
+		t.Fatalf("branch teem/worker-ada should survive stop_agent (reincarnation depends on it)")
 	}
 
 	id2, err := sp.Spawn(context.Background(), "worker", "ada")
@@ -108,20 +106,21 @@ func TestSpawnAgent_NameReincarnates(t *testing.T) {
 	}
 	swapExecutor(t, sp, id2)
 
-	// And the worktree is registered against teem/ada again.
+	// And the worktree is registered against teem/worker-ada again.
 	out, err := exec.Command("git", "-C", repo, "worktree", "list", "--porcelain").CombinedOutput()
 	if err != nil {
 		t.Fatalf("git worktree list: %v: %s", err, out)
 	}
-	if !strings.Contains(string(out), "branch refs/heads/teem/ada") {
-		t.Errorf("worktree list missing branch teem/ada after reincarnation:\n%s", out)
+	if !strings.Contains(string(out), "branch refs/heads/teem/worker-ada") {
+		t.Errorf("worktree list missing branch teem/worker-ada after reincarnation:\n%s", out)
 	}
 }
 
-// TestSpawnAgent_RejectsCrossRole pre-registers a name under reviewer
-// role and verifies that spawn_agent for worker with the same name
-// fails with a clear error.
-func TestSpawnAgent_RejectsCrossRole(t *testing.T) {
+// TestSpawnAgent_AllowsSameNameAcrossRoles verifies that the bare
+// wordlist name `bob` can be used for both a worker (`worker-bob`)
+// and a reviewer (`reviewer-bob`) — they get distinct canonical
+// agent_ids and coexist in the roster.
+func TestSpawnAgent_AllowsSameNameAcrossRoles(t *testing.T) {
 	tm := &team.Team{
 		Name:   "x",
 		Leader: team.LeaderSpec{SystemPrompt: "p"},
@@ -130,19 +129,92 @@ func TestSpawnAgent_RejectsCrossRole(t *testing.T) {
 			{Role: "reviewer", Placement: "local", MaxConcurrent: 1, WorkingDir: t.TempDir()},
 		},
 	}
-	bs := bus.NewMemBus()
-	t.Cleanup(func() { bs.Close() })
-	rost, _ := roster.Open("")
-	// Pre-register bob as a reviewer (not in use).
-	rost.Register("bob", "reviewer", time.Time{})
-	sp := NewSpawner(context.Background(), tm, bs, mcpsrv.NewRegistry(), Config{Roster: rost})
+	sp := archetypeTestSpawner(t, tm)
 
-	_, err := sp.Spawn(context.Background(), "worker", "bob")
-	if err == nil {
-		t.Fatal("expected cross-role spawn to fail")
+	wid, err := sp.Spawn(context.Background(), "worker", "bob")
+	if err != nil {
+		t.Fatalf("worker bob: %v", err)
 	}
-	if !strings.Contains(err.Error(), "already a reviewer") {
-		t.Errorf("error %q should mention reviewer", err)
+	if wid != "worker-bob" {
+		t.Errorf("worker id = %q, want worker-bob", wid)
+	}
+	swapExecutor(t, sp, wid)
+
+	rid, err := sp.Spawn(context.Background(), "reviewer", "bob")
+	if err != nil {
+		t.Fatalf("reviewer bob: %v", err)
+	}
+	if rid != "reviewer-bob" {
+		t.Errorf("reviewer id = %q, want reviewer-bob", rid)
+	}
+}
+
+// TestSpawnAgent_NameParamWithRolePrefix_IsStripped lets the operator
+// paste the full agent_id from list_agents back into spawn_agent and
+// get the same canonical id. Otherwise the natural copy-paste flow
+// would fail validation (hyphens aren't allowed in bare names).
+func TestSpawnAgent_NameParamWithRolePrefix_IsStripped(t *testing.T) {
+	tm := &team.Team{
+		Name:   "x",
+		Leader: team.LeaderSpec{SystemPrompt: "p"},
+		Archetypes: []team.ArchetypeSpec{
+			{Role: "worker", Placement: "local", MaxConcurrent: 1, WorkingDir: t.TempDir()},
+		},
+	}
+	sp := archetypeTestSpawner(t, tm)
+
+	id, err := sp.Spawn(context.Background(), "worker", "worker-ada")
+	if err != nil {
+		t.Fatalf("spawn worker-ada: %v", err)
+	}
+	if id != "worker-ada" {
+		t.Errorf("id = %q, want worker-ada", id)
+	}
+	// Roster should carry the canonical id, not the doubly-prefixed
+	// `worker-worker-ada`.
+	found := false
+	for _, e := range sp.RosterSnapshot("worker") {
+		if e.ID == "worker-ada" {
+			found = true
+		}
+		if e.ID == "worker-worker-ada" {
+			t.Errorf("roster contains doubly-prefixed id %q", e.ID)
+		}
+	}
+	if !found {
+		t.Error("roster missing canonical worker-ada entry after prefixed spawn")
+	}
+}
+
+// TestSpawnAgent_NameParamWithoutPrefix_StillWorks covers the bare
+// `ada` form alongside the prefixed `worker-ada` form: both should
+// resolve to the same canonical agent_id.
+func TestSpawnAgent_NameParamWithoutPrefix_StillWorks(t *testing.T) {
+	tm := &team.Team{
+		Name:   "x",
+		Leader: team.LeaderSpec{SystemPrompt: "p"},
+		Archetypes: []team.ArchetypeSpec{
+			{Role: "worker", Placement: "local", MaxConcurrent: 1, WorkingDir: t.TempDir()},
+		},
+	}
+	sp := archetypeTestSpawner(t, tm)
+
+	id, err := sp.Spawn(context.Background(), "worker", "ada")
+	if err != nil {
+		t.Fatalf("spawn ada: %v", err)
+	}
+	if id != "worker-ada" {
+		t.Errorf("id = %q, want worker-ada", id)
+	}
+	swapExecutor(t, sp, id)
+
+	// And again with the prefixed form — must be idempotent.
+	id2, err := sp.Spawn(context.Background(), "worker", "worker-ada")
+	if err != nil {
+		t.Fatalf("idempotent spawn: %v", err)
+	}
+	if id2 != id {
+		t.Errorf("prefixed-form spawn returned %q, want idempotent %q", id2, id)
 	}
 }
 

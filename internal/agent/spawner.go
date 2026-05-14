@@ -258,6 +258,17 @@ func (s *Spawner) Reconcile(ctx context.Context) int {
 // surviving worker's audit outbox will drain its accumulated events
 // against the freshly-started daemon as soon as the leader URL
 // resolves.
+//
+// Pre-canonicalisation workers wrote sockets named after the bare
+// wordlist token (e.g. `ada.sock`). On the first reconcile after the
+// canonical-id migration, those files are renamed to their `<role>-
+// <bare>.sock` form (Option A — rename on first reconcile) using the
+// roster's bare→role mapping. Without this the daemon would
+// `continue` past the bare-name socket and abandon a still-running
+// worker. Option A was picked over Option B (adopt-in-place) because
+// it keeps the on-disk shape consistent with a fresh spawn — every
+// downstream caller (teardown's pid-path derivation, log paths,
+// next-spawn reuse) sees a single canonical naming convention.
 func (s *Spawner) ReconcileLocalSockets(ctx context.Context) int {
 	if s.cfg.SocketDir == "" || s.cfg.WorkerToken == "" {
 		return 0
@@ -280,12 +291,57 @@ func (s *Spawner) ReconcileLocalSockets(ctx context.Context) int {
 		err := exec.CheckHealth(hctx)
 		cancel()
 		if err != nil {
+			// Dead worker: drop the socket plus its .pid / .log
+			// sidecars so we don't leak per-agent files into the
+			// socket dir on every restart. Best-effort — a missing
+			// sidecar is fine.
 			_ = os.Remove(socketPath)
+			_ = os.Remove(filepath.Join(s.cfg.SocketDir, agentID+".pid"))
+			_ = os.Remove(filepath.Join(s.cfg.SocketDir, agentID+".log"))
 			continue
 		}
 		role := roster.RoleFromID(agentID)
 		if role == "" {
-			continue
+			// Bare-name pre-canonicalisation socket (e.g. `ada.sock`).
+			// Recover the role from the (already-deduped) roster and
+			// rename the on-disk artefacts to the canonical form so
+			// teardown / pidfile / log derivations work without
+			// special-casing. If the bare name maps to zero or
+			// multiple roles we can't safely adopt — leave the file
+			// alone and skip.
+			matches := s.roster.FindByBareName(agentID)
+			if len(matches) != 1 {
+				s.publishLog(agentID, fmt.Sprintf("reconcile: bare-name socket %q has %d roster matches; skipping", agentID, len(matches)))
+				continue
+			}
+			canonicalID := matches[0].ID
+			recoveredRole := matches[0].Role
+			canonicalSocket := filepath.Join(s.cfg.SocketDir, canonicalID+".sock")
+			if err := os.Rename(socketPath, canonicalSocket); err != nil {
+				s.publishLog(agentID, fmt.Sprintf("reconcile: rename socket %s → %s: %v", socketPath, canonicalSocket, err))
+				continue
+			}
+			// Pid + log sidecars share the basename; rename them too
+			// so killByPidFile and the per-agent log keep working.
+			// Missing sidecars are fine — best-effort.
+			_ = os.Rename(
+				filepath.Join(s.cfg.SocketDir, agentID+".pid"),
+				filepath.Join(s.cfg.SocketDir, canonicalID+".pid"),
+			)
+			_ = os.Rename(
+				filepath.Join(s.cfg.SocketDir, agentID+".log"),
+				filepath.Join(s.cfg.SocketDir, canonicalID+".log"),
+			)
+			s.publishLog(canonicalID, fmt.Sprintf("reconcile: adopted bare-name socket %q as %q", agentID, canonicalID))
+			agentID = canonicalID
+			role = recoveredRole
+			socketPath = canonicalSocket
+			// Rebuild the executor against the new socket path. The
+			// kernel still routes connections via the renamed file to
+			// the worker's bound socket FD, but the executor's dialer
+			// captured the old path string.
+			client = executor.NewUnixClient(socketPath)
+			exec = executor.NewHTTP(client, "http://unix", s.cfg.WorkerToken)
 		}
 		a := &provisioner.Agent{
 			ID:         agentID,
@@ -350,19 +406,21 @@ func (s *Spawner) resolveSpec(role, name string) (spec *team.AgentSpec, aliveID 
 		return &out, "", nil
 	}
 
-	if err := roster.ValidateName(name); err != nil {
+	// Operators sometimes copy-paste the full agent_id (`worker-ada`)
+	// from list_agents back into spawn_agent's `name` parameter.
+	// roster.CanonicalID strips the leading `<role>-` so both
+	// `worker-ada` and the bare `ada` map to the same canonical id.
+	canonical := roster.CanonicalID(role, name)
+	bareName := strings.TrimPrefix(canonical, role+"-")
+	if err := roster.ValidateName(bareName); err != nil {
 		return nil, "", err
 	}
 	s.mu.Lock()
 	// Idempotent: a worker with this name is already live. Return
 	// its id without re-provisioning.
-	if _, alive := s.workers[name]; alive {
+	if _, alive := s.workers[canonical]; alive {
 		s.mu.Unlock()
-		return nil, name, nil
-	}
-	if existing, ok := s.roster.Lookup(name); ok && existing.Role != role {
-		s.mu.Unlock()
-		return nil, "", fmt.Errorf("%q is already a %s; pick a different name", name, existing.Role)
+		return nil, canonical, nil
 	}
 	active := s.countActiveByRoleLocked(role)
 	if active >= arch.MaxConcurrent {
@@ -370,10 +428,10 @@ func (s *Spawner) resolveSpec(role, name string) (spec *team.AgentSpec, aliveID 
 		return nil, "", fmt.Errorf("archetype %q is at capacity (%d/%d running)", role, active, arch.MaxConcurrent)
 	}
 	s.mu.Unlock()
-	if _, err := s.roster.ReserveNamed(name, role); err != nil {
+	if _, err := s.roster.ReserveNamed(canonical, role); err != nil {
 		return nil, "", err
 	}
-	out := s.specFromArchetype(*arch, name)
+	out := s.specFromArchetype(*arch, canonical)
 	return &out, "", nil
 }
 
@@ -426,19 +484,30 @@ func (noopTeardownProvisioner) Provision(context.Context, provisioner.AgentSpec)
 func (noopTeardownProvisioner) Teardown(context.Context, *provisioner.Agent) error { return nil }
 
 // Spawn provisions a worker of the given role and starts its loop.
+// The resulting agent_id is always `<role>-<name>` — whether the
+// allocator chose `name` from the wordlist or the operator supplied
+// it. Same name + same role → same canonical id, regardless of how
+// the worker was created.
 //
 // When name == "" the allocator picks a fresh wordlist entry (or
 // reincarnates an LRU retired one for the role). When name is set
 // the operator is explicitly choosing identity:
 //
-//   - If a worker with that name is currently live in this team:
+//   - A leading `<role>-` prefix on name is stripped before
+//     validation so the full id from list_agents (`worker-ada`) and
+//     the bare wordlist form (`ada`) collapse to the same canonical
+//     id (`worker-ada`).
+//   - If a worker with the canonical id is currently live:
 //     idempotent — return the existing agent_id without re-spawning.
-//   - If the name is in the roster under a *different* role: reject.
-//   - If the name is in the roster under the same role but retired:
-//     reincarnate — same id, same worktree branch (`teem/<name>`)
-//     reused so the worker comes back with prior commits intact.
-//   - If the name isn't on the roster yet: validate shape +
-//     reserved-name list, then register and spawn fresh.
+//   - If the canonical id is on the roster but retired: reincarnate
+//     — same id, same worktree branch (`teem/<role>-<name>`) reused
+//     so the worker comes back with prior commits intact.
+//   - If the canonical id isn't on the roster yet: validate the
+//     bare-name shape + reserved-name list, then register and spawn
+//     fresh.
+//
+// Same bare name across different roles is allowed (`worker-ada` and
+// `reviewer-ada` coexist) — the scope key is (role, name).
 //
 // Returns an error if no archetype matches the role or the archetype
 // is at its concurrency cap.

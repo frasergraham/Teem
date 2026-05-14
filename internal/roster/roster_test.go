@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,265 @@ func TestMigrateLegacy_Idempotent(t *testing.T) {
 	second := r.MigrateLegacy("", tdir, []string{"worker"}, nil)
 	if first != 1 || second != 0 {
 		t.Errorf("non-idempotent: first=%d second=%d, want first=1 second=0", first, second)
+	}
+}
+
+// TestRoster_DuplicateInsertIsIdempotent re-registers the same
+// (canonical id, role) pair twice and confirms the second call
+// doesn't create a second entry — the roster keys on canonical id,
+// so the second insert merges onto the first.
+func TestRoster_DuplicateInsertIsIdempotent(t *testing.T) {
+	r, _ := Open("")
+	first, err := r.ReserveNamed("worker-ada", "worker")
+	if err != nil {
+		t.Fatalf("first reserve: %v", err)
+	}
+	if first.ID != "worker-ada" {
+		t.Errorf("first.ID = %q, want worker-ada", first.ID)
+	}
+	second, err := r.ReserveNamed("worker-ada", "worker")
+	if err != nil {
+		t.Fatalf("second reserve: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Errorf("second.ID = %q, want %q", second.ID, first.ID)
+	}
+	// Snapshot should have exactly one entry for (worker, ada).
+	count := 0
+	for _, e := range r.Snapshot() {
+		if e.Role == "worker" && e.ID == "worker-ada" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("duplicate insert produced %d worker-ada entries, want 1", count)
+	}
+}
+
+// TestRoster_DuplicateAcrossRolesIsAllowed confirms the scope key is
+// (name, role), not name alone — `ada` can be both a worker and a
+// reviewer without conflict.
+func TestRoster_DuplicateAcrossRolesIsAllowed(t *testing.T) {
+	r, _ := Open("")
+	w, err := r.ReserveNamed("worker-ada", "worker")
+	if err != nil {
+		t.Fatalf("worker reserve: %v", err)
+	}
+	rev, err := r.ReserveNamed("reviewer-ada", "reviewer")
+	if err != nil {
+		t.Fatalf("reviewer reserve: %v", err)
+	}
+	if w.ID == rev.ID {
+		t.Errorf("worker and reviewer collided on id %q", w.ID)
+	}
+	if w.ID != "worker-ada" || rev.ID != "reviewer-ada" {
+		t.Errorf("ids = %q / %q, want worker-ada / reviewer-ada", w.ID, rev.ID)
+	}
+}
+
+// TestRoster_DedupOnOpen verifies that a roster persisted in the old
+// shape (bare named entry + role-prefixed wordlist entry, same name +
+// role) is collapsed onto its canonical form at load time, preferring
+// the older first_seen and OR-ing in_use.
+func TestRoster_DedupOnOpen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.json")
+	older := time.Date(2026, 5, 14, 6, 0, 0, 0, time.UTC)
+	newer := time.Date(2026, 5, 14, 14, 0, 0, 0, time.UTC)
+	preseed := onDisk{
+		Entries: map[string]Entry{
+			"ada": {
+				ID: "ada", Role: "worker", InUse: false,
+				FirstSeen: newer, LastUsedAt: newer, Source: SourceNamed,
+			},
+			"worker-ada": {
+				ID: "worker-ada", Role: "worker", InUse: false,
+				FirstSeen: older, LastUsedAt: older, Source: SourceWordlist,
+			},
+		},
+	}
+	body, _ := json.Marshal(preseed)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := r.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("after dedup got %d entries, want 1: %+v", len(snap), snap)
+	}
+	got := snap[0]
+	if got.ID != "worker-ada" {
+		t.Errorf("dedup id = %q, want worker-ada", got.ID)
+	}
+	if !got.FirstSeen.Equal(older) {
+		t.Errorf("first_seen = %s, want older %s", got.FirstSeen, older)
+	}
+	if !got.LastUsedAt.Equal(newer) {
+		t.Errorf("last_used_at = %s, want newer %s", got.LastUsedAt, newer)
+	}
+	if got.Source != SourceWordlist {
+		t.Errorf("source = %q, want %q (wordlist wins over named)", got.Source, SourceWordlist)
+	}
+}
+
+// TestRoster_DedupOnOpen_InUseORMerge covers the OR-merge branch:
+// when the bare entry and canonical sibling disagree on InUse, the
+// merged result must reflect "either is live" so a still-running
+// worker isn't silently retired by dedup.
+func TestRoster_DedupOnOpen_InUseORMerge(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		bareInUse         bool
+		canonicalInUse    bool
+		wantMergedInUse   bool
+	}{
+		{"bare-live", true, false, true},
+		{"canonical-live", false, true, true},
+		{"both-live", true, true, true},
+		{"neither-live", false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "roster.json")
+			ts := time.Date(2026, 5, 14, 14, 0, 0, 0, time.UTC)
+			preseed := onDisk{
+				Entries: map[string]Entry{
+					"ada": {
+						ID: "ada", Role: "worker", InUse: tc.bareInUse,
+						FirstSeen: ts, LastUsedAt: ts, Source: SourceNamed,
+					},
+					"worker-ada": {
+						ID: "worker-ada", Role: "worker", InUse: tc.canonicalInUse,
+						FirstSeen: ts, LastUsedAt: ts, Source: SourceWordlist,
+					},
+				},
+			}
+			body, _ := json.Marshal(preseed)
+			if err := os.WriteFile(path, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			r, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap := r.Snapshot()
+			if len(snap) != 1 {
+				t.Fatalf("after dedup got %d entries, want 1: %+v", len(snap), snap)
+			}
+			if snap[0].InUse != tc.wantMergedInUse {
+				t.Errorf("merged InUse = %v, want %v (bare=%v, canonical=%v)",
+					snap[0].InUse, tc.wantMergedInUse, tc.bareInUse, tc.canonicalInUse)
+			}
+		})
+	}
+}
+
+// TestRoster_DedupOnOpen_BareOnly verifies that a bare-name entry
+// with no canonical sibling is renamed (not just deleted) so legacy
+// data isn't lost.
+func TestRoster_DedupOnOpen_BareOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "roster.json")
+	ts := time.Date(2026, 5, 14, 14, 0, 0, 0, time.UTC)
+	preseed := onDisk{
+		Entries: map[string]Entry{
+			"bob": {
+				ID: "bob", Role: "reviewer", InUse: false,
+				FirstSeen: ts, LastUsedAt: ts, Source: SourceNamed,
+			},
+		},
+	}
+	body, _ := json.Marshal(preseed)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.IsKnown("reviewer-bob") {
+		t.Error("bare bob should have been renamed to reviewer-bob")
+	}
+	if r.IsKnown("bob") {
+		t.Error("bare bob should no longer exist")
+	}
+}
+
+// TestRoster_FindByBareName guards the helper that powers bare-name
+// socket adoption. The reconcile path treats len(matches)!=1 as
+// "can't safely adopt", so the multi-role case must be exercised
+// directly here.
+func TestRoster_FindByBareName(t *testing.T) {
+	cases := []struct {
+		name     string
+		seed     []struct{ id, role string }
+		bareName string
+		wantIDs  []string
+	}{
+		{
+			name:     "zero matches",
+			seed:     []struct{ id, role string }{{"worker-ada", "worker"}},
+			bareName: "ghost",
+			wantIDs:  nil,
+		},
+		{
+			name:     "one match",
+			seed:     []struct{ id, role string }{{"worker-ada", "worker"}},
+			bareName: "ada",
+			wantIDs:  []string{"worker-ada"},
+		},
+		{
+			name:     "two matches across roles",
+			seed:     []struct{ id, role string }{{"worker-ada", "worker"}, {"reviewer-ada", "reviewer"}},
+			bareName: "ada",
+			wantIDs:  []string{"reviewer-ada", "worker-ada"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := Open("")
+			for _, s := range tc.seed {
+				if _, err := r.ReserveNamed(s.id, s.role); err != nil {
+					t.Fatalf("seed %q/%q: %v", s.id, s.role, err)
+				}
+			}
+			got := r.FindByBareName(tc.bareName)
+			gotIDs := make([]string, 0, len(got))
+			for _, e := range got {
+				gotIDs = append(gotIDs, e.ID)
+			}
+			sort.Strings(gotIDs)
+			if len(gotIDs) != len(tc.wantIDs) {
+				t.Fatalf("got %d matches %v, want %d %v", len(gotIDs), gotIDs, len(tc.wantIDs), tc.wantIDs)
+			}
+			for i, id := range gotIDs {
+				if id != tc.wantIDs[i] {
+					t.Errorf("match[%d] = %q, want %q", i, id, tc.wantIDs[i])
+				}
+			}
+		})
+	}
+}
+
+func TestCanonicalID(t *testing.T) {
+	cases := []struct {
+		role, name, want string
+	}{
+		{"worker", "ada", "worker-ada"},
+		{"worker", "worker-ada", "worker-ada"},
+		{"reviewer", "ada", "reviewer-ada"},
+		{"reviewer", "worker-ada", "reviewer-worker-ada"}, // wrong-role prefix isn't stripped
+		{"", "ada", ""},
+		{"worker", "", ""},
+	}
+	for _, c := range cases {
+		got := CanonicalID(c.role, c.name)
+		if got != c.want {
+			t.Errorf("CanonicalID(%q, %q) = %q, want %q", c.role, c.name, got, c.want)
+		}
 	}
 }
 

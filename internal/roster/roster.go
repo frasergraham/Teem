@@ -117,7 +117,74 @@ func Open(path string) (*Roster, error) {
 	if d.NextNumeric != nil {
 		r.nextNumeric = d.NextNumeric
 	}
+	r.dedupCanonicalLocked()
 	return r, nil
+}
+
+// dedupCanonicalLocked rewrites the in-memory map so every entry's ID
+// matches `<role>-<name>`. Pre-canonicalisation, named entries were
+// keyed by the bare operator-supplied name (e.g. `ada`), while wordlist
+// entries used the role-prefixed form (`worker-ada`); those could
+// coexist and surface as duplicate workers in list_roster. This pass
+// folds the bare-name entry onto its canonical sibling — preferring
+// the older first_seen, ORing in_use, taking the later last_used_at,
+// and favouring source=wordlist over source=named (the allocator's
+// view of who owns the slot) — or simply renames the bare entry when
+// no canonical sibling exists. Idempotent: a roster that's already
+// canonical is left untouched.
+//
+// Bare entries with empty Role (legacy migrated, etc.) are left
+// alone — we can't form a canonical id without a role.
+func (r *Roster) dedupCanonicalLocked() {
+	changed := false
+	for id, e := range r.entries {
+		if e.Role == "" {
+			continue
+		}
+		if strings.HasPrefix(id, e.Role+"-") {
+			continue
+		}
+		canonical := e.Role + "-" + id
+		if other, ok := r.entries[canonical]; ok {
+			// Merge bare onto canonical.
+			if !e.FirstSeen.IsZero() && (other.FirstSeen.IsZero() || e.FirstSeen.Before(other.FirstSeen)) {
+				other.FirstSeen = e.FirstSeen
+			}
+			if e.LastUsedAt.After(other.LastUsedAt) {
+				other.LastUsedAt = e.LastUsedAt
+			}
+			if e.InUse {
+				other.InUse = true
+			}
+			if other.Source == "" || (other.Source == SourceNamed && e.Source == SourceWordlist) {
+				other.Source = e.Source
+			}
+			r.entries[canonical] = other
+		} else {
+			e.ID = canonical
+			r.entries[canonical] = e
+		}
+		delete(r.entries, id)
+		changed = true
+	}
+	if changed {
+		_ = r.persistLocked()
+	}
+}
+
+// CanonicalID returns `<role>-<bareName>`, stripping a leading
+// `<role>-` if name already carries it. Used by the spawn handler so
+// that callers passing `worker-ada` (the form they see in
+// list_agents) and callers passing the bare `ada` end up with the
+// same id. Returns the empty string if role or name is empty.
+func CanonicalID(role, name string) string {
+	if role == "" || name == "" {
+		return ""
+	}
+	if rest, ok := strings.CutPrefix(name, role+"-"); ok {
+		name = rest
+	}
+	return role + "-" + name
 }
 
 // Allocate picks the next id for a freshly-spawned worker of role.
@@ -238,10 +305,38 @@ func (r *Roster) Lookup(id string) (Entry, bool) {
 	return e, ok
 }
 
-// ReserveNamed marks id (a bare operator-supplied name) as in-use
-// under role. If id already exists under a different role, returns
-// the existing entry and an error so the caller can surface a clear
-// "name belongs to another role" message. If id already exists
+// FindByBareName returns every canonical entry whose ID matches
+// `<role>-<bareName>`. Used by the bare-name socket / worktree
+// adoption paths after dedupCanonicalLocked has folded pre-
+// canonicalisation entries onto their canonical siblings. Returns
+// zero entries when bareName isn't a base of any canonical id; can
+// return multiple when the same bare name is used across roles
+// (e.g. `worker-ada` and `reviewer-ada`).
+func (r *Roster) FindByBareName(bareName string) []Entry {
+	if bareName == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []Entry
+	for id, e := range r.entries {
+		if e.Role == "" {
+			continue
+		}
+		if id == e.Role+"-"+bareName {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// ReserveNamed marks id (the canonical `<role>-<name>` agent id) as
+// in-use under role. Callers compose the canonical id via
+// CanonicalID before calling. If id already exists under a different
+// role, returns the existing entry and an error so the caller can
+// surface a clear "name belongs to another role" message — this is
+// defensive; with canonical ids the role is encoded in the key, so
+// cross-role collisions don't normally arise. If id already exists
 // under role, this is a no-op for Source — a reincarnated `named`
 // entry stays `named`.
 func (r *Roster) ReserveNamed(id, role string) (Entry, error) {

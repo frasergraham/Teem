@@ -125,6 +125,16 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 		}
 		workDir = filepath.Join(p.WorktreeBase, spec.ID)
 		branch = "teem/" + spec.ID
+		// Pre-canonicalisation named workers wrote their worktree at
+		// `<base>/<bare>/` on branch `teem/<bare>`. If the canonical
+		// dir doesn't exist yet and the bare-name sibling does, this
+		// is a still-orphaned pre-canonicalisation worker — rename
+		// the worktree and branch in place so its commits aren't
+		// stranded. Best-effort: any failure logs and falls through
+		// to the normal EnsureWorktree path, which will then create a
+		// fresh canonical worktree (operator can clean up the orphan
+		// with `git worktree remove` + `git branch -D` if needed).
+		p.adoptOrphanedWorktree(ctx, spec, workDir, branch)
 		p.mu.Lock()
 		err := EnsureWorktree(ctx, p.RepoRoot, workDir, branch)
 		p.mu.Unlock()
@@ -270,6 +280,53 @@ func (p *LocalProvisioner) Teardown(ctx context.Context, a *Agent) error {
 		return RemoveWorktree(ctx, p.RepoRoot, a.Cloud.TaskARN)
 	}
 	return nil
+}
+
+// adoptOrphanedWorktree renames a pre-canonicalisation worker's
+// worktree dir + branch onto the canonical id so the worker's prior
+// commits don't get stranded. Fires only when:
+//
+//   - canonical workdir (`<base>/<role>-<bare>/`) doesn't exist yet,
+//   - bare workdir (`<base>/<bare>/`) does exist,
+//   - bare branch (`teem/<bare>`) exists.
+//
+// All three are pre-canonicalisation hallmarks; with them satisfied,
+// it's safe to `git worktree move` + `git branch -m` to the canonical
+// form. Best-effort throughout: any failure is logged and ignored so
+// the normal EnsureWorktree path can still create a fresh canonical
+// worktree.
+func (p *LocalProvisioner) adoptOrphanedWorktree(ctx context.Context, spec AgentSpec, canonicalDir, canonicalBranch string) {
+	if spec.Role == "" {
+		return
+	}
+	bareName := strings.TrimPrefix(spec.ID, spec.Role+"-")
+	if bareName == spec.ID {
+		// spec.ID doesn't carry the `<role>-` prefix — nothing to
+		// adopt; this isn't a canonicalised id.
+		return
+	}
+	bareDir := filepath.Join(p.WorktreeBase, bareName)
+	bareBranch := "teem/" + bareName
+	if _, err := os.Stat(canonicalDir); err == nil {
+		return // canonical already exists; nothing to adopt
+	}
+	if _, err := os.Stat(bareDir); err != nil {
+		return // no bare orphan
+	}
+	if !branchExists(ctx, p.RepoRoot, bareBranch) {
+		return // bare branch missing — can't safely move
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// git worktree move <bareDir> <canonicalDir> — moves both the
+	// on-disk directory and git's bookkeeping in one shot.
+	if err := runGit(ctx, p.RepoRoot, "worktree", "move", bareDir, canonicalDir); err != nil {
+		fmt.Fprintf(os.Stderr, "[local-provisioner] adopt orphan worktree %s → %s: %v\n", bareDir, canonicalDir, err)
+		return
+	}
+	if err := runGit(ctx, p.RepoRoot, "branch", "-m", bareBranch, canonicalBranch); err != nil {
+		fmt.Fprintf(os.Stderr, "[local-provisioner] rename orphan branch %s → %s: %v\n", bareBranch, canonicalBranch, err)
+	}
 }
 
 // CheckLiveness dials the worker's unix socket. A successful dial

@@ -176,9 +176,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) registerTools() {
 	s.core.AddTool(
 		mcpgo.NewTool("spawn_agent",
-			mcpgo.WithDescription("Spawn a worker agent of the given role from the team roster. Pass `name` to choose the worker's identity: a previously-retired name reincarnates the same worker (its branch teem/<name> and roster history come back); a name already in use returns idempotently; an unknown name is registered. Omit `name` to let the daemon pick from the wordlist."),
+			mcpgo.WithDescription("Spawn a worker agent of the given role from the team roster. The resulting agent_id is always <role>-<name>. Pass `name` to choose the worker's identity: a previously-retired name reincarnates the same worker (its branch teem/<role>-<name> and roster history come back); a name already in use returns idempotently; an unknown name is registered. Omit `name` to let the daemon pick from the wordlist."),
 			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Role name as declared in the team YAML.")),
-			mcpgo.WithString("name", mcpgo.Description("Optional. Spawn under this exact name. Must match ^[a-z][a-z0-9]{0,30}$. Reincarnates a prior worker with the same name, idempotently returns an already-live id, or registers a fresh entry.")),
+			mcpgo.WithString("name", mcpgo.Description("Optional. Bare wordlist name (e.g. `ada`). Must match ^[a-z][a-z0-9]{0,30}$. The full agent_id form (`worker-ada`) is also accepted — the `<role>-` prefix is stripped before validation, so pasting an id straight back from list_agents works. Reincarnates a prior worker with the same (role, name), idempotently returns an already-live id, or registers a fresh entry.")),
 		),
 		s.handleSpawnAgent,
 	)

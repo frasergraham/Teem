@@ -147,6 +147,72 @@ func TestRemoveWorktree_KeepsBranch(t *testing.T) {
 	}
 }
 
+// TestAdoptOrphanedWorktree_RenamesBareToCanonical covers the
+// pre-canonicalisation orphan path: a worktree at `<base>/ada/` on
+// branch `teem/ada` should be renamed in-place to `<base>/worker-ada/`
+// on `teem/worker-ada` when a Provision call comes in for the
+// canonical id `worker-ada`. Best-effort, so failures should not
+// surface — but the happy path must rename both the dir and the
+// branch.
+func TestAdoptOrphanedWorktree_RenamesBareToCanonical(t *testing.T) {
+	repo := initRepo(t)
+	base := t.TempDir()
+	ctx := context.Background()
+
+	// Pre-canonicalisation state: bare worktree on a bare branch.
+	bareDir := filepath.Join(base, "ada")
+	if err := EnsureWorktree(ctx, repo, bareDir, "teem/ada"); err != nil {
+		t.Fatalf("seed bare worktree: %v", err)
+	}
+
+	p := &LocalProvisioner{RepoRoot: repo, WorktreeBase: base}
+	canonicalDir := filepath.Join(base, "worker-ada")
+	canonicalBranch := "teem/worker-ada"
+	p.adoptOrphanedWorktree(ctx, AgentSpec{ID: "worker-ada", Role: "worker"}, canonicalDir, canonicalBranch)
+
+	if _, err := os.Stat(bareDir); err == nil {
+		t.Errorf("bare worktree %q should have been moved", bareDir)
+	}
+	if _, err := os.Stat(canonicalDir); err != nil {
+		t.Errorf("canonical worktree missing after adopt: %v", err)
+	}
+	if branchExists(ctx, repo, "teem/ada") {
+		t.Errorf("bare branch teem/ada should have been renamed")
+	}
+	if !branchExists(ctx, repo, canonicalBranch) {
+		t.Errorf("canonical branch %q should exist after rename", canonicalBranch)
+	}
+}
+
+// TestAdoptOrphanedWorktree_NoOpWhenCanonicalExists guards against
+// the helper clobbering an already-canonical worktree.
+func TestAdoptOrphanedWorktree_NoOpWhenCanonicalExists(t *testing.T) {
+	repo := initRepo(t)
+	base := t.TempDir()
+	ctx := context.Background()
+
+	canonicalDir := filepath.Join(base, "worker-ada")
+	if err := EnsureWorktree(ctx, repo, canonicalDir, "teem/worker-ada"); err != nil {
+		t.Fatalf("seed canonical worktree: %v", err)
+	}
+	// Also create a bare orphan to confirm it's left alone when
+	// canonical already exists.
+	bareDir := filepath.Join(base, "ada")
+	if err := EnsureWorktree(ctx, repo, bareDir, "teem/ada"); err != nil {
+		t.Fatalf("seed bare worktree: %v", err)
+	}
+
+	p := &LocalProvisioner{RepoRoot: repo, WorktreeBase: base}
+	p.adoptOrphanedWorktree(ctx, AgentSpec{ID: "worker-ada", Role: "worker"}, canonicalDir, "teem/worker-ada")
+
+	if _, err := os.Stat(bareDir); err != nil {
+		t.Errorf("bare orphan was unexpectedly removed: %v", err)
+	}
+	if _, err := os.Stat(canonicalDir); err != nil {
+		t.Errorf("canonical worktree disappeared: %v", err)
+	}
+}
+
 func TestRemoveWorktree_MissingIsOK(t *testing.T) {
 	repo := initRepo(t)
 	if err := RemoveWorktree(context.Background(), repo, filepath.Join(t.TempDir(), "nope")); err != nil {
