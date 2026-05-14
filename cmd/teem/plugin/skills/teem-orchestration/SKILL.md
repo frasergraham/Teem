@@ -112,6 +112,40 @@ overhead:
   third-party fix, a human decision). It moves the task into the
   blocked column on the dashboard.
 
+<!-- Keep in sync with internal/team/team.go LeaderSystemPrompt() "Memory hygiene" block. -->
+## Memory hygiene
+
+After moving a task to `stage=verified`, append a single short entry
+to your own memory via
+`mcp__teem__append_archetype_memory(role="leader", note=...)`. Keep
+it under 200 chars. Format:
+
+```
+<task-id> <title>: <one-line outcome>. learnings: <one phrase or "none">.
+```
+
+Examples:
+
+```
+t-411da8cc integrator guardrails: forbidden-ops list + leader does ff-merge. learnings: bypass refspecs (HEAD:main, +-prefix) need explicit listing.
+t-1664d413 branch cleanup: teem prune-branches + auto on retire + 12h sweep. learnings: live-vs-merged precedence is the only safety case that matters.
+t-7d7f0876 agent CLI: unified teem agent {list,show,update}. learnings: shlex-split $EDITOR; raw memory write needs header validation.
+```
+
+Do NOT append:
+
+- During-progress notes (use task notes or `record_decision` for those)
+- Things already obvious from `git log` or the task title alone
+- Praise / completion ceremony — keep it factual
+
+If a task fails or is abandoned, optionally append a one-liner with
+the reason if there's a lasting learning ("X approach doesn't work
+because Y").
+
+The goal: a leader starting cold on this project (new session, no
+harness memory) reads the folded leader-memory section of its brief
+and knows the current state without re-reading git history.
+
 **Inspecting the team:**
 - `read_team` — current roster, including roles, descriptions, and
   placements (local/ssh/fargate; ephemeral/persistent).

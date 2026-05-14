@@ -176,6 +176,31 @@ func TestLeaderSystemPrompt_IncludesIntegratorWorkflow(t *testing.T) {
 	}
 }
 
+func TestLeaderSystemPrompt_IncludesMemoryHygiene(t *testing.T) {
+	team := &Team{
+		Name:       "alpha",
+		Leader:     LeaderSpec{SystemPrompt: "Ship it."},
+		Archetypes: cloneArchetypes(DefaultArchetypes),
+	}
+	if err := team.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	prompt := team.LeaderSystemPrompt()
+	for _, want := range []string{
+		"Memory hygiene",
+		"stage=verified",
+		`append_archetype_memory(role="leader"`,
+		"<task-id> <title>",
+		"learnings:",
+		"Do NOT append",
+		"t-411da8cc",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("LeaderSystemPrompt missing %q\n--- full ---\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildDefaultLeaderPrompt_FoldsClaudeMD(t *testing.T) {
 	got := BuildDefaultLeaderPrompt("# alpha\nuse goimports\n")
 	if !strings.Contains(got, "leading a small team") {
