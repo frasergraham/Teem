@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,6 +121,10 @@ func (o *outbox) Start(ctx context.Context) {
 func (o *outbox) run(ctx context.Context) {
 	backoff := time.Second
 	const maxBackoff = 5 * time.Minute
+	var (
+		consecutiveFailures int
+		lastLoggedAt        time.Time
+	)
 	for {
 		// Wait for a signal or a periodic retry tick (caps backoff).
 		select {
@@ -130,11 +135,29 @@ func (o *outbox) run(ctx context.Context) {
 		}
 		err := o.drain(ctx)
 		if err == nil {
+			if consecutiveFailures > 0 {
+				fmt.Fprintf(os.Stderr, "[outbox] %s: recovered after %d failure(s)\n", o.agentID, consecutiveFailures)
+				consecutiveFailures = 0
+				lastLoggedAt = time.Time{}
+			}
 			backoff = time.Second
 			continue
 		}
-		// Soft failure: leader unreachable. Don't log every retry; the
-		// event remains queued and we'll try again.
+		consecutiveFailures++
+		// Surface failures so a silently-orphaned worker (e.g. daemon
+		// rotated the bearer token across a restart) doesn't look
+		// indistinguishable from a healthy idle worker. First failure,
+		// then again every ~5 minutes thereafter — never spammy, never
+		// silent.
+		if consecutiveFailures == 1 || time.Since(lastLoggedAt) > 5*time.Minute {
+			tag := "transient"
+			if strings.Contains(err.Error(), "401") {
+				tag = "AUTH REJECTED — daemon may have rotated its bearer token; this worker is orphaned"
+			}
+			fmt.Fprintf(os.Stderr, "[outbox] %s: %s (%s) — retrying with backoff %s\n",
+				o.agentID, err.Error(), tag, backoff)
+			lastLoggedAt = time.Now()
+		}
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
