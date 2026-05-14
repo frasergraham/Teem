@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/leaderstatus"
@@ -70,7 +71,14 @@ func expandable(s string) template.HTML {
 	if len(s) <= inlineMax {
 		return template.HTML(escaped)
 	}
-	preview := html.EscapeString(s[:inlineMax]) + "…"
+	// Trim back to the last valid UTF-8 rune boundary so a 2/3-byte
+	// rune at the cap doesn't leave an invalid sequence inside the
+	// preview HTML.
+	end := inlineMax
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	preview := html.EscapeString(s[:end]) + "…"
 	return template.HTML(
 		`<details class="expandable"><summary>` + preview +
 			`</summary><div class="expanded">` + escaped + `</div></details>`,
@@ -193,13 +201,14 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	out := dashboardTeam{Name: rt.team.Name}
 	out.RegisteredAgo = agoShort(rt.registered)
 
-	// Agents from the registry — filtered to "active" (running or
-	// busy). Stopped workers stay in the audit log + per-agent jobs
-	// page; they shouldn't crowd the live dashboard.
+	// Agents from the registry — hide fully-stopped agents only.
+	// Provisioning and error states stay visible: an operator watching
+	// a Fargate spin-up or a crashed worker needs that signal. Stopped
+	// workers remain reachable at /teams/<team>/agents/<id>/jobs.
 	entries := rt.registry.List()
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	for _, e := range entries {
-		if e.State != mcpsrv.StateRunning && e.State != mcpsrv.StateBusy {
+		if e.State == mcpsrv.StateStopped {
 			continue
 		}
 		placement := "—"

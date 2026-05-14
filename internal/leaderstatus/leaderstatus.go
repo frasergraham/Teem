@@ -23,6 +23,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Entry is one agent's most recent status report.
@@ -86,7 +87,13 @@ func (s *Store) Set(agentID, text string, currentTaskIDs []string) error {
 		return fmt.Errorf("leaderstatus: agent_id is required")
 	}
 	if len(text) > MaxTextBytes {
-		text = text[:MaxTextBytes] + "…"
+		// Trim back to the last valid UTF-8 rune boundary so a trailing
+		// multi-byte rune at the cap doesn't end up half-sliced.
+		end := MaxTextBytes
+		for end > 0 && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		text = text[:end] + "…"
 	}
 	taskIDs := append([]string(nil), currentTaskIDs...)
 	s.mu.Lock()

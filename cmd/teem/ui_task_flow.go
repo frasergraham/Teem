@@ -45,6 +45,7 @@ type taskFlowNote struct {
 type taskFlowJob struct {
 	JobID        string
 	AgentID      string
+	StartedAt    time.Time
 	StartedAgo   string
 	StartedShort string
 	Duration     string
@@ -141,6 +142,7 @@ func (d *daemon) renderTaskFlow(w http.ResponseWriter, _ *http.Request, rt *regi
 				view.Timeline = append(view.Timeline, taskFlowJob{
 					JobID:        j.JobID,
 					AgentID:      j.AgentID,
+					StartedAt:    j.StartedAt,
 					StartedAgo:   agoShort(j.StartedAt),
 					StartedShort: timeShort(j.StartedAt),
 					Duration:     durShort(j.Duration()),
@@ -150,8 +152,10 @@ func (d *daemon) renderTaskFlow(w http.ResponseWriter, _ *http.Request, rt *regi
 					JobURL:       fmt.Sprintf("/teams/%s/jobs/%s", rt.team.Name, j.JobID),
 				})
 			}
+			// Sort by absolute timestamp so a timeline spanning midnight
+			// stays chronologically ordered (HH:MM:SS strings can't).
 			sort.SliceStable(view.Timeline, func(i, j int) bool {
-				return view.Timeline[i].StartedShort < view.Timeline[j].StartedShort
+				return view.Timeline[i].StartedAt.Before(view.Timeline[j].StartedAt)
 			})
 		}
 	}

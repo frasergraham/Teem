@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
@@ -256,7 +257,11 @@ func (s *Server) handleAppendArchetypeMemory(_ context.Context, req mcpgo.CallTo
 	const maxNoteBytes = 1024
 	clean := strings.ReplaceAll(strings.ReplaceAll(note, "\r", " "), "\n", " ")
 	if len(clean) > maxNoteBytes {
-		clean = clean[:maxNoteBytes] + "…"
+		end := maxNoteBytes
+		for end > 0 && !utf8.RuneStart(clean[end]) {
+			end--
+		}
+		clean = clean[:end] + "…"
 	}
 	entry := archmem.Entry{
 		Timestamp: time.Now().UTC(),
@@ -545,9 +550,13 @@ func (s *Server) handleRecordDecision(_ context.Context, req mcpgo.CallToolReque
 			return mcpgo.NewToolResultErrorf("task %q not found", taskID), nil
 		}
 	}
+	agentID := req.GetString("agent_id", "leader")
+	if agentID == "" {
+		agentID = "leader"
+	}
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
-		AgentID:   "leader",
+		AgentID:   agentID,
 		Kind:      audit.KindDecisionNote,
 		Message:   text,
 		Meta:      map[string]any{"task_id": taskID},
@@ -574,7 +583,8 @@ func (s *Server) handleRecordBlocker(_ context.Context, req mcpgo.CallToolReques
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	if _, ok := s.plan.Get(taskID); !ok {
+	cur, ok := s.plan.Get(taskID)
+	if !ok {
 		return mcpgo.NewToolResultErrorf("task %q not found", taskID), nil
 	}
 	// Atomic-effect intent: move the task to blocked stage AND
@@ -583,20 +593,33 @@ func (s *Server) handleRecordBlocker(_ context.Context, req mcpgo.CallToolReques
 	// We accept that interleaving order — the audit_kind=blocker_note
 	// event with task_id meta is what the dashboard joins on, not the
 	// plan store.
-	if _, err := s.plan.UpdateTask(taskID, plan.UpdateInput{
-		Status: plan.StatusBlocked,
-		Stage:  plan.StageBlocked,
-	}); err != nil {
-		// If the transition is rejected (e.g. already blocked), fall
-		// through and still emit the audit note — but report the
-		// underlying error.
-		if !errors.Is(err, plan.ErrInvalidStage) {
+	//
+	// Skip the UpdateTask entirely when the task is already at the
+	// blocked stage (and status) so an idempotent re-block doesn't
+	// fail the transition check. Any other rejection is a real error
+	// — surface it to the caller WITH current stage so they can decide,
+	// and do NOT emit the audit note (otherwise the audit and plan
+	// stores disagree).
+	if !(cur.Stage == plan.StageBlocked && cur.Status == plan.StatusBlocked) {
+		if _, err := s.plan.UpdateTask(taskID, plan.UpdateInput{
+			Status: plan.StatusBlocked,
+			Stage:  plan.StageBlocked,
+		}); err != nil {
+			if errors.Is(err, plan.ErrInvalidStage) {
+				return mcpgo.NewToolResultErrorf(
+					"record_blocker: stage %q cannot transition to blocked (current status %q); fix the stage first or call set_task_stage",
+					cur.Stage, cur.Status), nil
+			}
 			return mcpgo.NewToolResultErrorFromErr("record_blocker", err), nil
 		}
 	}
+	agentID := req.GetString("agent_id", "leader")
+	if agentID == "" {
+		agentID = "leader"
+	}
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
-		AgentID:   "leader",
+		AgentID:   agentID,
 		Kind:      audit.KindBlockerNote,
 		Message:   text,
 		Meta:      map[string]any{"task_id": taskID},
