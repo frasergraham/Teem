@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 )
 
 // DefaultLeaderBrief is the out-of-the-box system prompt for the Leader
@@ -108,7 +109,14 @@ func FindClaudeMD() (path, contents string, ok bool) {
 		}
 		if len(data) > maxClaudeMDBytes {
 			fmt.Fprintf(os.Stderr, "[teem] %s is %d bytes; only the first %d will be folded into the leader brief\n", p, len(data), maxClaudeMDBytes)
-			data = data[:maxClaudeMDBytes]
+			// Trim back to the last valid UTF-8 rune boundary so the
+			// brief never contains a half-rune from a multi-byte char
+			// straddling the cap.
+			end := maxClaudeMDBytes
+			for end > 0 && !utf8.RuneStart(data[end]) {
+				end--
+			}
+			data = data[:end]
 		}
 		return p, string(data), true
 	}

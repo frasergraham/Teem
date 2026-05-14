@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Worker outbox written into worktrees by teem-worker
+.teem-events/

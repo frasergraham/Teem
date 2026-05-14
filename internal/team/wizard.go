@@ -34,6 +34,7 @@ func NewWizard(r io.Reader, w io.Writer) *Wizard {
 // Returns ErrCancelled if the operator declines the final write step.
 func (z *Wizard) Run() (*Team, []byte, error) {
 	z.println("teem init — let's build a team.")
+	z.println("Answers in [brackets] are defaults. Hit enter to accept.")
 	z.println("")
 
 	name, err := z.askRequired("Team name", "")
