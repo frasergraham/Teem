@@ -100,6 +100,27 @@ func TestDefaultLeaderBrief_RendersInSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestLeaderSystemPrompt_IncludesLeaderStatusGuidance(t *testing.T) {
+	team := &Team{
+		Name:       "alpha",
+		Leader:     LeaderSpec{SystemPrompt: "Ship it."},
+		Archetypes: cloneArchetypes(DefaultArchetypes),
+	}
+	if err := team.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	prompt := team.LeaderSystemPrompt()
+	for _, want := range []string{
+		"update_leader_status",
+		"paragraph",
+		"every ~5",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("LeaderSystemPrompt missing %q\n--- full ---\n%s", want, prompt)
+		}
+	}
+}
+
 func TestBuildDefaultLeaderPrompt_FoldsClaudeMD(t *testing.T) {
 	got := BuildDefaultLeaderPrompt("# alpha\nuse goimports\n")
 	if !strings.Contains(got, "leading a small team") {

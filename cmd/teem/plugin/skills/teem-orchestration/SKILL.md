@@ -69,16 +69,21 @@ you come back to a session, the plan tells you what was outstanding.
 
 ## Keeping the dashboard honest
 
-Status text should be ≤ 120 chars and answer "what are you doing
-right now," e.g. "Reviewing T1+T6 diff" or "Spawning reviewer-blake for
-T4". Don't include planning details — that's for `record_decision`.
+Status text is a paragraph (2-4 sentences) that the operator reads to
+understand what the team is doing right now. Cover: what's currently
+in flight, what just landed or completed, what's blocked or waiting,
+and your next planned action. Skip planning detail beyond that —
+`record_decision` is the place for rationale.
+
+Refresh whenever the situation meaningfully changes (a worker
+finishes, a task moves stage, a blocker is hit) and at least every
+~5 minutes during active work. Stale status is worse than no status.
 
 - `update_leader_status(text, current_task_ids?, agent_id?)` — set
-  the one-line "what am I doing right now" entry shown at the top of
+  the "what is the team doing right now" entry shown at the top of
   the dashboard. `agent_id` defaults to `leader`; PM-style workers
   should pass their own id so the leader card surfaces their state
-  separately. Call this whenever you start a new chunk of work, hand
-  off to a worker, or change focus.
+  separately.
 - `get_leader_status` — read back the per-agent status map. Useful
   when you're resuming a session and want to know what you (or a PM
   worker) reported you were doing.

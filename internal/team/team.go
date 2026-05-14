@@ -250,6 +250,9 @@ func (t *Team) LeaderSystemPrompt() string {
 		fmt.Fprintf(&b, "  - %s (up to %d, %s, %s): %s\n", a.Role, a.MaxConcurrent, a.Placement, lc, a.Description)
 	}
 	b.WriteString("\nWhen you spawn from an archetype you get an instance id with a wordlist name (e.g. worker-ada, reviewer-blake). Names persist across the worker's lifetime; once retired they return to the pool and may be reincarnated when the wordlist runs out of fresh entries.\n")
+	b.WriteString("\n--- Keeping the dashboard honest ---\n")
+	b.WriteString("update_leader_status is the dashboard's \"what is the team doing right now\" panel — the operator watches it. Keep it fresh: write a paragraph (2-4 sentences) covering what's currently in flight, what just landed or completed, what's blocked or waiting, and your next planned action.\n")
+	b.WriteString("Refresh it whenever the situation meaningfully changes (a worker finishes, a task moves stage, a blocker is hit) and at least every ~5 minutes during active work. Stale status is worse than no status.\n")
 	b.WriteString("\n--- Project brief ---\n")
 	b.WriteString(strings.TrimSpace(t.Leader.SystemPrompt))
 	b.WriteString("\n")
