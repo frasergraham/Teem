@@ -124,6 +124,58 @@ func TestLeaderSystemPrompt_IncludesLeaderStatusGuidance(t *testing.T) {
 	}
 }
 
+// TestLeaderSystemPrompt_IncludesIntegratorWorkflow guards the
+// "Integrator workflow" block the leader carries: the contract phrase,
+// the fast-forward command, and (because the leader prompt
+// interpolates IntegratorForbiddenOps directly) every command name
+// from the forbidden-ops list. The latter check is the cheap-but-
+// thorough version of Issue 3, option B — extending the constant in
+// defaults.go without updating the leader prompt would now fail here.
+func TestLeaderSystemPrompt_IncludesIntegratorWorkflow(t *testing.T) {
+	team := &Team{
+		Name:       "alpha",
+		Leader:     LeaderSpec{SystemPrompt: "Ship it."},
+		Archetypes: cloneArchetypes(DefaultArchetypes),
+	}
+	if err := team.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	prompt := team.LeaderSystemPrompt()
+	for _, want := range []string{
+		"Integrator workflow",
+		"merge --ff-only teem/integrator-",
+		"git update-ref refs/heads/main",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("LeaderSystemPrompt missing %q\n--- full ---\n%s", want, prompt)
+		}
+	}
+	// Every command name in IntegratorForbiddenOps must show up in the
+	// leader prompt — the leader prompt now interpolates the constant
+	// directly, so this should always hold. If a future refactor
+	// reverts to paraphrasing, this guard catches the drift.
+	for _, want := range []string{
+		"git update-ref refs/heads/main",
+		"git branch -f main",
+		"git push -f origin main",
+		"git push --force origin main",
+		"git push origin HEAD:main",
+		"git push origin <sha>:main",
+		"git push origin +HEAD:refs/heads/main",
+		"git fetch . HEAD:refs/heads/main",
+		"git fetch <remote> +<sha>:refs/heads/main",
+		"git symbolic-ref HEAD refs/heads/main",
+		"git symbolic-ref refs/heads/main",
+		"git checkout main --force",
+		".git/refs/heads/main",
+		"The only ref you may move is refs/heads/teem/integrator-",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("LeaderSystemPrompt missing forbidden-ops entry %q", want)
+		}
+	}
+}
+
 func TestBuildDefaultLeaderPrompt_FoldsClaudeMD(t *testing.T) {
 	got := BuildDefaultLeaderPrompt("# alpha\nuse goimports\n")
 	if !strings.Contains(got, "leading a small team") {

@@ -256,6 +256,13 @@ func (t *Team) LeaderSystemPrompt() string {
 	b.WriteString("First thing every new turn: check if the last update_leader_status was more than ~5 minutes ago (use get_leader_status). If yes, refresh it BEFORE anything else when responding. This is non-negotiable — the operator watches this panel and stale status erodes their trust in the team.\n")
 	b.WriteString("The status itself is a paragraph (2-4 sentences): what's currently in flight, what just landed or completed, what's blocked or waiting, your next planned action. Skip planning rationale beyond that — record_decision is the place for it.\n")
 	b.WriteString("Also refresh mid-turn whenever the situation meaningfully changes — a worker finishes, a task moves stage, a blocker is hit. Multiple updates per turn are fine; stale ones are not.\n")
+	// NOTE: keep in sync with cmd/teem/plugin/skills/teem-orchestration/SKILL.md
+	// "Integrator workflow" section.
+	b.WriteString("\n--- Integrator workflow ---\n")
+	b.WriteString("When briefing an integrator, instruct them to commit ONLY to their own teem/integrator-<name> branch — never to touch main. After they report done, YOU fast-forward main from the operator's primary worktree: `git merge --ff-only teem/integrator-<name>`. If that fast-forward fails, something diverged — investigate, never force.\n\n")
+	b.WriteString("The forbidden-ops list every integrator carries (workers, including the integrator, must NEVER run these):\n\n")
+	b.WriteString(IntegratorForbiddenOps)
+	b.WriteString("\n")
 	b.WriteString("\n--- Project brief ---\n")
 	b.WriteString(strings.TrimSpace(t.Leader.SystemPrompt))
 	b.WriteString("\n")
