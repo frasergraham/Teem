@@ -181,12 +181,50 @@ Do it yourself when:
    reference `query_audit` if the agent made multiple decisions or
    pushed a branch.
 
+## Checking for worker wake events at the top of each turn
+
+You can't be paged when a worker finishes — `teem chat` exec()s straight
+into the claude binary, so there's no async banner mechanism. Instead,
+**at the top of every chat turn**, call `query_audit` with a tight
+recent window for the wake-class event kinds:
+
+- `job_complete`, `job_error` — a worker delivered (or failed) a job.
+- `job_transcript_ready` — full transcript is now available.
+- `worker_stopped` — a worker self-terminated; you can `spawn_agent`
+  with the same name to bring it back.
+- `decision_note`, `blocker_note` — a worker or another participant
+  recorded something important.
+
+Example call: `query_audit(since: "<2 min before previous turn>",
+kinds: ["job_complete", "job_error", "worker_stopped"])`. If anything
+came back, surface it briefly in your reply — "worker-ada finished T11
+while you were typing" — before answering the user's actual message.
+This is the manual-but-reliable substitute for an async banner.
+
 ## Persistent agents
 
 Some agents have `lifecycle: persistent`. They're already running across
 chat sessions — they appear in `list_agents` without needing
 `spawn_agent`. Treat them as long-lived collaborators; their state
 (branches, working dirs) carries over.
+
+**Named persistent agents (operator setup, future-facing).** Today
+persistent archetypes use the legacy numeric id shape (`teem-worker-1`,
+`teem-worker-2`) because the operator manages the worker subprocess
+hostnames out-of-band. Migrating these to names (per T9) requires:
+
+1. The operator sets `TEEM_AGENT_ID=worker-ada` (etc.) when starting
+   the `teem-worker` subprocess so its self-reported id matches a name
+   the daemon recognizes.
+2. The team YAML's persistent archetype declares which named instances
+   it expects: `archetypes[i].instances: [ada, blake]`.
+3. The daemon's reconcile loop probes each named instance instead of
+   iterating numerically.
+
+None of this is wired yet — the `// TODO(named-persistent):` marker in
+`internal/agent/spawner.go` is the breadcrumb. For now, declare
+persistent agents in YAML with `lifecycle: persistent` and accept
+numeric ids; ephemeral spawns get named ids automatically.
 
 ## Recalling past work
 
