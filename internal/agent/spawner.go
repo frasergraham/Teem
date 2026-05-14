@@ -695,10 +695,16 @@ func (s *Spawner) startLivenessWatch(w provisioner.Watcher, a *provisioner.Agent
 				s.publishLog(a.ID, fmt.Sprintf("liveness check error: %v", err))
 				continue
 			}
-			// Agent has stopped on the backend.
-			_ = s.registry.SetState(a.ID, mcpsrv.StateStopped)
+			// Agent has stopped on the backend. Fail outstanding jobs
+			// first (HandleWorkerStopped tears down subs and the
+			// provisioner but doesn't surface pending-job failures),
+			// then fully reconcile via the same idempotent helper
+			// used by the worker_stopped audit path — otherwise
+			// s.workers/s.provisioned leak and MaxConcurrent keeps
+			// counting the dead agent.
 			s.failOutstandingJobs(subCtx, a.ID, "agent stopped")
-			s.publishLog(a.ID, "agent stopped on backend; jobs failed")
+			s.publishLog(a.ID, "agent stopped on backend; reconciling")
+			s.HandleWorkerStopped(subCtx, a.ID)
 			return
 		}
 	}()
