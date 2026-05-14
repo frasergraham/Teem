@@ -933,6 +933,50 @@ func (s *Spawner) StopAgent(ctx context.Context, agentID string) error {
 	return nil
 }
 
+// HandleWorkerStopped reconciles leader state with a worker that
+// terminated under its own steam. Mirrors StopAgent's bookkeeping
+// (cancel subscriptions, flip registry to Stopped, drop from internal
+// maps), then calls provisioner.Teardown with Agent.Stopped=true so
+// the provisioner skips the /shutdown POST / SIGTERM path that would
+// otherwise hang waiting for an already-dead process.
+//
+// No-op when the agent is unknown — duplicate worker_stopped events
+// can arrive (audit posts are at-least-once) and the second one
+// finds nothing to clean up.
+func (s *Spawner) HandleWorkerStopped(ctx context.Context, agentID string) {
+	s.mu.Lock()
+	_, hasWorker := s.workers[agentID]
+	pa, hasProv := s.provisioned[agentID]
+	cancelLiveness := s.subs["liveness:"+agentID]
+	cancelResults := s.subs[agentID]
+	delete(s.workers, agentID)
+	delete(s.provisioned, agentID)
+	delete(s.subs, "liveness:"+agentID)
+	delete(s.subs, agentID)
+	s.mu.Unlock()
+
+	if !hasWorker && !hasProv {
+		return
+	}
+	if cancelLiveness != nil {
+		cancelLiveness()
+	}
+	if cancelResults != nil {
+		cancelResults()
+	}
+	_ = s.registry.SetState(agentID, mcpsrv.StateStopped)
+
+	if !hasProv {
+		return
+	}
+	pa.agent.Stopped = true
+	tdCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := pa.provisioner.Teardown(tdCtx, pa.agent); err != nil {
+		s.publishLog(agentID, fmt.Sprintf("post-stop teardown: %v", err))
+	}
+}
+
 // IsRunning reports whether the spawner currently owns a worker for
 // agentID. Used by MCP tools that need to decide whether removing the
 // agent from the roster is safe.

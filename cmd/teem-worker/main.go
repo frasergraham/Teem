@@ -85,6 +85,33 @@ func (r *jobRecord) snapshot() (jobStatus, string, string) {
 	return r.status, r.output, r.errMsg
 }
 
+// workerState tracks the lifecycle of a self-exiting worker. The
+// transitions are one-way: serving → draining → shutdown.
+//
+//   - serving: accepts /jobs POSTs normally.
+//   - draining: rejects new jobs with 409; armed exit timer is pending.
+//   - shutdown: pre-exit hooks and worker_stopped emit are running or
+//     done; the server is about to close.
+type workerState int
+
+const (
+	stateServing workerState = iota
+	stateDraining
+	stateShutdown
+)
+
+func (s workerState) String() string {
+	switch s {
+	case stateServing:
+		return "serving"
+	case stateDraining:
+		return "draining"
+	case stateShutdown:
+		return "shutdown"
+	}
+	return "unknown"
+}
+
 type worker struct {
 	agentID       string
 	role          string
@@ -106,9 +133,30 @@ type worker struct {
 	gitOpts     gitsetup.Options
 	gitAutoPush bool
 
-	mu       sync.Mutex
-	jobs     map[string]*jobRecord
-	inFlight atomic.Int64
+	// exitAfterIdle, when > 0, arms a self-exit timer after every job
+	// completion. The worker quits if inFlight stays at 0 for this
+	// long. 0 disables — worker stays up until /shutdown or signal.
+	exitAfterIdle time.Duration
+	// startedAt is the moment Start() finished setting up; emitted in
+	// worker_stopped meta as uptime_s.
+	startedAt time.Time
+
+	// shutdownCh is closed to ask the server goroutine to gracefully
+	// stop. Closed by either the /shutdown handler or the self-exit
+	// path. Replaces the old local var in run().
+	shutdownCh chan struct{}
+
+	// preExitHooks run inside fireDrain before worker_stopped is
+	// emitted. Each gets a 10s ctx; errors are logged but don't block
+	// exit. Order is registration order. Hooks run sequentially under
+	// no lock so they may use the worker's outbox.
+	preExitHooks []func(context.Context) error
+
+	mu         sync.Mutex
+	jobs       map[string]*jobRecord
+	inFlight   atomic.Int64
+	state      workerState
+	drainTimer *time.Timer
 }
 
 func main() {
@@ -188,6 +236,9 @@ func run() error {
 		jobs:          map[string]*jobRecord{},
 		gitOpts:       gitOpts,
 		gitAutoPush:   cfg.gitAutoPush && cfg.gitRepoURL != "",
+		exitAfterIdle: cfg.exitAfterIdle,
+		startedAt:     time.Now(),
+		shutdownCh:    make(chan struct{}),
 	}
 
 	// Audit outbox: events buffer on disk and drain to the leader when
@@ -200,10 +251,9 @@ func run() error {
 	defer ob.Close()
 	w.outbox = ob
 
-	// Shutdown channel: hit POST /shutdown to stop the worker. Done
-	// in-place via a small channel the HTTP handler closes; the
+	// Shutdown channel: hit POST /shutdown to stop the worker, or
+	// arm-and-fire the idle-exit timer. Closed by either path; the
 	// signal-context shutdown path picks it up.
-	shutdownCh := make(chan struct{})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", w.handleHealth)
 	mux.HandleFunc("/jobs", w.handleJobsCollection)
@@ -214,12 +264,7 @@ func run() error {
 			return
 		}
 		rw.WriteHeader(http.StatusAccepted)
-		select {
-		case <-shutdownCh:
-			// already shutting down
-		default:
-			close(shutdownCh)
-		}
+		w.signalShutdown()
 	})
 
 	var ln net.Listener
@@ -286,8 +331,8 @@ func run() error {
 	go func() {
 		select {
 		case <-ctx.Done():
-		case <-shutdownCh:
-			fmt.Fprintln(os.Stderr, "[teem-worker] /shutdown received")
+		case <-w.shutdownCh:
+			fmt.Fprintln(os.Stderr, "[teem-worker] shutdown signal received")
 		}
 		ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -313,6 +358,13 @@ type config struct {
 	// audit event. Zero disables heartbeats.
 	heartbeatInterval time.Duration
 
+	// exitAfterIdle controls the self-exit timer. After every job
+	// completes, if inFlight stays at 0 for this long, the worker
+	// emits worker_stopped and shuts itself down. Zero disables.
+	// Ephemeral local workers get 2s by default (set by the leader's
+	// LocalProvisioner); persistent + remote workers leave it unset.
+	exitAfterIdle time.Duration
+
 	// Git settings; cloning happens only when gitRepoURL is non-empty.
 	gitRepoURL      string
 	gitToken        string
@@ -333,6 +385,7 @@ func loadConfig(portFlag string) (*config, error) {
 		workingDir:        os.Getenv("TEEM_WORKER_WORKDIR"),
 		leaderURL:         strings.TrimRight(os.Getenv("TEEM_LEADER_URL"), "/"),
 		heartbeatInterval: parseHeartbeatInterval(os.Getenv("TEEM_HEARTBEAT_INTERVAL"), 60*time.Second),
+		exitAfterIdle:     parseExitAfterIdle(os.Getenv("TEEM_EXIT_AFTER_IDLE")),
 		gitRepoURL:        os.Getenv("TEEM_GIT_REPO_URL"),
 		gitToken:          os.Getenv("TEEM_GIT_TOKEN"),
 		gitUsername:       os.Getenv("TEEM_GIT_USERNAME"),
@@ -387,15 +440,23 @@ type healthResponse struct {
 	AgentID      string `json:"agent_id"`
 	Role         string `json:"role,omitempty"`
 	JobsInFlight int64  `json:"jobs_in_flight"`
+	// State is the worker's lifecycle state ("serving" | "draining" |
+	// "shutdown"). Used by the leader's polling debounce to spot a
+	// worker that is on its way out before a /jobs POST 409s.
+	State string `json:"state,omitempty"`
 }
 
 func (w *worker) handleHealth(rw http.ResponseWriter, _ *http.Request) {
+	w.mu.Lock()
+	st := w.state
+	w.mu.Unlock()
 	writeJSON(rw, http.StatusOK, healthResponse{
 		OK:           true,
 		Hostname:     w.hostname,
 		AgentID:      w.agentID,
 		Role:         w.role,
 		JobsInFlight: w.inFlight.Load(),
+		State:        st.String(),
 	})
 }
 
@@ -429,6 +490,11 @@ func (w *worker) handleJobsCollection(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	w.mu.Lock()
+	if w.state != stateServing {
+		w.mu.Unlock()
+		writeJSON(rw, http.StatusConflict, map[string]string{"error": "draining"})
+		return
+	}
 	if _, exists := w.jobs[req.JobID]; exists {
 		w.mu.Unlock()
 		http.Error(rw, "duplicate job_id", http.StatusConflict)
@@ -436,6 +502,10 @@ func (w *worker) handleJobsCollection(rw http.ResponseWriter, r *http.Request) {
 	}
 	rec := newJobRecord()
 	w.jobs[req.JobID] = rec
+	// Bump inFlight under the same lock as the state check so a
+	// concurrent jobEnded() can't observe state=serving && inFlight=0
+	// after we've committed to running this job.
+	w.inFlight.Add(1)
 	w.mu.Unlock()
 
 	go w.runJob(r.Context(), req, rec)
@@ -450,8 +520,10 @@ func (w *worker) runJob(parent context.Context, req jobRequest, rec *jobRecord) 
 	// job.
 	_ = parent
 	ctx := context.Background()
-	w.inFlight.Add(1)
-	defer w.inFlight.Add(-1)
+	// inFlight was incremented by the /jobs handler under w.mu; here we
+	// just guarantee the matching decrement and trigger the self-exit
+	// check via jobEnded.
+	defer w.jobEnded()
 
 	rec.mu.Lock()
 	rec.status = statusRunning
@@ -709,6 +781,121 @@ func truncateString(s string, cap int) string {
 		return s
 	}
 	return s[:cap] + "\n…<truncated>"
+}
+
+// parseExitAfterIdle reads a Go-duration string from env. Empty, "0",
+// "off", "disabled", "false", or "no" disables (returns 0). Invalid
+// values also return 0 (with a stderr note) — we err on the side of
+// staying alive when the operator's config is malformed.
+func parseExitAfterIdle(s string) time.Duration {
+	s = strings.TrimSpace(strings.ToLower(s))
+	switch s {
+	case "", "0", "off", "disabled", "false", "no":
+		return 0
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		fmt.Fprintf(os.Stderr, "[teem-worker] bad TEEM_EXIT_AFTER_IDLE %q; staying alive\n", s)
+		return 0
+	}
+	return d
+}
+
+// AddPreExitHook registers fn to run inside the self-exit path,
+// BEFORE worker_stopped is emitted and the outbox is drained. Each
+// hook gets a 10s context; errors are logged but never block exit.
+// Hooks run in registration order. Safe to call only before Start.
+func (w *worker) AddPreExitHook(fn func(context.Context) error) {
+	if fn == nil {
+		return
+	}
+	w.mu.Lock()
+	w.preExitHooks = append(w.preExitHooks, fn)
+	w.mu.Unlock()
+}
+
+// signalShutdown closes shutdownCh exactly once. Used by /shutdown and
+// by the self-exit timer's runExitSequence.
+func (w *worker) signalShutdown() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	select {
+	case <-w.shutdownCh:
+		// already closed
+	default:
+		close(w.shutdownCh)
+	}
+}
+
+// jobEnded is the bookend for the handler's inFlight.Add(1). It
+// decrements inFlight and, if the worker is idle and exitAfterIdle is
+// configured, arms the drain timer.
+func (w *worker) jobEnded() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := w.inFlight.Add(-1)
+	if w.state != stateServing || w.exitAfterIdle <= 0 || n != 0 {
+		return
+	}
+	w.state = stateDraining
+	w.drainTimer = time.AfterFunc(w.exitAfterIdle, w.fireDrain)
+}
+
+// fireDrain is the drain timer's callback. Re-checks the state under
+// lock (a job may have raced in, though our handler 409s during
+// draining — defensive), transitions to shutdown, and runs the exit
+// sequence. The lock is released before the (slow) exit sequence
+// runs.
+func (w *worker) fireDrain() {
+	w.mu.Lock()
+	if w.state != stateDraining || w.inFlight.Load() != 0 {
+		w.mu.Unlock()
+		return
+	}
+	w.state = stateShutdown
+	w.mu.Unlock()
+	w.runExitSequence()
+}
+
+// runExitSequence is the worker-initiated shutdown path:
+//
+//  1. Run pre-exit hooks (each 10s, errors logged).
+//  2. Emit the worker_stopped audit event.
+//  3. Block on outbox.Drain (5s) so the leader sees worker_stopped
+//     BEFORE the socket closes.
+//  4. Close shutdownCh; the server goroutine then calls srv.Shutdown.
+//
+// Order matters: the leader uses worker_stopped to decide whether to
+// skip /shutdown POST during teardown. If the listener went away first
+// the leader would have to fall back to the slower liveness watch.
+func (w *worker) runExitSequence() {
+	w.mu.Lock()
+	hooks := append([]func(context.Context) error(nil), w.preExitHooks...)
+	w.mu.Unlock()
+	for _, fn := range hooks {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := fn(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "[teem-worker] pre-exit hook: %v\n", err)
+		}
+		cancel()
+	}
+
+	_ = w.outbox.Emit(audit.Event{
+		Kind:    audit.KindWorkerStopped,
+		Message: w.hostname,
+		Meta: map[string]any{
+			"role":     w.role,
+			"uptime_s": int(time.Since(w.startedAt).Seconds()),
+		},
+	})
+
+	drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := w.outbox.Drain(drainCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "[teem-worker] outbox drain timed out before exit: %v\n", err)
+	}
+	cancel()
+
+	w.signalShutdown()
 }
 
 // parseBool parses a permissive boolean (1/true/yes/on, 0/false/no/off,

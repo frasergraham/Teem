@@ -853,6 +853,21 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		}
 	}
 
+	// Stop hook: when a worker emits worker_stopped, reconcile the
+	// spawner's bookkeeping (registry → stopped, teardown skipping
+	// /shutdown, drop subscriptions). Runs in a goroutine so the
+	// audit POST returns promptly; HandleWorkerStopped is idempotent
+	// against duplicates.
+	stopHook := func(events []audit.Event) {
+		for _, e := range events {
+			if e.Kind != audit.KindWorkerStopped {
+				continue
+			}
+			agentID := e.AgentID
+			go spawner.HandleWorkerStopped(context.Background(), agentID)
+		}
+	}
+
 	return &registeredTeam{
 		team:      t,
 		mcp:       srv,
@@ -863,7 +878,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		// publish on bus topic "leader.wake" for terminal worker
 		// events. Note the double-publish: NudgeFromAudit + wakeHook
 		// run on every accepted POST.
-		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(pulseInst.NudgeFromAudit, wakeHook)),
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(pulseInst.NudgeFromAudit, combineHooks(wakeHook, stopHook))),
 		plan:           planStore,
 		notes:          notesInbox,
 		pulse:          pulseInst,
@@ -881,9 +896,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 // different signals.
 func isWakeKind(k audit.Kind) bool {
 	switch k {
-	case audit.KindJobComplete, audit.KindJobError, audit.KindJobTranscriptReady:
-		// KindWorkerStopped is reserved for T4's self-termination flow
-		// and will be added here once a producer exists.
+	case audit.KindJobComplete, audit.KindJobError, audit.KindJobTranscriptReady, audit.KindWorkerStopped:
 		return true
 	}
 	return false

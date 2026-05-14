@@ -222,6 +222,36 @@ func (o *outbox) drain(ctx context.Context) error {
 	return nil
 }
 
+// Drain blocks until the outbox has no unsent events on disk, or ctx
+// expires. Used by the self-exit path so the worker_stopped event
+// reaches the leader BEFORE the listener closes. The sender goroutine
+// owns the actual HTTP POSTs; Drain just kicks it and waits for the
+// cursor to catch up to the file size.
+//
+// No-op when leaderURL is empty (then nothing is ever sent, and we'd
+// loop forever).
+func (o *outbox) Drain(ctx context.Context) error {
+	if o.leaderURL == "" {
+		return nil
+	}
+	path := filepath.Join(o.dir, "outbox.jsonl")
+	for {
+		o.notify()
+		o.mu.Lock()
+		cursor := o.cursor
+		o.mu.Unlock()
+		st, err := os.Stat(path)
+		if err == nil && st.Size() <= cursor {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
 func (o *outbox) Close() error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
