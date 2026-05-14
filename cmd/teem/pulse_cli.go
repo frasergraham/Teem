@@ -53,7 +53,7 @@ func runPulse(args []string) error {
 	if !ok {
 		return errors.New("daemon not running — `teem start` first")
 	}
-	base := ds.Endpoint + "/control/teams/" + t.Name + "/pulse"
+	base := ds.Endpoint + "/control/teams/" + t.ID + "/pulse"
 
 	switch sub {
 	case "status":

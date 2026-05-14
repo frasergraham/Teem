@@ -51,7 +51,7 @@ Usage:
   teem prompt append --role <leader|role> [--team yaml] "<text>"
   teem prompt edit   --role <leader|role> [--team yaml]
 
-Overrides live at ~/.teem/state/<team-slug>/prompt-overrides/<role>.md.
+Overrides live at ~/.teem/state/<team-id>/prompt-overrides/<role>.md.
 `)
 }
 
@@ -65,7 +65,7 @@ func loadTeamForPrompt(teamPath string) (*team.Team, *prompts.Builder, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	b := prompts.New(t, defaultPromptOverrideDir(t.Name))
+	b := prompts.New(t, defaultPromptOverrideDir(t.ID))
 	return t, b, nil
 }
 

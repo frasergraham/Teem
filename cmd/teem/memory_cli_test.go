@@ -29,7 +29,8 @@ team:
 
 // memoryCLIFixture sets up a temp HOME and a team yaml in cwd so the
 // CLI's defaultMemoryDir + resolveTeamPath both land under the test's
-// scratch directory.
+// scratch directory. Returns the resolved memory directory (keyed by
+// the team's auto-minted id).
 func memoryCLIFixture(t *testing.T) (yamlPath, memDir string) {
 	t.Helper()
 	home := t.TempDir()
@@ -47,7 +48,14 @@ func memoryCLIFixture(t *testing.T) (yamlPath, memDir string) {
 	if err := os.WriteFile(yamlPath, []byte(memoryCLITestYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	memDir = filepath.Join(home, ".teem", "state", "memcli", "memory")
+	// Loading the team auto-mints a team_id and writes it back to the
+	// yaml. Once minted we can compute the canonical state dir for the
+	// test to assert against.
+	tm, err := team.Load(yamlPath)
+	if err != nil {
+		t.Fatalf("load team: %v", err)
+	}
+	memDir = filepath.Join(home, ".teem", "state", tm.ID, "memory")
 	return yamlPath, memDir
 }
 

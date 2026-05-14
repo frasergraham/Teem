@@ -167,10 +167,12 @@ func runStatus(args []string) error {
 // daemonStateFile is the on-disk endpoint discovery file at
 // ~/.teem/daemon.json. teem chat / teem status read it.
 type daemonStateFile struct {
-	PID       int       `json:"pid"`
-	Endpoint  string    `json:"endpoint"`        // http://<host>:<port>
-	Token     string    `json:"worker_token"`    // shared bearer for /audit and /control
-	Teams     []string  `json:"teams,omitempty"` // registered team names
+	PID      int    `json:"pid"`
+	Endpoint string `json:"endpoint"`     // http://<host>:<port>
+	Token    string `json:"worker_token"` // shared bearer for /audit and /control
+	// Teams holds display names for `teem status` output. The daemon
+	// keys teams internally by team_id; this field is for humans only.
+	Teams     []string  `json:"teams,omitempty"`
 	StartedAt time.Time `json:"started_at"`
 }
 
@@ -527,7 +529,7 @@ type registerRequest struct {
 }
 
 // teamRegistration is the on-disk snapshot the daemon uses to rebuild
-// a team after a restart. Lives at ~/.teem/state/<team>/registration.json.
+// a team after a restart. Lives at ~/.teem/state/<team-id>/registration.json.
 type teamRegistration struct {
 	TeamYAML     string    `json:"team_yaml"`
 	RepoRoot     string    `json:"repo_root,omitempty"`
@@ -535,8 +537,8 @@ type teamRegistration struct {
 	RegisteredAt time.Time `json:"registered_at"`
 }
 
-func writeTeamRegistration(name string, reg teamRegistration) error {
-	path := defaultRegistrationPath(name)
+func writeTeamRegistration(teamID string, reg teamRegistration) error {
+	path := defaultRegistrationPath(teamID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -547,19 +549,136 @@ func writeTeamRegistration(name string, reg teamRegistration) error {
 	return os.WriteFile(path, body, 0o600)
 }
 
-func removeTeamRegistration(name string) {
-	_ = os.Remove(defaultRegistrationPath(name))
+func removeTeamRegistration(teamID string) {
+	_ = os.Remove(defaultRegistrationPath(teamID))
+}
+
+// migrateLegacyTeamDirs is the pre-T33 → T33 migration: walk every
+// per-team state dir under ~/.teem/state and, when it doesn't already
+// look like a `t-<hex>` id directory, mint an id and rename the state
+// / audit / worktree dirs to use it. Idempotent: a re-run skips any
+// dir already in the canonical form.
+//
+// The mint also writes the new id back into the registration.json
+// TeamYAML body so the next daemon load picks it up cleanly, and
+// (best-effort) into the operator's teem.yaml at repo_root if it
+// exists and is writable. A failure on the operator's yaml is logged
+// and the migration continues — the in-memory id still works for the
+// current run.
+func migrateLegacyTeamDirs(home string) {
+	stateRoot := filepath.Join(home, ".teem", "state")
+	auditRoot := filepath.Join(home, ".teem", "audit")
+	worktreesRoot := filepath.Join(home, ".teem", "worktrees")
+
+	entries, err := os.ReadDir(stateRoot)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		oldName := e.Name()
+		if team.IsCanonicalID(oldName) {
+			continue // already migrated
+		}
+		regPath := filepath.Join(stateRoot, oldName, "registration.json")
+		body, err := os.ReadFile(regPath)
+		if err != nil {
+			// State dir without a registration — likely orphaned. Skip.
+			continue
+		}
+		var reg teamRegistration
+		if err := json.Unmarshal(body, &reg); err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] migration: skip %s (bad registration.json: %v)\n", oldName, err)
+			continue
+		}
+
+		// Mint via EnsureIDFile against a temp copy so we can both
+		// (a) get the id, and (b) capture the rewritten YAML body to
+		// re-persist into registration.json.
+		tmpFile, err := writeTempYAML(reg.TeamYAML)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] migration: skip %s (temp yaml: %v)\n", oldName, err)
+			continue
+		}
+		newID, err := team.EnsureIDFile(tmpFile)
+		if err != nil {
+			_ = os.Remove(tmpFile)
+			fmt.Fprintf(os.Stderr, "[teemd] migration: skip %s (mint id: %v)\n", oldName, err)
+			continue
+		}
+		updated, _ := os.ReadFile(tmpFile)
+		_ = os.Remove(tmpFile)
+		reg.TeamYAML = string(updated)
+
+		newStateDir := filepath.Join(stateRoot, newID)
+		if _, err := os.Stat(newStateDir); err == nil {
+			fmt.Fprintf(os.Stderr, "[teemd] migration: skip %s (target %s already exists)\n", oldName, newID)
+			continue
+		}
+
+		// Rename state, audit, worktree dirs (each best-effort: a
+		// missing source is fine; a failed rename logs and continues).
+		if err := os.Rename(filepath.Join(stateRoot, oldName), newStateDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] migration: rename state %s -> %s: %v\n", oldName, newID, err)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[teemd] migrated team to id %s: %s -> %s\n", newID, filepath.Join(stateRoot, oldName), newStateDir)
+
+		oldAudit := filepath.Join(auditRoot, oldName)
+		newAudit := filepath.Join(auditRoot, newID)
+		if _, err := os.Stat(oldAudit); err == nil {
+			if rerr := os.Rename(oldAudit, newAudit); rerr != nil {
+				fmt.Fprintf(os.Stderr, "[teemd] migration: rename audit %s -> %s: %v\n", oldName, newID, rerr)
+			} else {
+				fmt.Fprintf(os.Stderr, "[teemd] migrated audit dir: %s -> %s\n", oldAudit, newAudit)
+			}
+		}
+
+		oldWT := filepath.Join(worktreesRoot, oldName)
+		newWT := filepath.Join(worktreesRoot, newID)
+		if _, err := os.Stat(oldWT); err == nil {
+			if rerr := os.Rename(oldWT, newWT); rerr != nil {
+				fmt.Fprintf(os.Stderr, "[teemd] migration: rename worktrees %s -> %s: %v\n", oldName, newID, rerr)
+			} else {
+				fmt.Fprintf(os.Stderr, "[teemd] migrated worktree dir: %s -> %s\n", oldWT, newWT)
+			}
+		}
+
+		// Write the id-bearing YAML back into the new registration.json.
+		if werr := writeTeamRegistration(newID, reg); werr != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] migration: write new registration.json for %s: %v\n", newID, werr)
+		}
+
+		// Best-effort: also back-fill the SAME minted id into the
+		// operator's teem.yaml at repo_root so the next `teem chat`
+		// from that working tree reuses the migrated state instead of
+		// minting a fresh id and stranding it.
+		if reg.RepoRoot != "" {
+			candidate := filepath.Join(reg.RepoRoot, "teem.yaml")
+			if _, err := os.Stat(candidate); err == nil {
+				if werr := team.SetIDFile(candidate, newID); werr != nil {
+					fmt.Fprintf(os.Stderr, "[teemd] migration: could not back-fill %s: %v (id-only state dir migrated)\n", candidate, werr)
+				}
+			}
+		}
+	}
 }
 
 // restoreTeams rebuilds every team that has a registration.json on
 // disk. Best-effort: a corrupt file or a YAML that no longer parses
 // logs and continues — we'd rather serve N-1 teams than refuse to
 // start. Called once at daemon boot, before serving HTTP.
+//
+// Runs the pre-T33 slug→id migration first so the rest of this
+// function only sees id-keyed directories.
 func (d *daemon) restoreTeams() {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return
 	}
+	migrateLegacyTeamDirs(home)
 	stateRoot := filepath.Join(home, ".teem", "state")
 	entries, err := os.ReadDir(stateRoot)
 	if err != nil {
@@ -585,6 +704,16 @@ func (d *daemon) restoreTeams() {
 			continue
 		}
 		t, err := team.Load(tmpFile)
+		// If the YAML on the temp file picked up an id during Load (the
+		// migration above should have already injected one, but belt &
+		// suspenders), refresh the persisted registration body so the
+		// id flows through subsequent restarts.
+		if err == nil {
+			if updated, rerr := os.ReadFile(tmpFile); rerr == nil && string(updated) != reg.TeamYAML {
+				reg.TeamYAML = string(updated)
+				_ = writeTeamRegistration(t.ID, reg)
+			}
+		}
 		_ = os.Remove(tmpFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[teemd] skip %s: invalid yaml: %v\n", e.Name(), err)
@@ -601,13 +730,13 @@ func (d *daemon) restoreTeams() {
 			rt.registered = reg.RegisteredAt
 		}
 		d.mu.Lock()
-		d.teams[t.Name] = rt
+		d.teams[t.ID] = rt
 		d.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "[teemd] restored team %q (pulse %s)\n", t.Name, pulseStateLabel(rt))
+		fmt.Fprintf(os.Stderr, "[teemd] restored team %q (id %s, pulse %s)\n", t.Name, t.ID, pulseStateLabel(rt))
 		// Reconcile workers and persistent agents asynchronously so a
 		// slow Fargate API call doesn't block boot.
 		rtRef := rt
-		safeGo("reconcile.restored:"+rtRef.team.Name, func() {
+		safeGo("reconcile.restored:"+rtRef.team.ID, func() {
 			if n := rtRef.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
 				fmt.Fprintf(os.Stderr, "[teemd] %s: reattached %d local worker(s)\n", rtRef.team.Name, n)
 			}
@@ -652,17 +781,17 @@ func (d *daemon) handleControlTeamsCollection(w http.ResponseWriter, r *http.Req
 func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/control/teams/")
 	if rest == "" {
-		http.Error(w, "bad team name", http.StatusBadRequest)
+		http.Error(w, "bad team id", http.StatusBadRequest)
 		return
 	}
-	// Split into <name> and optional <subresource>.
-	name := rest
+	// Split into <id> and optional <subresource>.
+	id := rest
 	sub := ""
 	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		name, sub = rest[:i], rest[i+1:]
+		id, sub = rest[:i], rest[i+1:]
 	}
 	d.mu.Lock()
-	rt, ok := d.teams[name]
+	rt, ok := d.teams[id]
 	d.mu.Unlock()
 	if !ok {
 		http.NotFound(w, r)
@@ -677,7 +806,7 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		d.mu.Lock()
-		delete(d.teams, name)
+		delete(d.teams, id)
 		d.mu.Unlock()
 		rt.pulse.Stop()
 		rt.spawner.Stop()
@@ -690,7 +819,7 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		if rt.inFlight != nil {
 			_ = rt.inFlight.Close()
 		}
-		removeTeamRegistration(name)
+		removeTeamRegistration(id)
 		d.persistStateSnapshot()
 		w.WriteHeader(http.StatusNoContent)
 	case "pulse":
@@ -781,11 +910,12 @@ func (d *daemon) handleListTeams(w http.ResponseWriter, _ *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	out := make([]map[string]any, 0, len(d.teams))
-	for name, rt := range d.teams {
+	for id, rt := range d.teams {
 		out = append(out, map[string]any{
-			"name":       name,
-			"mcp_url":    d.endpoint + "/teams/" + name + "/mcp",
-			"audit_url":  d.endpoint + "/teams/" + name + "/audit",
+			"id":         id,
+			"name":       rt.team.Name,
+			"mcp_url":    d.endpoint + "/teams/" + id + "/mcp",
+			"audit_url":  d.endpoint + "/teams/" + id + "/audit",
 			"registered": rt.registered.Format(time.RFC3339),
 		})
 	}
@@ -804,7 +934,9 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Parse the YAML by writing to a temp file and using team.Load — it
-	// already validates everything we need.
+	// already validates everything we need. Load also back-fills a
+	// team_id into the temp file when missing; we re-read so the
+	// id-bearing YAML is what we persist into registration.json.
 	tmpFile, err := writeTempYAML(req.TeamYAML)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("write yaml: %v", err), http.StatusInternalServerError)
@@ -816,18 +948,21 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("validate team: %v", err), http.StatusBadRequest)
 		return
 	}
+	if updated, rerr := os.ReadFile(tmpFile); rerr == nil {
+		req.TeamYAML = string(updated)
+	}
 
 	// Idempotent: re-registering an existing team is a no-op that
 	// returns the same URLs. (Trade-off: we don't pick up YAML edits
 	// without an explicit DELETE first. Document.)
 	d.mu.Lock()
-	existing, ok := d.teams[t.Name]
+	existing, ok := d.teams[t.ID]
 	d.mu.Unlock()
 	if ok {
 		writeJSON(w, http.StatusOK, registerResponse{
 			Team:     existing.team.Name,
-			MCPURL:   d.endpoint + "/teams/" + t.Name + "/mcp",
-			AuditURL: d.endpoint + "/teams/" + t.Name + "/audit",
+			MCPURL:   d.endpoint + "/teams/" + t.ID + "/mcp",
+			AuditURL: d.endpoint + "/teams/" + t.ID + "/audit",
 		})
 		return
 	}
@@ -838,9 +973,9 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.mu.Lock()
-	d.teams[t.Name] = rt
+	d.teams[t.ID] = rt
 	d.mu.Unlock()
-	if err := writeTeamRegistration(t.Name, teamRegistration{
+	if err := writeTeamRegistration(t.ID, teamRegistration{
 		TeamYAML:     req.TeamYAML,
 		RepoRoot:     req.RepoRoot,
 		WorktreeBase: req.WorktreeBase,
@@ -857,7 +992,7 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 	//    sweep stale.
 	// 2. Persistent agents from the team YAML (tailnet-hosted; either
 	//    operator-managed local or Fargate).
-	safeGo("reconcile.registered:"+t.Name, func() {
+	safeGo("reconcile.registered:"+t.ID, func() {
 		if n := rt.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
 			fmt.Fprintf(os.Stderr, "[teemd] reattached %d local worker(s) for %s\n", n, t.Name)
 		}
@@ -877,34 +1012,41 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 // audit sink. Repo root and worktree base come from the chat client's
 // CWD (so worktrees land where the operator expects).
 func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) (*registeredTeam, error) {
-	if worktreeBase == "" {
-		worktreeBase = defaultWorktreeBase(t.Name)
+	if t.ID == "" {
+		// Defensive: every code path that constructs a Team should
+		// have minted an id by now. Mint one if not so we never key a
+		// per-team filesystem path on the empty string.
+		t.ID = team.NewID()
+		fmt.Fprintf(os.Stderr, "[teemd] warning: team %q had no id; minted %s\n", t.Name, t.ID)
 	}
-	leaderURL := d.endpoint + "/teams/" + t.Name
-	stateStore := state.NewStore(defaultStateDir(t.Name))
+	if worktreeBase == "" {
+		worktreeBase = defaultWorktreeBase(t.ID)
+	}
+	leaderURL := d.endpoint + "/teams/" + t.ID
+	stateStore := state.NewStore(defaultStateDir(t.ID))
 	gitCfg := readGitConfig()
 
-	auditPath := defaultAuditPath(t.Name)
+	auditPath := defaultAuditPath(t.ID)
 	auditSink, err := audit.OpenFile(auditPath)
 	if err != nil {
 		return nil, fmt.Errorf("audit: %w", err)
 	}
 
-	planPath := defaultPlanPath(t.Name)
+	planPath := defaultPlanPath(t.ID)
 	planStore, err := plan.Open(planPath)
 	if err != nil {
 		_ = auditSink.Close()
 		return nil, fmt.Errorf("plan: %w", err)
 	}
 
-	notesInbox, err := notes.Open(defaultNotesPath(t.Name))
+	notesInbox, err := notes.Open(defaultNotesPath(t.ID))
 	if err != nil {
 		_ = auditSink.Close()
 		_ = planStore.Close()
 		return nil, fmt.Errorf("notes: %w", err)
 	}
 
-	leaderStatusStore, err := leaderstatus.Open(defaultLeaderStatusPath(t.Name))
+	leaderStatusStore, err := leaderstatus.Open(defaultLeaderStatusPath(t.ID))
 	if err != nil {
 		_ = auditSink.Close()
 		_ = planStore.Close()
@@ -915,7 +1057,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// In-flight log for durability. Opened before reconcile so the
 	// next steps can both (a) emit job_interrupted for orphans and
 	// (b) hand it to the spawner for future jobs.
-	inFlightLog, err := inflight.Open(defaultInFlightPath(t.Name))
+	inFlightLog, err := inflight.Open(defaultInFlightPath(t.ID))
 	if err != nil {
 		_ = auditSink.Close()
 		_ = planStore.Close()
@@ -952,17 +1094,17 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// files the leader injects as baseline context for every freshly
 	// spawned worker. Created up-front so the spawner can read from
 	// it and the audit hook can append to it.
-	archMemDir := defaultMemoryDir(t.Name)
+	archMemDir := defaultMemoryDir(t.ID)
 	archMemStore := archmem.New(archMemDir, leaderAwareRoles(t))
 	archMemStore.SweepTmp()
 
-	transcriptsDir := filepath.Join(defaultStateDir(t.Name), "transcripts")
+	transcriptsDir := filepath.Join(defaultStateDir(t.ID), "transcripts")
 
 	// Prompt builder: layered assembly of the leader's and each
 	// archetype's system prompt with an operator-override layer on
 	// disk. Shared by the CLI, the MCP read_prompt/append_prompt
 	// tools, and the spawner's per-worker bake-in.
-	promptBuilder := prompts.New(t, defaultPromptOverrideDir(t.Name))
+	promptBuilder := prompts.New(t, defaultPromptOverrideDir(t.ID))
 
 	// Roster: per-team worker-name allocator. On first open after the
 	// T9 rollout (no existing roster.json), migrate legacy
@@ -970,7 +1112,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// and any historical transcripts subdirs so they participate in
 	// reincarnation. The legacy file is left in place — we no longer
 	// read it, but keeping it makes a downgrade non-destructive.
-	rosterPath := defaultRosterPath(t.Name)
+	rosterPath := defaultRosterPath(t.ID)
 	rost, err := roster.Open(rosterPath)
 	if err != nil {
 		_ = auditSink.Close()
@@ -986,7 +1128,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		}
 		return roles
 	}()
-	if n := rost.MigrateLegacy(defaultArchetypeSeqPath(t.Name), transcriptsDir, roleList, nil); n > 0 {
+	if n := rost.MigrateLegacy(defaultArchetypeSeqPath(t.ID), transcriptsDir, roleList, nil); n > 0 {
 		fmt.Fprintf(os.Stderr, "[teemd] %s: migrated %d legacy worker id(s) into the roster\n", t.Name, n)
 	}
 
@@ -1001,7 +1143,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		AuditSink:           auditSink,
 		Roster:              rost,
 		InFlight:            inFlightLog,
-		SocketDir:           defaultSocketDir(t.Name),
+		SocketDir:           defaultSocketDir(t.ID),
 		LoadArchetypeMemory: archMemStore.Load,
 		// Spawner.LoadArchetypePrompt is (role) -> string; Builder.Archetype
 		// now signals "role not declared" via the bool. The spawner only
@@ -1039,9 +1181,9 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// Pulse: autonomous-leader heartbeat. Built per team, NOT started
 	// (phase 4's `teem pulse start` activates it). Needs the team's
 	// MCP URL via a small JSON file pulse hands to claude.
-	pulseMCPPath := filepath.Join(defaultStateDir(t.Name), "pulse-mcp.json")
+	pulseMCPPath := filepath.Join(defaultStateDir(t.ID), "pulse-mcp.json")
 	shimPath, _ := exec.LookPath("teem-channel")
-	if err := pulse.WriteMCPConfig(pulseMCPPath, leaderURL+"/mcp", t.Name, d.endpoint, shimPath); err != nil {
+	if err := pulse.WriteMCPConfig(pulseMCPPath, leaderURL+"/mcp", t.ID, d.endpoint, shimPath); err != nil {
 		_ = auditSink.Close()
 		_ = planStore.Close()
 		_ = notesInbox.Close()
@@ -1049,15 +1191,16 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	}
 	pulseInst := pulse.New(pulse.Config{
 		TeamName: t.Name,
+		TeamID:   t.ID,
 		LoadSession: func() (string, bool, error) {
-			s, ok, err := loadLeaderSession(t.Name)
+			s, ok, err := loadLeaderSession(t.ID)
 			if err != nil || !ok {
 				return "", false, err
 			}
 			return s.SessionID, true, nil
 		},
-		PauseFile:   filepath.Join(defaultStateDir(t.Name), "pulse.paused"),
-		RunningFile: defaultPulseRunningFlag(t.Name),
+		PauseFile:   filepath.Join(defaultStateDir(t.ID), "pulse.paused"),
+		RunningFile: defaultPulseRunningFlag(t.ID),
 		MCPConfig:   pulseMCPPath,
 		RepoRoot:    repoRoot,
 		Plan:        planStore,
@@ -1179,7 +1322,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		Client: sumClient,
 		Roles:  leaderAwareRoles(t),
 	}
-	safeGo("archmem.summarizer:"+t.Name, func() { _ = summarizer.Run(archMemCtx) })
+	safeGo("archmem.summarizer:"+t.ID, func() { _ = summarizer.Run(archMemCtx) })
 
 	return &registeredTeam{
 		team:      t,
@@ -1210,8 +1353,8 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 
 // defaultLeaderStatusPath returns the per-team leader-status board
 // file path, alongside plan.jsonl and notes.jsonl.
-func defaultLeaderStatusPath(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "leader_status.json")
+func defaultLeaderStatusPath(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "leader_status.json")
 }
 
 // lookupRole returns the role for agentID from the registry, or ""
@@ -1452,7 +1595,7 @@ func writeTempYAML(body string) (string, error) {
 
 // --- /teams/<name>/* handlers ---------------------------------------------
 
-// handleTeamRoute dispatches /teams/<name>/(mcp|audit) to the matching
+// handleTeamRoute dispatches /teams/<id>/(mcp|audit) to the matching
 // per-team handler after stripping the team prefix from the request
 // path. The MCP handler is path-agnostic; the audit handler reads
 // "/audit" so we rewrite the URL.Path accordingly.
@@ -1460,11 +1603,7 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/teams/")
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
-		// Bare /teams/<slug> — render the per-team detail SSR page.
-		// Slug lookup is intentional: keeps URLs canonical even when
-		// the team name contains spaces / capitals. Subresources
-		// (/mcp, /audit, …) below still match the team's exact name
-		// as registered.
+		// Bare /teams/<id> — render the per-team detail SSR page.
 		if rest == "" {
 			http.NotFound(w, r)
 			return
@@ -1472,9 +1611,9 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		d.renderTeamPage(w, r, rest)
 		return
 	}
-	name, suffix := rest[:slash], rest[slash:]
+	id, suffix := rest[:slash], rest[slash:]
 	d.mu.Lock()
-	rt, ok := d.teams[name]
+	rt, ok := d.teams[id]
 	d.mu.Unlock()
 	if !ok {
 		http.NotFound(w, r)
@@ -1764,8 +1903,8 @@ func retentionSweepInterval(cfg retention.Config) time.Duration {
 func (d *daemon) persistStateSnapshot() {
 	d.mu.Lock()
 	names := make([]string, 0, len(d.teams))
-	for name := range d.teams {
-		names = append(names, name)
+	for _, rt := range d.teams {
+		names = append(names, rt.team.Name)
 	}
 	d.mu.Unlock()
 	_ = writeDaemonStateFile(daemonStateFile{

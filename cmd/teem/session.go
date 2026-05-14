@@ -20,14 +20,14 @@ type leaderSession struct {
 
 // leaderSessionPath returns the on-disk location of the session-id
 // record for a team. Co-located with the daemon's other per-team state.
-func leaderSessionPath(teamName string) string {
-	return filepath.Join(defaultStateDir(teamName), "leader-session.json")
+func leaderSessionPath(teamID string) string {
+	return filepath.Join(defaultStateDir(teamID), "leader-session.json")
 }
 
 // loadLeaderSession reads the persisted session record. Returns
 // (empty, false, nil) when no session has been created yet.
-func loadLeaderSession(teamName string) (leaderSession, bool, error) {
-	body, err := os.ReadFile(leaderSessionPath(teamName))
+func loadLeaderSession(teamID string) (leaderSession, bool, error) {
+	body, err := os.ReadFile(leaderSessionPath(teamID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return leaderSession{}, false, nil
@@ -45,15 +45,15 @@ func loadLeaderSession(teamName string) (leaderSession, bool, error) {
 }
 
 // saveLeaderSession writes the session record atomically.
-func saveLeaderSession(teamName string, s leaderSession) error {
-	if err := os.MkdirAll(defaultStateDir(teamName), 0o700); err != nil {
+func saveLeaderSession(teamID string, s leaderSession) error {
+	if err := os.MkdirAll(defaultStateDir(teamID), 0o700); err != nil {
 		return err
 	}
 	body, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return atomicWrite(leaderSessionPath(teamName), body)
+	return atomicWrite(leaderSessionPath(teamID), body)
 }
 
 // newSessionUUID returns a v4 UUID string suitable for

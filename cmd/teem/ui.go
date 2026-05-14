@@ -105,7 +105,9 @@ type dashboardSnapshot struct {
 // counters are intentionally precomputed so the template stays free of
 // arithmetic. URL is the deep link to the per-team detail page.
 type summaryTile struct {
-	Name             string
+	Name string
+	// Slug is kept for backwards-compat with the dashboard template; it
+	// now carries the team_id (the canonical routing key).
 	Slug             string
 	URL              string
 	RegisteredAgo    string
@@ -241,18 +243,12 @@ func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 }
 
 // renderTeamPage serves the deep view for a single team at
-// /teams/<slug>. teamSlug is matched against slug(t.Name) so the URL
-// is stable across casing / spacing variations of the team name.
-// Returns 404 when no team matches.
-func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamSlug string) {
+// /teams/<id>. The id is the canonical filesystem / routing key
+// (display name lives inside the page body). Returns 404 when no team
+// matches.
+func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID string) {
 	d.mu.Lock()
-	var found *registeredTeam
-	for _, rt := range d.teams {
-		if slug(rt.team.Name) == teamSlug {
-			found = rt
-			break
-		}
-	}
+	found := d.teams[teamID]
 	d.mu.Unlock()
 	if found == nil {
 		http.NotFound(w, r)
@@ -282,7 +278,7 @@ func teamTileSnapshot(rt *registeredTeam) summaryTile {
 	ts := teamSnapshot(rt)
 	tile := summaryTile{
 		Name:             rt.team.Name,
-		Slug:             slug(rt.team.Name),
+		Slug:             rt.team.ID,
 		RegisteredAgo:    ts.RegisteredAgo,
 		OpenTaskCount:    ts.OpenTaskCount,
 		ActiveAgentCount: len(ts.Agents),
@@ -384,7 +380,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 			ID:        e.ID,
 			Role:      e.Role,
 			State:     string(e.State),
-			JobsURL:   fmt.Sprintf("/teams/%s/agents/%s/jobs", rt.team.Name, e.ID),
+			JobsURL:   fmt.Sprintf("/teams/%s/agents/%s/jobs", rt.team.ID, e.ID),
 			Placement: placement,
 		}
 		if !e.LastSeen.IsZero() {
@@ -407,7 +403,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 			switch {
 			case t.Status.IsOpen():
 				out.OpenTaskCount++
-				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.Name, t, liveAgents))
+				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.ID, t, liveAgents))
 			case t.Status.IsShelved():
 				shelved = append(shelved, t)
 			}
@@ -421,7 +417,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		// so the operator doesn't forget what they paused on.
 		sort.Slice(shelved, func(i, j int) bool { return shelved[i].UpdatedAt.After(shelved[j].UpdatedAt) })
 		for _, t := range shelved {
-			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.Name, t, liveAgents))
+			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.ID, t, liveAgents))
 		}
 		// Recent completed: tasks whose status moved to done, newest
 		// first by UpdatedAt; capped to 5.
@@ -436,14 +432,14 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 			done = done[:5]
 		}
 		for _, t := range done {
-			out.RecentDone = append(out.RecentDone, taskToDashboardTask(rt.team.Name, t, liveAgents))
+			out.RecentDone = append(out.RecentDone, taskToDashboardTask(rt.team.ID, t, liveAgents))
 		}
 	}
 
 	// Leader status board: leader pinned on top, others below.
 	if rt.leaderStatus != nil {
 		for _, e := range rt.leaderStatus.All() {
-			row := leaderStatusToRow(rt.team.Name, e)
+			row := leaderStatusToRow(rt.team.ID, e)
 			if e.AgentID == "leader" {
 				rcopy := row
 				out.LeaderStatus = &rcopy
@@ -485,7 +481,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 				JobID:   e.JobID,
 			}
 			if e.JobID != "" {
-				de.JobURL = fmt.Sprintf("/teams/%s/jobs/%s", rt.team.Name, e.JobID)
+				de.JobURL = fmt.Sprintf("/teams/%s/jobs/%s", rt.team.ID, e.JobID)
 			}
 			out.RecentEvents = append(out.RecentEvents, de)
 		}
@@ -502,7 +498,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	// climb into the hundreds we can layer a small TTL cache here.
 	out.HasRepo = rt.repoRoot != ""
 	if out.HasRepo {
-		out.Branches = listTeemBranches(rt.repoRoot, rt.registry, rt.team.Name)
+		out.Branches = listTeemBranches(rt.repoRoot, rt.registry, rt.team.ID)
 	}
 	return out
 }

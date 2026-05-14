@@ -54,7 +54,7 @@ func runMemory(args []string) error {
 		return fmt.Errorf("role %q is not in the team roster (and is not %q)", *role, archmem.LeaderRole)
 	}
 
-	memDir := defaultMemoryDir(t.Name)
+	memDir := defaultMemoryDir(t.ID)
 	store := archmem.New(memDir, func() []string {
 		archs := t.SnapshotArchetypes()
 		out := make([]string, 0, len(archs))
