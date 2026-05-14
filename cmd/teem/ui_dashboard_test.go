@@ -107,11 +107,11 @@ func TestDashboard_ShowsLeaderStatusAndTasks(t *testing.T) {
 
 	// One open task in 'building', one done.
 	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Build the thing"})
-	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageBuilding})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageCoding})
 	doneTask, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Earlier delivery"})
-	_, _ = rt.plan.UpdateTask(doneTask.ID, plan.UpdateInput{Stage: plan.StageBuilding})
-	_, _ = rt.plan.UpdateTask(doneTask.ID, plan.UpdateInput{Stage: plan.StageInReview})
-	_, _ = rt.plan.UpdateTask(doneTask.ID, plan.UpdateInput{Stage: plan.StageMerging})
+	_, _ = rt.plan.UpdateTask(doneTask.ID, plan.UpdateInput{Stage: plan.StageCoding})
+	_, _ = rt.plan.UpdateTask(doneTask.ID, plan.UpdateInput{Stage: plan.StageReviewing})
+	_, _ = rt.plan.UpdateTask(doneTask.ID, plan.UpdateInput{Stage: plan.StageIntegrating})
 	_, _ = rt.plan.UpdateTask(doneTask.ID, plan.UpdateInput{Stage: plan.StageVerified, Status: plan.StatusDone})
 
 	_ = rt.leaderStatus.Set("leader", "Reviewing T1+T6 diff", []string{task.ID})
@@ -125,7 +125,7 @@ func TestDashboard_ShowsLeaderStatusAndTasks(t *testing.T) {
 		"Reviewing T1+T6 diff",
 		"Build the thing",
 		"Earlier delivery",
-		"building",
+		"coding",
 		"verified",
 		task.ID,
 		doneTask.ID,
@@ -142,7 +142,7 @@ func TestTaskFlow_RendersBannerAndDecisions(t *testing.T) {
 	d.teams["alpha"] = rt
 
 	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Refactor auth"})
-	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageBuilding, AddEvidence: []string{"j-aaa"}})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageCoding, AddEvidence: []string{"j-aaa"}})
 
 	now := time.Now()
 	_ = rt.auditSink.Write(audit.Event{
@@ -183,7 +183,7 @@ func TestTaskFlow_RendersBannerAndDecisions(t *testing.T) {
 	body := w.Body.String()
 	for _, want := range []string{
 		"Refactor auth",
-		"building",
+		"coding",
 		"Kept old API around so mobile team can ship",
 		"Need creds from ops",
 		"j-aaa",
@@ -223,7 +223,7 @@ func TestTaskFlow_LongPromptCollapsesIntoDetails(t *testing.T) {
 
 // TestDashboard_MarksOrphanedAssigneeStale locks in the visual signal
 // for the situation the user hit: tasks sit in an active pipeline stage
-// (building/in_review/merging) with an AssignedTo that names a worker
+// (planning/coding/reviewing/integrating) with an AssignedTo that names a worker
 // no longer in the registry. The dashboard should:
 //   - mute/strike the assignee (class="assignee gone")
 //   - show a STALE pill so the leader sees they need to act.
@@ -238,13 +238,13 @@ func TestDashboard_MarksOrphanedAssigneeStale(t *testing.T) {
 
 	// Task A: assigned to a worker that IS active → no stale, no gone.
 	taskA, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "live-handoff"})
-	_, _ = rt.plan.UpdateTask(taskA.ID, plan.UpdateInput{AssignedTo: &live, Stage: plan.StageBuilding})
+	_, _ = rt.plan.UpdateTask(taskA.ID, plan.UpdateInput{AssignedTo: &live, Stage: plan.StageCoding})
 	rt.registry.Add(mcpsrv.AgentEntry{ID: live, Role: "worker", State: mcpsrv.StateBusy})
 
 	// Task B: assigned to a worker that is GONE (never registered) →
-	// stage is building → must surface as STALE + gone.
+	// stage is coding → must surface as STALE + gone.
 	taskB, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "orphaned"})
-	_, _ = rt.plan.UpdateTask(taskB.ID, plan.UpdateInput{AssignedTo: &ghost, Stage: plan.StageBuilding})
+	_, _ = rt.plan.UpdateTask(taskB.ID, plan.UpdateInput{AssignedTo: &ghost, Stage: plan.StageCoding})
 
 	// Task C: assignee gone but stage is 'proposed' — not in an
 	// active-work stage, so we mute the assignee but do NOT mark stale.
@@ -414,7 +414,7 @@ func TestSummaryIndex_RendersTilePerTeam(t *testing.T) {
 	rtA.registry.Add(mcpsrv.AgentEntry{ID: "worker-2", Role: "worker", State: mcpsrv.StateBusy})
 	// One open task and one completed-today task (UpdatedAt == now).
 	openT, _ := rtA.plan.AddTask(plan.NewTaskInput{Title: "Build something"})
-	_, _ = rtA.plan.UpdateTask(openT.ID, plan.UpdateInput{Stage: plan.StageBuilding})
+	_, _ = rtA.plan.UpdateTask(openT.ID, plan.UpdateInput{Stage: plan.StageCoding})
 	doneT, _ := rtA.plan.AddTask(plan.NewTaskInput{Title: "Already shipped"})
 	_, _ = rtA.plan.UpdateTask(doneT.ID, plan.UpdateInput{Status: plan.StatusDone})
 	_ = rtA.leaderStatus.Set("leader", "Cutting the T20 release", nil)
@@ -476,7 +476,7 @@ func TestTeamDetail_RendersSingleTeam(t *testing.T) {
 	rt.team.Name = "Alpha Team"
 	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-1", Role: "worker", State: mcpsrv.StateBusy})
 	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Wire up the thing"})
-	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageBuilding})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageCoding})
 	_ = rt.leaderStatus.Set("leader", "Looking at the diff", []string{task.ID})
 
 	// Second team must NOT bleed into the detail page.

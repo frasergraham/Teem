@@ -192,7 +192,7 @@ func TestPlan_TolerantOfGarbage(t *testing.T) {
 
 // TestPlan_NormalizesStatusStagePair locks in the rule that we never
 // persist a contradictory (Stage, Status) — the bug a user hit where
-// a task showed stage=building / status=shelved.
+// a task showed stage=coding / status=shelved.
 func TestPlan_NormalizesStatusStagePair(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -202,8 +202,8 @@ func TestPlan_NormalizesStatusStagePair(t *testing.T) {
 		wantStat  Status
 	}{
 		{
-			name:      "status=shelved on a building task snaps stage to shelved",
-			fromStage: StageBuilding,
+			name:      "status=shelved on a coding task snaps stage to shelved",
+			fromStage: StageCoding,
 			input:     UpdateInput{Status: StatusShelved},
 			wantStage: StageShelved,
 			wantStat:  StatusShelved,
@@ -216,23 +216,23 @@ func TestPlan_NormalizesStatusStagePair(t *testing.T) {
 			wantStat:  StatusDone,
 		},
 		{
-			name:      "status=in_progress on a proposed task advances stage to building",
+			name:      "status=in_progress on a proposed task advances stage to coding",
 			fromStage: StageProposed,
 			input:     UpdateInput{Status: StatusInProgress},
-			wantStage: StageBuilding,
+			wantStage: StageCoding,
 			wantStat:  StatusInProgress,
 		},
 		{
 			name:      "stage move alone derives canonical status",
-			fromStage: StageBuilding,
-			input:     UpdateInput{Stage: StageInReview},
-			wantStage: StageInReview,
+			fromStage: StageCoding,
+			input:     UpdateInput{Stage: StageReviewing},
+			wantStage: StageReviewing,
 			wantStat:  StatusInProgress,
 		},
 		{
 			name:      "contradictory pair: terminal status wins",
-			fromStage: StageBuilding,
-			input:     UpdateInput{Stage: StageBuilding, Status: StatusShelved},
+			fromStage: StageCoding,
+			input:     UpdateInput{Stage: StageCoding, Status: StatusShelved},
 			wantStage: StageShelved,
 			wantStat:  StatusShelved,
 		},
@@ -306,7 +306,7 @@ func TestPlan_DeleteRemovesFromSnapshotAndReplay(t *testing.T) {
 }
 
 // TestPlan_LegacyContradictionHealsOnReplay covers the exact scenario
-// the operator hit: a JSONL on disk with stage=building, status=shelved
+// the operator hit: a JSONL on disk with stage=coding, status=shelved
 // (produced by an older pre-normalize daemon). Open() should heal it.
 func TestPlan_LegacyContradictionHealsOnReplay(t *testing.T) {
 	dir := t.TempDir()

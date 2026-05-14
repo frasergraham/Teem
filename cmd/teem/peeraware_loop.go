@@ -164,7 +164,7 @@ func collectSnapshot(rt *registeredTeam, cutoff time.Time) peeraware.Snapshot {
 		for _, t := range rt.plan.List(plan.Filter{}) {
 			stage := string(t.Stage)
 			switch t.Stage {
-			case plan.StageBuilding, plan.StageInReview, plan.StageMerging, plan.StageBlocked:
+			case plan.StagePlanning, plan.StageCoding, plan.StageReviewing, plan.StageIntegrating, plan.StageBlocked:
 				snap.OpenTasks = append(snap.OpenTasks, peeraware.TaskBrief{
 					ID:    t.ID,
 					Title: t.Title,

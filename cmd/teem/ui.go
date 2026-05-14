@@ -199,8 +199,8 @@ type dashboardTask struct {
 	// never seen). The template uses this to mute the cell so it's
 	// obvious nobody is currently driving the task.
 	AssigneeActive bool
-	// Stale is true when an active pipeline stage (building/in_review/
-	// merging) names an inactive assignee — i.e. the task thinks
+	// Stale is true when an active pipeline stage (planning/coding/
+	// reviewing/integrating) names an inactive assignee — i.e. the task thinks
 	// someone is working it but no one is. The template surfaces this
 	// as a small STALE pill so the leader knows to re-assign or move
 	// the task forward.
@@ -541,7 +541,7 @@ func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool) d
 	stale := false
 	if t.AssignedTo != "" && !assigneeActive {
 		switch t.Stage {
-		case plan.StageBuilding, plan.StageInReview, plan.StageMerging:
+		case plan.StagePlanning, plan.StageCoding, plan.StageReviewing, plan.StageIntegrating:
 			stale = true
 		}
 	}
@@ -584,18 +584,20 @@ func stageOrder(s string) int {
 		return 0
 	case plan.StageSpecced:
 		return 1
-	case plan.StageBuilding:
+	case plan.StagePlanning:
 		return 2
-	case plan.StageInReview:
+	case plan.StageCoding:
 		return 3
-	case plan.StageMerging:
+	case plan.StageReviewing:
 		return 4
-	case plan.StageVerified:
+	case plan.StageIntegrating:
 		return 5
-	case plan.StageBlocked:
+	case plan.StageVerified:
 		return 6
-	case plan.StageAbandoned:
+	case plan.StageBlocked:
 		return 7
+	case plan.StageAbandoned:
+		return 8
 	}
 	return 99
 }

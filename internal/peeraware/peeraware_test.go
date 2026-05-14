@@ -42,8 +42,8 @@ func TestDigest_OnePeer(t *testing.T) {
 			LeaderStatus:  "Iterating on review feedback",
 			LeaderUpdated: now.Add(-3 * time.Minute),
 			OpenTasks: []TaskBrief{
-				{ID: "t-abcd", Title: "wire channels", Stage: "building"},
-				{ID: "t-efgh", Title: "review fixups", Stage: "building"},
+				{ID: "t-abcd", Title: "wire channels", Stage: "coding"},
+				{ID: "t-efgh", Title: "review fixups", Stage: "coding"},
 			},
 			JustVerified: []TaskBrief{
 				{ID: "t-1234", Title: "channels stdio shim", Stage: "verified"},
@@ -64,8 +64,8 @@ func TestDigest_OnePeer(t *testing.T) {
 		"## Peer: beta",
 		"snapshot 14:23 UTC",
 		"2 tasks in flight",
-		"t-abcd (building)",
-		"t-efgh (building)",
+		"t-abcd (coding)",
+		"t-efgh (coding)",
 		"1 task verified in last hour",
 		`t-1234 — "channels stdio shim"`,
 		"Workers active: reviewer-blake, worker-ada",
@@ -85,11 +85,11 @@ func TestDigest_SkipsSelf(t *testing.T) {
 	peers := []Snapshot{
 		{
 			Team:      "alpha",
-			OpenTasks: []TaskBrief{{ID: "t-self", Title: "should not appear", Stage: "building"}},
+			OpenTasks: []TaskBrief{{ID: "t-self", Title: "should not appear", Stage: "coding"}},
 		},
 		{
 			Team:      "beta",
-			OpenTasks: []TaskBrief{{ID: "t-peer", Title: "should appear", Stage: "building"}},
+			OpenTasks: []TaskBrief{{ID: "t-peer", Title: "should appear", Stage: "coding"}},
 		},
 	}
 	got := Digest("alpha", peers, now)
@@ -107,10 +107,10 @@ func TestDigest_SkipsSelf(t *testing.T) {
 func TestDigest_StableOrdering(t *testing.T) {
 	now := mustTime("2026-05-14T14:23:00Z")
 	peers := []Snapshot{
-		{Team: "gamma", OpenTasks: []TaskBrief{{ID: "t-g", Stage: "building"}}},
-		{Team: "alpha", OpenTasks: []TaskBrief{{ID: "t-a", Stage: "building"}}},
-		{Team: "delta", OpenTasks: []TaskBrief{{ID: "t-d", Stage: "building"}}},
-		{Team: "beta", OpenTasks: []TaskBrief{{ID: "t-b", Stage: "building"}}},
+		{Team: "gamma", OpenTasks: []TaskBrief{{ID: "t-g", Stage: "coding"}}},
+		{Team: "alpha", OpenTasks: []TaskBrief{{ID: "t-a", Stage: "coding"}}},
+		{Team: "delta", OpenTasks: []TaskBrief{{ID: "t-d", Stage: "coding"}}},
+		{Team: "beta", OpenTasks: []TaskBrief{{ID: "t-b", Stage: "coding"}}},
 	}
 	got := Digest("self", peers, now)
 
@@ -173,11 +173,11 @@ func TestDigest_TitlesAreTrimmed(t *testing.T) {
 func TestDigest_TaskListCappedAtThree(t *testing.T) {
 	now := mustTime("2026-05-14T14:23:00Z")
 	tasks := []TaskBrief{
-		{ID: "t-a", Stage: "building"},
-		{ID: "t-b", Stage: "building"},
-		{ID: "t-c", Stage: "building"},
-		{ID: "t-d", Stage: "building"},
-		{ID: "t-e", Stage: "building"},
+		{ID: "t-a", Stage: "coding"},
+		{ID: "t-b", Stage: "coding"},
+		{ID: "t-c", Stage: "coding"},
+		{ID: "t-d", Stage: "coding"},
+		{ID: "t-e", Stage: "coding"},
 	}
 	peers := []Snapshot{{Team: "beta", OpenTasks: tasks}}
 	got := Digest("alpha", peers, now)
@@ -197,9 +197,9 @@ func TestDigest_StableOrdering_WithinPeer(t *testing.T) {
 	peers := []Snapshot{{
 		Team: "beta",
 		OpenTasks: []TaskBrief{
-			{ID: "t-c", Stage: "building"},
-			{ID: "t-a", Stage: "building"},
-			{ID: "t-b", Stage: "building"},
+			{ID: "t-c", Stage: "coding"},
+			{ID: "t-a", Stage: "coding"},
+			{ID: "t-b", Stage: "coding"},
 		},
 		JustVerified: []TaskBrief{
 			{ID: "t-9", Title: "nine", Stage: "verified"},
@@ -210,9 +210,9 @@ func TestDigest_StableOrdering_WithinPeer(t *testing.T) {
 	first := Digest("alpha", peers, now)
 	// Re-shuffle the inner slices; output must be byte-identical.
 	peers[0].OpenTasks = []TaskBrief{
-		{ID: "t-b", Stage: "building"},
-		{ID: "t-c", Stage: "building"},
-		{ID: "t-a", Stage: "building"},
+		{ID: "t-b", Stage: "coding"},
+		{ID: "t-c", Stage: "coding"},
+		{ID: "t-a", Stage: "coding"},
 	}
 	peers[0].JustVerified = []TaskBrief{
 		{ID: "t-5", Title: "five", Stage: "verified"},

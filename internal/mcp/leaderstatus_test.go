@@ -126,13 +126,13 @@ func TestSetTaskStage_HappyPath(t *testing.T) {
 
 	req := mcpgo.CallToolRequest{}
 	req.Params.Name = "set_task_stage"
-	req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": "building"}
+	req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": "coding"}
 	res, err := srv.handleSetTaskStage(context.Background(), req)
 	if err != nil || res.IsError {
 		t.Fatalf("set_task_stage failed: %v / %s", err, textOf(t, res))
 	}
 	got, _ := p.Get(task.ID)
-	if got.Stage != plan.StageBuilding {
+	if got.Stage != plan.StageCoding {
 		t.Errorf("stage: %q", got.Stage)
 	}
 }
@@ -140,9 +140,9 @@ func TestSetTaskStage_HappyPath(t *testing.T) {
 func TestSetTaskStage_InvalidTransition(t *testing.T) {
 	srv, p, _, _ := newTestServerFull(t)
 	task, _ := p.AddTask(plan.NewTaskInput{Title: "X"})
-	_, _ = p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageBuilding})
-	_, _ = p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageInReview})
-	_, _ = p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageMerging})
+	_, _ = p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageCoding})
+	_, _ = p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageReviewing})
+	_, _ = p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageIntegrating})
 	_, _ = p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageVerified})
 
 	req := mcpgo.CallToolRequest{}
@@ -173,7 +173,7 @@ func TestSetTaskStage_EmitsAudit(t *testing.T) {
 
 	req := mcpgo.CallToolRequest{}
 	req.Params.Name = "set_task_stage"
-	req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": "building"}
+	req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": "coding"}
 	res, err := srv.handleSetTaskStage(context.Background(), req)
 	if err != nil || res.IsError {
 		t.Fatalf("set_task_stage: %v / %s", err, textOf(t, res))
@@ -193,7 +193,7 @@ func TestSetTaskStage_EmitsAudit(t *testing.T) {
 	if id, _ := found.Meta["task_id"].(string); id != task.ID {
 		t.Errorf("task_id meta: %v", found.Meta)
 	}
-	if stage, _ := found.Meta["stage"].(string); stage != "building" {
+	if stage, _ := found.Meta["stage"].(string); stage != "coding" {
 		t.Errorf("stage meta: %v", found.Meta)
 	}
 	if from, _ := found.Meta["from"].(string); from != "proposed" {
@@ -207,7 +207,7 @@ func TestSetTaskStage_SkipsAuditWhenStageUnchanged(t *testing.T) {
 
 	req := mcpgo.CallToolRequest{}
 	req.Params.Name = "set_task_stage"
-	req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": "building"}
+	req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": "coding"}
 	res, err := srv.handleSetTaskStage(context.Background(), req)
 	if err != nil || res.IsError {
 		t.Fatalf("first set_task_stage: %v / %s", err, textOf(t, res))
@@ -309,7 +309,7 @@ func TestRecordBlocker_MovesTaskAndAudits(t *testing.T) {
 func TestListTasks_ReturnsStage(t *testing.T) {
 	srv, p, _, _ := newTestServerFull(t)
 	a, _ := p.AddTask(plan.NewTaskInput{Title: "A"})
-	_, _ = p.UpdateTask(a.ID, plan.UpdateInput{Stage: plan.StageBuilding})
+	_, _ = p.UpdateTask(a.ID, plan.UpdateInput{Stage: plan.StageCoding})
 
 	req := mcpgo.CallToolRequest{}
 	req.Params.Name = "list_tasks"
@@ -321,7 +321,7 @@ func TestListTasks_ReturnsStage(t *testing.T) {
 	if len(tasks) != 1 {
 		t.Fatalf("got %d tasks", len(tasks))
 	}
-	if tasks[0].Stage != plan.StageBuilding {
+	if tasks[0].Stage != plan.StageCoding {
 		t.Errorf("stage not returned in list_tasks payload: %q", tasks[0].Stage)
 	}
 	if tasks[0].StageEnteredAt.IsZero() {
@@ -333,9 +333,9 @@ func TestListTasks_FilterByStage(t *testing.T) {
 	srv, p, _, _ := newTestServerFull(t)
 	a, _ := p.AddTask(plan.NewTaskInput{Title: "A"})
 	b, _ := p.AddTask(plan.NewTaskInput{Title: "B"})
-	_, _ = p.UpdateTask(a.ID, plan.UpdateInput{Stage: plan.StageBuilding})
-	_, _ = p.UpdateTask(b.ID, plan.UpdateInput{Stage: plan.StageBuilding})
-	_, _ = p.UpdateTask(b.ID, plan.UpdateInput{Stage: plan.StageInReview})
+	_, _ = p.UpdateTask(a.ID, plan.UpdateInput{Stage: plan.StageCoding})
+	_, _ = p.UpdateTask(b.ID, plan.UpdateInput{Stage: plan.StageCoding})
+	_, _ = p.UpdateTask(b.ID, plan.UpdateInput{Stage: plan.StageReviewing})
 
 	req := mcpgo.CallToolRequest{}
 	req.Params.Name = "list_tasks"
@@ -345,6 +345,52 @@ func TestListTasks_FilterByStage(t *testing.T) {
 	_ = json.Unmarshal([]byte(textOf(t, res)), &tasks)
 	if len(tasks) != 1 || tasks[0].ID != a.ID {
 		t.Errorf("stage filter: %+v", tasks)
+	}
+}
+
+// TestSetTaskStage_AcceptsLegacyAlias covers the rename compat path:
+// callers still passing "building"/"in_review"/"merging" should get
+// the task moved to the new canonical stage value.
+func TestSetTaskStage_AcceptsLegacyAlias(t *testing.T) {
+	cases := []struct {
+		alias string
+		want  plan.Stage
+	}{
+		{"building", plan.StageCoding},
+		{"in_review", plan.StageReviewing},
+		{"merging", plan.StageIntegrating},
+	}
+	for _, tc := range cases {
+		t.Run(tc.alias, func(t *testing.T) {
+			srv, p, _, _ := newTestServerFull(t)
+			task, _ := p.AddTask(plan.NewTaskInput{Title: tc.alias})
+			// Seed the task into the appropriate predecessor stage so
+			// in_review/merging aliases are reachable per the matrix.
+			switch tc.want {
+			case plan.StageReviewing:
+				if _, err := p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageCoding}); err != nil {
+					t.Fatal(err)
+				}
+			case plan.StageIntegrating:
+				if _, err := p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageCoding}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := p.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageReviewing}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			req := mcpgo.CallToolRequest{}
+			req.Params.Name = "set_task_stage"
+			req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": tc.alias}
+			res, err := srv.handleSetTaskStage(context.Background(), req)
+			if err != nil || res.IsError {
+				t.Fatalf("set_task_stage(%q): %v / %s", tc.alias, err, textOf(t, res))
+			}
+			got, _ := p.Get(task.ID)
+			if got.Stage != tc.want {
+				t.Errorf("alias %q not normalised: stage=%q want %q", tc.alias, got.Stage, tc.want)
+			}
+		})
 	}
 }
 

@@ -514,7 +514,10 @@ func (s *Server) handleListTasks(_ context.Context, req mcpgo.CallToolRequest) (
 		f.Status = plan.Status(v)
 	}
 	if v := req.GetString("stage", ""); v != "" {
-		f.Stage = plan.Stage(v)
+		// Accept legacy stage names (building/in_review/merging) as
+		// filter input — they map onto the post-rename canonical values
+		// already stored on disk.
+		f.Stage = plan.NormalizeStage(plan.Stage(v))
 	}
 	if req.GetString("open_only", "") == "true" {
 		f.OpenOnly = true
@@ -654,9 +657,13 @@ func (s *Server) handleSetTaskStage(_ context.Context, req mcpgo.CallToolRequest
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	st := plan.Stage(stage)
+	// Accept old stage names (building/in_review/merging) alongside
+	// the new ones so callers carrying over after the rename keep
+	// working. NormalizeStage maps aliases to their canonical post-
+	// rename value; everything else passes through to IsValidStage.
+	st := plan.NormalizeStage(plan.Stage(stage))
 	if !plan.IsValidStage(st) {
-		return mcpgo.NewToolResultErrorf("unknown stage %q (valid: proposed, specced, building, in_review, merging, verified, blocked, abandoned)", stage), nil
+		return mcpgo.NewToolResultErrorf("unknown stage %q (valid: proposed, specced, planning, coding, reviewing, integrating, verified, blocked, shelved, abandoned)", stage), nil
 	}
 	// Capture the previous stage before mutating so the audit event
 	// can record from→to. A missing pre-image is harmless (we still

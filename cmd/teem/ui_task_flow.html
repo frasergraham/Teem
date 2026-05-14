@@ -42,12 +42,13 @@
     .banner .notes { margin-top: 10px; padding: 8px 10px; background: var(--code-bg); border-radius: 6px; white-space: pre-wrap; font-size: 13px; }
 
     .stage { display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:500; text-transform: uppercase; letter-spacing: 0.03em; }
-    .stage.proposed  { background: var(--pill-bg); color: var(--muted); }
-    .stage.specced   { background: var(--pill-bg); color: var(--info); }
-    .stage.building  { background: var(--warn); color: #fff; }
-    .stage.in_review { background: var(--info); color: #fff; }
-    .stage.merging   { background: #7c3aed; color: #fff; }
-    .stage.verified  { background: var(--accent); color: #fff; }
+    .stage.proposed    { background: var(--pill-bg); color: var(--muted); }
+    .stage.specced     { background: var(--pill-bg); color: var(--info); }
+    .stage.planning    { background: var(--pill-bg); color: var(--warn); border: 1px solid var(--warn); }
+    .stage.coding      { background: var(--warn); color: #fff; }
+    .stage.reviewing   { background: var(--info); color: #fff; }
+    .stage.integrating { background: #7c3aed; color: #fff; }
+    .stage.verified    { background: var(--accent); color: #fff; }
     .stage.blocked   { background: var(--error); color: #fff; }
     .stage.abandoned { background: var(--pill-bg); color: var(--muted); text-decoration: line-through; }
 

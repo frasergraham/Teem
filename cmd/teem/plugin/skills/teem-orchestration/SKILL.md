@@ -37,7 +37,7 @@ The `teem` MCP server exposes these tools.
   blocked, shelved, done, abandoned. `add_evidence` appends job_ids.
   Setting a terminal status (done/shelved/abandoned/blocked) snaps the
   task's stage to match server-side, so you don't end up with a task
-  in `building` that's also `shelved`. Forward stage moves still go
+  in `coding` that's also `shelved`. Forward stage moves still go
   through `set_task_stage` — it enforces the transitions matrix.
 - `delete_task(id)` — permanently remove a typo, duplicate, or stub
   task that should never have been recorded. For work the team
@@ -45,9 +45,11 @@ The `teem` MCP server exposes these tools.
   for context). Delete is the escape hatch for noise you don't want to
   scroll past.
 - `set_task_stage(task_id, stage)` — move a task along the pipeline:
-  `proposed → specced → building → in_review → merging → verified`,
-  plus `blocked` and `abandoned`. The transitions matrix rejects
-  illegal jumps (e.g. `verified → proposed`).
+  `proposed → specced → planning → coding → reviewing → integrating →
+  verified`, plus `blocked` and `abandoned`. The transitions matrix
+  rejects illegal jumps (e.g. `verified → proposed`). Old stage names
+  (`building`, `in_review`, `merging`) are still accepted on input
+  and normalised to the new names.
 - `record_decision(task_id, text)` — capture a non-trivial decision
   against a task: the "why" behind a design choice, the trade-off you
   picked, a vendored dep, etc. Persisted to the audit log and
@@ -99,9 +101,10 @@ updates per turn are fine; stale ones are not.
 Treat stage moves and decision notes as part of the work, not as
 overhead:
 
-- Move a task into `building` the moment a worker starts on it;
-  `in_review` when the change is up for review; `merging` while you
-  wait on CI/merge gates; `verified` only after you've confirmed the
+- Move a task into `planning` while a worker is still designing,
+  `coding` the moment they start writing code; `reviewing` when the
+  change is up for review; `integrating` while you wait on CI/merge
+  gates; `verified` only after you've confirmed the
   task's success criteria.
 - `record_decision` should fire on every choice a future reader
   wouldn't recover from the diff alone — "we kept the old API to

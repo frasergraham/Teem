@@ -65,7 +65,7 @@ type NoteBrief struct {
 //
 //	## Peer: <team-name>  (snapshot 14:23 UTC)
 //
-//	- 2 tasks in flight: t-abcd (building), t-efgh (in_review)
+//	- 2 tasks in flight: t-abcd (coding), t-efgh (reviewing)
 //	- 1 task verified in last hour: t-1234 — "channels stdio shim"
 //	- Workers active: worker-ada, reviewer-blake
 //	- Leader: "Iterating on review feedback for channels work" (3m ago)

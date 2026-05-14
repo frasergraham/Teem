@@ -62,7 +62,7 @@ type Task struct {
 	Status Status `json:"status"`
 	Stage  Stage  `json:"stage,omitempty"`
 	// StageEnteredAt records when the task most recently moved into
-	// its current Stage. Used by the dashboard to render "in_review
+	// its current Stage. Used by the dashboard to render "reviewing
 	// for 3h" and by reviewers chasing staleness.
 	StageEnteredAt time.Time `json:"stage_entered_at,omitempty"`
 	AssignedTo     string    `json:"assigned_to,omitempty"`
@@ -147,6 +147,10 @@ func (p *Plan) replay() error {
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			continue
 		}
+		// Normalise legacy stage names read off disk (e.g. "building"
+		// → "coding") before folding the event in. Keeps pre-rename
+		// JSONL files working without rewriting them.
+		ev.Stage = NormalizeStage(ev.Stage)
 		p.apply(ev)
 	}
 	if err := sc.Err(); err != nil {
@@ -176,14 +180,14 @@ func (p *Plan) replay() error {
 
 // stageFromLegacyStatus picks a default stage for tasks that
 // pre-date the Stage field. Best-effort: a task whose Status was
-// "in_progress" probably means "building"; "done" lands at
-// "verified" so it appears in the right bucket of the new board.
+// "in_progress" probably means "coding"; "done" lands at "verified"
+// so it appears in the right bucket of the new board.
 func stageFromLegacyStatus(s Status) Stage {
 	switch s {
 	case StatusPending:
 		return StageProposed
 	case StatusInProgress:
-		return StageBuilding
+		return StageCoding
 	case StatusBlocked:
 		return StageBlocked
 	case StatusDone:
@@ -212,12 +216,12 @@ func isTerminalStatus(s Status) bool {
 // Stage. Stage is the granular pipeline cursor; Status is the
 // coarse-grained open/closed/paused classification derived from it.
 // Keeping a single mapping function here means UpdateTask and replay
-// can't disagree about what "in_review" implies for "open".
+// can't disagree about what "reviewing" implies for "open".
 func statusForStage(st Stage) Status {
 	switch st {
 	case StageProposed, StageSpecced:
 		return StatusPending
-	case StageBuilding, StageInReview, StageMerging:
+	case StagePlanning, StageCoding, StageReviewing, StageIntegrating:
 		return StatusInProgress
 	case StageBlocked:
 		return StatusBlocked
@@ -232,7 +236,7 @@ func statusForStage(st Stage) Status {
 }
 
 // normalizePair reconciles a (Stage, Status) pair so a task can never
-// land in a contradictory state like Stage=building + Status=shelved.
+// land in a contradictory state like Stage=coding + Status=shelved.
 //
 // Terminal/paused Status values (shelved/done/abandoned/blocked) carry
 // strong operator intent ("I'm pausing this") and override Stage —
@@ -402,6 +406,10 @@ func (p *Plan) UpdateTask(id string, in UpdateInput) (Task, error) {
 	if id == "" {
 		return Task{}, errors.New("plan: id is required")
 	}
+	// Accept legacy stage strings on input so callers (CLI, MCP, old
+	// scripts) that still say "building"/"in_review"/"merging" get the
+	// post-rename canonical stage stored on disk.
+	in.Stage = NormalizeStage(in.Stage)
 	p.mu.Lock()
 	existing, ok := p.tasks[id]
 	var currentStage Stage
@@ -428,8 +436,8 @@ func (p *Plan) UpdateTask(id string, in UpdateInput) (Task, error) {
 	//                                 leave (stage,status) alone
 	//
 	// This closes the "tasks in weird states" hole the operator hit:
-	// status=shelved on a building task now snaps the task to shelved
-	// instead of leaving Stage=Building behind.
+	// status=shelved on a coding task now snaps the task to shelved
+	// instead of leaving Stage=Coding behind.
 	effStage, effStatus := currentStage, currentStatus
 	switch {
 	case in.Stage != "" && in.Status != "":
