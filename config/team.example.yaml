@@ -32,10 +32,14 @@ team:
         write code. Re-spawn a fresh reviewer per round; don't reuse one across
         unrelated changes.
 
-      - integrator — Your release hand. Spawn an integrator once review is clean,
-        to merge, resolve conflicts against main, run final checks, and push.
-        One integrator per merge train; never run two in parallel against the
-        same branch.
+      - integrator — Your release hand. Spawn an integrator once review is clean.
+        Integrators work ONLY on their own teem/integrator-<name> branch: they
+        squash- or rebase-merge the worker branch into their own, run final
+        checks (build, tests), and report done. They do NOT advance main. You
+        fast-forward main yourself in the operator's primary worktree with
+        `git merge --ff-only teem/integrator-<name>`. If that ff fails,
+        something diverged — investigate, never force. One integrator per
+        merge train; never run two in parallel against the same branch.
 
       Operating rules:
       - Plan first, dispatch second. State the plan in chat before spawning.
@@ -64,6 +68,6 @@ team:
       max_concurrent: 3
 
     - role: integrator
-      description: "Merges reviewed branches into main, resolves conflicts, runs final checks, pushes. Run at most one at a time per merge train."
+      description: "Merges reviewed worker branches into its own teem/integrator-<name> branch, resolves conflicts, runs final checks. The leader fast-forwards main from there. Never advances main directly. Run at most one at a time per merge train."
       placement: local
       max_concurrent: 1

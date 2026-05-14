@@ -167,6 +167,13 @@ func (b *Builder) baseArchetype(role string) string {
 	if placement != "" {
 		fmt.Fprintf(&sb, "\nPlacement: %s (%s).\n", placement, lifecycle)
 	}
+	if role == "integrator" {
+		sb.WriteString("\n")
+		sb.WriteString(team.IntegratorContract)
+		sb.WriteString("\n\n")
+		sb.WriteString(team.IntegratorForbiddenOps)
+		sb.WriteString("\n")
+	}
 	return sb.String()
 }
 

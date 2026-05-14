@@ -61,8 +61,8 @@ type Entry struct {
 	// Status is one of:
 	//   "done"  — job completed successfully (workers, summarizer)
 	//   "error" — job ended in failure
-	//   "note"  — operator annotation added via `teem memory append`;
-	//             not a job-complete log, so JobID is typically empty
+	//   "note"  — operator/leader annotation; not a job-complete log,
+	//             so JobID is typically empty
 	Status  string
 	Summary string // single-line human summary (no newlines)
 }

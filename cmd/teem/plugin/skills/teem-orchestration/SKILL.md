@@ -189,9 +189,17 @@ new workers have?".
   for short description edits; reserve `append_prompt` for multi-line
   guidance or rules.
 
-The operator can also tune these from the CLI with
-`teem prompt show|append|edit --role <role>` — show with `--raw`
-prints just the override layer.
+The operator can also tune these from the CLI with the `teem agent`
+command:
+
+- `teem agent list` — shows every archetype (including the synthetic
+  `leader`) with whether each has a prompt override or memory file.
+- `teem agent show <archetype>` — prints both the assembled prompt and
+  the memory markdown. `--prompt` or `--memory` narrows the output.
+- `teem agent update <archetype> --prompt` — opens the prompt override
+  in `$EDITOR`. `--memory` does the same for the memory markdown. The
+  two flags are mutually exclusive; pass one per invocation. With
+  neither flag, `update` defaults to `--prompt`.
 
 ## When to delegate vs. do it yourself
 
@@ -361,6 +369,63 @@ Two important caveats:
   When the wordlist is exhausted, the least-recently-used retired
   name is reincarnated — so identity has continuity over the long
   term, but you won't see a name come back while novel ones remain.
+
+<!-- Keep in sync with internal/team/team.go LeaderSystemPrompt() "Integrator workflow" block and internal/team/defaults.go (IntegratorContract, IntegratorForbiddenOps). -->
+## Integrator workflow
+
+The integrator's contract is narrow on purpose: it only touches its
+own branch. The leader (you, running in the operator's primary
+worktree) is the only thing that ever advances `main`. This rule
+exists because a previous integrator workaround
+(`git update-ref refs/heads/main HEAD` after a failed `git checkout
+main` in a worktree that didn't own main) corrupted the operator's
+primary worktree and cost ~10 minutes to recover.
+
+**Integrator contract** (brief every integrator with this):
+
+- Work happens only on the integrator's own branch
+  (`teem/integrator-<name>`).
+- Squash- or rebase-merge the target worker branch into that
+  branch.
+- Run final checks (build, tests). Commit. Report done.
+- Do NOT advance `main`. Do not push to `origin main`. Do not move
+  `refs/heads/main` by any means.
+
+**Forbidden operations** (an integrator or any worker must NEVER run
+these — quoted verbatim into every integrator's system prompt):
+
+```
+  - git update-ref refs/heads/main …          (writes the main ref directly)
+  - git branch -f main …                      (force-moves the main branch)
+  - git push -f origin main                   (force-pushes main upstream)
+  - git push --force origin main              (same)
+  - git push origin HEAD:main                 (non-current-branch push to main)
+  - git push origin <sha>:main                (same; also <sha>:refs/heads/main)
+  - git push origin +HEAD:refs/heads/main     (forced via "+" refspec, no -f flag)
+  - git fetch . HEAD:refs/heads/main          (any fetch writing to refs/heads/main)
+  - git fetch <remote> +<sha>:refs/heads/main (same; "+" refspec forces the write)
+  - git symbolic-ref HEAD refs/heads/main     (redirecting HEAD into main)
+  - git symbolic-ref refs/heads/main …        (redirecting main itself)
+  - git checkout main --force                 (or git checkout -f main)
+  - Any direct write to .git/refs/heads/main or .git/packed-refs
+```
+
+If an integrator finds itself wanting `main` to be at a particular
+SHA, it must stop and report — never force the ref.
+
+**The only ref an integrator may move is `refs/heads/teem/integrator-<your-name>`.**
+
+**Leader's role after the integrator reports done.** Run, in the
+operator's primary worktree:
+
+```
+git merge --ff-only teem/integrator-<name>
+```
+
+If the fast-forward fails, that is a signal — `main` has moved or
+the integrator branched from the wrong base. Investigate; do not
+force. Reach for `record_blocker` or `record_decision` as
+appropriate, never for `git push -f` or `git update-ref`.
 
 ## Channel notifications (preview)
 

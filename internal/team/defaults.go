@@ -29,10 +29,14 @@ How to use the archetypes:
   write code. Re-spawn a fresh reviewer per round; don't reuse one across
   unrelated changes.
 
-- integrator — Your release hand. Spawn an integrator once review is clean,
-  to merge, resolve conflicts against main, run final checks, and push.
-  One integrator per merge train; never run two in parallel against the
-  same branch.
+- integrator — Your release hand. Spawn an integrator once review is clean.
+  Integrators work ONLY on their own teem/integrator-<name> branch: they
+  squash- or rebase-merge the worker branch into their own, run final
+  checks (build, tests), and report done. They do NOT advance main. You
+  fast-forward main yourself in the operator's primary worktree with
+  "git merge --ff-only teem/integrator-<name>". If that ff fails,
+  something diverged — investigate, never force. One integrator per
+  merge train; never run two in parallel against the same branch.
 
 Operating rules:
 - Plan first, dispatch second. State the plan in chat before spawning.
@@ -43,6 +47,44 @@ Operating rules:
 - Keep your own messages concise; long-form thinking belongs in the
   briefs you hand to workers.
 `
+
+// IntegratorContract is the standing rule-of-engagement block every
+// integrator sees in its base prompt and the leader is reminded of in
+// its own. Phrasing is shared so the leader and the worker can't drift
+// out of sync.
+const IntegratorContract = `Integrator contract:
+- Work happens only on your own branch (teem/integrator-<name>).
+- Squash- or rebase-merge the target worker branch into your own.
+- Run final checks (build, tests), commit, report done.
+- DO NOT advance main. The leader fast-forwards main from your branch
+  in the operator's primary worktree after reviewing your work.`
+
+// IntegratorForbiddenOps lists git operations integrators (and any
+// worker) must never run. Quoted verbatim into the integrator's base
+// prompt; the leader is reminded of the list in summary form. The
+// list exists because a previous integrator workaround
+// (git update-ref refs/heads/main HEAD, after a failed `git checkout
+// main` in a worktree that didn't own main) corrupted the operator's
+// primary worktree and cost ~10 minutes to recover.
+const IntegratorForbiddenOps = `Forbidden git operations (an integrator or worker must NEVER run these):
+  - git update-ref refs/heads/main …          (writes the main ref directly)
+  - git branch -f main …                      (force-moves the main branch)
+  - git push -f origin main                   (force-pushes main upstream)
+  - git push --force origin main              (same)
+  - git push origin HEAD:main                 (non-current-branch push to main)
+  - git push origin <sha>:main                (same; also <sha>:refs/heads/main)
+  - git push origin +HEAD:refs/heads/main     (forced via "+" refspec, no -f flag)
+  - git fetch . HEAD:refs/heads/main          (any fetch writing to refs/heads/main)
+  - git fetch <remote> +<sha>:refs/heads/main (same; "+" refspec forces the write)
+  - git symbolic-ref HEAD refs/heads/main     (redirecting HEAD into main)
+  - git symbolic-ref refs/heads/main …        (redirecting main itself)
+  - git checkout main --force                 (or git checkout -f main)
+  - Any direct write to .git/refs/heads/main or .git/packed-refs
+If you find yourself wanting main to be at a particular SHA, stop and
+report it to the leader. The leader moves main from the primary
+worktree; you do not.
+
+The only ref you may move is refs/heads/teem/integrator-<your-name>.`
 
 // DefaultArchetypes is the set of archetypes the wizard appends when the
 // operator accepts the defaults. Roles are deliberately generic
@@ -62,7 +104,7 @@ var DefaultArchetypes = []ArchetypeSpec{
 	},
 	{
 		Role:          "integrator",
-		Description:   "Merges reviewed branches into main, resolves conflicts, runs final checks, pushes. Run at most one at a time per merge train.",
+		Description:   "Merges reviewed worker branches into its own teem/integrator-<name> branch, resolves conflicts, runs final checks. The leader fast-forwards main from there. Never advances main directly. Run at most one at a time per merge train.",
 		Placement:     "local",
 		MaxConcurrent: 1,
 	},

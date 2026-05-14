@@ -66,6 +66,60 @@ func TestBuilder_ArchetypePromptsCarryDescription(t *testing.T) {
 	}
 }
 
+// TestArchetypePrompt_IntegratorIncludesContract asserts that
+// spawning an integrator carries the contract + forbidden-ops block.
+// The Archetype builder gates this on role == "integrator" — see
+// baseArchetype in prompts.go. Regressing the gate (e.g. dropping the
+// branch, or moving the block out of baseArchetype) breaks here.
+func TestArchetypePrompt_IntegratorIncludesContract(t *testing.T) {
+	tm := &team.Team{
+		Name:   "alpha",
+		Leader: team.LeaderSpec{SystemPrompt: "Ship the MVP."},
+		Archetypes: []team.ArchetypeSpec{
+			{Role: "worker", Description: "Implements features.", Placement: "local", MaxConcurrent: 3},
+			{Role: "integrator", Description: "Merges branches.", Placement: "local", MaxConcurrent: 1},
+		},
+	}
+	if err := tm.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	b := New(tm, t.TempDir())
+	got, ok := b.Archetype("integrator")
+	if !ok {
+		t.Fatalf("Archetype(integrator): ok=false on a declared role")
+	}
+	for _, want := range []string{
+		"Integrator contract",
+		"Forbidden git operations",
+		"git update-ref",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("integrator prompt missing %q\n--- got ---\n%s", want, got)
+		}
+	}
+}
+
+// TestArchetypePrompt_WorkerExcludesIntegratorContract is the
+// negative guard: the contract + forbidden-ops block must NOT be
+// folded into non-integrator archetypes. If baseArchetype's role gate
+// regresses (e.g. someone moves the block above the `if role ==
+// "integrator"` check), this test catches it.
+func TestArchetypePrompt_WorkerExcludesIntegratorContract(t *testing.T) {
+	b := New(newTestTeam(t), t.TempDir())
+	got, ok := b.Archetype("worker")
+	if !ok {
+		t.Fatalf("Archetype(worker): ok=false on a declared role")
+	}
+	for _, banned := range []string{
+		"Integrator contract",
+		"Forbidden git operations",
+	} {
+		if strings.Contains(got, banned) {
+			t.Errorf("worker prompt unexpectedly contains %q\n--- got ---\n%s", banned, got)
+		}
+	}
+}
+
 func TestBuilder_ArchetypeUnknownRoleSignalsMiss(t *testing.T) {
 	b := New(newTestTeam(t), t.TempDir())
 	got, ok := b.Archetype("nonexistent")
