@@ -178,13 +178,22 @@ func TestSweepTmp(t *testing.T) {
 // --- summarizer ----------------------------------------------------------
 
 type stubLLM struct {
-	out string
-	req llm.CompletionRequest
+	out         string
+	reply       string // alias for out; either field works in tests
+	req         llm.CompletionRequest
+	beforeReply func() // fires just before returning a response — for race tests
 }
 
 func (c *stubLLM) Complete(_ context.Context, req llm.CompletionRequest) (llm.CompletionResponse, error) {
 	c.req = req
-	return llm.CompletionResponse{Model: "stub", Content: c.out}, nil
+	if c.beforeReply != nil {
+		c.beforeReply()
+	}
+	content := c.out
+	if content == "" {
+		content = c.reply
+	}
+	return llm.CompletionResponse{Model: "stub", Content: content}, nil
 }
 
 func (c *stubLLM) Stream(context.Context, llm.CompletionRequest) (<-chan llm.StreamChunk, error) {
@@ -228,5 +237,57 @@ func TestSummarizerStubLLM(t *testing.T) {
 	}
 	if !strings.Contains(stub.req.Messages[0].Content, "recent A") {
 		t.Errorf("LLM prompt should include recent entries; got:\n%s", stub.req.Messages[0].Content)
+	}
+}
+
+// TestSummarizerPreservesConcurrentAppends verifies the read-modify-write
+// race the prior implementation had: an AppendEntry that lands while the
+// LLM call is in flight must survive the rewrite (not get clobbered).
+func TestSummarizerPreservesConcurrentAppends(t *testing.T) {
+	s := newStore(t, "worker")
+	now := time.Now().UTC().Truncate(time.Second)
+	// Seed an entry that will be in the snapshot the summarizer feeds the LLM.
+	if err := s.AppendEntry("worker", Entry{
+		Timestamp: now.Add(-time.Minute),
+		AgentID:   "worker-1",
+		JobID:     "old",
+		Status:    "done",
+		Summary:   "pre-summarize",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &stubLLM{reply: "digest text"}
+	stub.beforeReply = func() {
+		// Simulate an append landing mid-LLM-call.
+		if err := s.AppendEntry("worker", Entry{
+			Timestamp: now,
+			AgentID:   "worker-2",
+			JobID:     "raced",
+			Status:    "done",
+			Summary:   "arrived during LLM call",
+		}); err != nil {
+			t.Fatalf("racing append: %v", err)
+		}
+	}
+	sum := &Summarizer{
+		Store:           s,
+		Roles:           func() []string { return []string{"worker"} },
+		Client:          stub,
+		RetentionWindow: 24 * time.Hour,
+	}
+	if err := sum.summarizeRole(context.Background(), "worker"); err != nil {
+		t.Fatalf("summarize: %v", err)
+	}
+	entries, err := s.LoadEntries("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := map[string]bool{}
+	for _, e := range entries {
+		jobs[e.JobID] = true
+	}
+	if !jobs["old"] || !jobs["raced"] {
+		t.Errorf("rewrite dropped a concurrent append; have job_ids=%v", jobs)
 	}
 }

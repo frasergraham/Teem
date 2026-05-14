@@ -217,6 +217,24 @@ func (s *Store) LoadEntries(role string) ([]Entry, error) {
 	return entries, nil
 }
 
+// loadEntriesLocked reads entries from a path without taking the role
+// lock — callers must hold it. Used by MutateUnderLock so the
+// read+rewrite happens inside one critical section.
+func (s *Store) loadEntriesLocked(path string) ([]Entry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("archmem: read: %w", err)
+	}
+	_, _, entries, perr := parse(string(data))
+	if perr != nil {
+		return nil, perr
+	}
+	return entries, nil
+}
+
 // LoadFrontmatter returns the parsed frontmatter; zero value if absent.
 func (s *Store) LoadFrontmatter(role string) (Frontmatter, error) {
 	body, err := s.Load(role)
@@ -237,6 +255,33 @@ func (s *Store) Rewrite(role string, fm Frontmatter, digest string, entries []En
 	}
 	unlock := s.lockRole(role)
 	defer unlock()
+	return s.rewriteLocked(role, p, fm, digest, entries)
+}
+
+// MutateUnderLock acquires the per-role lock, loads the current entry
+// list from disk, hands it to fn, and atomically rewrites the file with
+// fn's returned (frontmatter, digest, entries). This is the safe shape
+// for read-modify-write callers (Summarizer) whose computation must
+// happen outside the lock: do the slow work first, then call this with
+// a fn that merges newly-arrived appends against the slow result.
+//
+// Returning an error from fn aborts the rewrite without changes.
+func (s *Store) MutateUnderLock(role string, fn func(current []Entry) (Frontmatter, string, []Entry, error)) error {
+	p := s.path(role)
+	if p == "" {
+		return fmt.Errorf("archmem: bad role %q", role)
+	}
+	unlock := s.lockRole(role)
+	defer unlock()
+	current, _ := s.loadEntriesLocked(p)
+	fm, digest, entries, err := fn(current)
+	if err != nil {
+		return err
+	}
+	return s.rewriteLocked(role, p, fm, digest, entries)
+}
+
+func (s *Store) rewriteLocked(role, p string, fm Frontmatter, digest string, entries []Entry) error {
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return fmt.Errorf("archmem: mkdir: %w", err)
 	}

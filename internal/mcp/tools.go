@@ -249,12 +249,21 @@ func (s *Server) handleAppendArchetypeMemory(_ context.Context, req mcpgo.CallTo
 	if s.team != nil && s.team.FindArchetypeByRole(role) == nil {
 		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
 	}
+	// Bound operator notes the same way job-complete summaries are
+	// bounded — keeps the file from being grown unboundedly by repeated
+	// calls before the next summariser run prunes by age. Also flattens
+	// newlines so the bullet line stays parseable.
+	const maxNoteBytes = 1024
+	clean := strings.ReplaceAll(strings.ReplaceAll(note, "\r", " "), "\n", " ")
+	if len(clean) > maxNoteBytes {
+		clean = clean[:maxNoteBytes] + "…"
+	}
 	entry := archmem.Entry{
 		Timestamp: time.Now().UTC(),
 		AgentID:   "leader",
 		JobID:     "",
 		Status:    "note",
-		Summary:   note,
+		Summary:   clean,
 	}
 	if err := s.archMem.AppendEntry(role, entry); err != nil {
 		return mcpgo.NewToolResultErrorFromErr("append_archetype_memory", err), nil
