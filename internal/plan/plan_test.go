@@ -1,9 +1,11 @@
 package plan
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -117,8 +119,8 @@ func TestPlan_RoundTripAcrossReopen(t *testing.T) {
 	a, _ := p.AddTask(NewTaskInput{Title: "First"})
 	notes := "in progress notes"
 	_, _ = p.UpdateTask(a.ID, UpdateInput{
-		Status: StatusInProgress,
-		Notes:  &notes,
+		Status:      StatusInProgress,
+		Notes:       &notes,
 		AddEvidence: []string{"j1", "j2"},
 	})
 	b, _ := p.AddTask(NewTaskInput{Title: "Second", DependsOn: []string{a.ID}})
@@ -258,6 +260,88 @@ func TestPlan_NormalizesStatusStagePair(t *testing.T) {
 				t.Errorf("status = %q want %q", got.Status, tc.wantStat)
 			}
 		})
+	}
+}
+
+// TestPlan_UpdateTaskIfStage_RaceLosesNoUpdate hammers the
+// awaiting_approval → building transition from many goroutines at
+// once. Exactly one call must succeed; every other must observe
+// ErrStageChanged and bail. Without the locked check the second writer
+// would silently overwrite the first.
+func TestPlan_UpdateTaskIfStage_RaceLosesNoUpdate(t *testing.T) {
+	p := openTest(t)
+	defer p.Close()
+
+	task, _ := p.AddTask(NewTaskInput{Title: "race me"})
+	if _, err := p.UpdateTask(task.ID, UpdateInput{Stage: StageSpecced}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.UpdateTask(task.ID, UpdateInput{Stage: StageAwaitingApproval}); err != nil {
+		t.Fatal(err)
+	}
+
+	const N = 8
+	start := make(chan struct{})
+	results := make(chan error, N)
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := p.UpdateTaskIfStage(task.ID, StageAwaitingApproval, UpdateInput{Stage: StageCoding})
+			results <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes, raced, other := 0, 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrStageChanged):
+			raced++
+		default:
+			other++
+			t.Errorf("unexpected error from racing call: %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Errorf("want exactly one successful approval, got %d (raced=%d other=%d)", successes, raced, other)
+	}
+	if raced != N-1 {
+		t.Errorf("want %d racers to see ErrStageChanged, got %d", N-1, raced)
+	}
+	got, _ := p.Get(task.ID)
+	if got.Stage != StageCoding {
+		t.Errorf("final stage = %q want coding", got.Stage)
+	}
+}
+
+// TestPlan_UpdateTaskIfStage_StageMismatch returns ErrStageChanged
+// when the caller's expected stage is wrong from the start.
+func TestPlan_UpdateTaskIfStage_StageMismatch(t *testing.T) {
+	p := openTest(t)
+	defer p.Close()
+	task, _ := p.AddTask(NewTaskInput{Title: "stage check"}) // proposed
+	_, err := p.UpdateTaskIfStage(task.ID, StageAwaitingApproval, UpdateInput{Stage: StageCoding})
+	if !errors.Is(err, ErrStageChanged) {
+		t.Errorf("want ErrStageChanged, got %v", err)
+	}
+}
+
+// TestPlan_UpdateTaskIfStage_TaskNotFound returns ErrTaskNotFound
+// when the id is missing — distinct from ErrStageChanged so callers
+// can return the correct HTTP status.
+func TestPlan_UpdateTaskIfStage_TaskNotFound(t *testing.T) {
+	p := openTest(t)
+	defer p.Close()
+	_, err := p.UpdateTaskIfStage("t-nope", StageAwaitingApproval, UpdateInput{Stage: StageCoding})
+	if !errors.Is(err, ErrTaskNotFound) {
+		t.Errorf("want ErrTaskNotFound, got %v", err)
 	}
 }
 

@@ -11,6 +11,12 @@ type Stage string
 const (
 	StageProposed Stage = "proposed"
 	StageSpecced  Stage = "specced"
+	// StageAwaitingApproval marks a task whose plan/design needs
+	// explicit operator signoff before code work resumes. Pairs with
+	// Status=in_progress (the task is "live" — the leader is waiting
+	// on a decision) and is surfaced prominently on the dashboard
+	// with APPROVE / REJECT / COMMENT controls.
+	StageAwaitingApproval Stage = "awaiting_approval"
 	// StagePlanning is the "thinking about how" sub-stage that comes
 	// before code is written; split out of the old `building` stage so
 	// the dashboard can distinguish a worker still designing from one
@@ -36,6 +42,7 @@ const (
 var AllStages = []Stage{
 	StageProposed,
 	StageSpecced,
+	StageAwaitingApproval,
 	StagePlanning,
 	StageCoding,
 	StageReviewing,
@@ -56,10 +63,6 @@ var stageAliases = map[string]Stage{
 	"building":  StageCoding,
 	"in_review": StageReviewing,
 	"merging":   StageIntegrating,
-	// Placeholder: worker-zane is adding "awaiting_approval" as a new
-	// stage value in a separate task; do not add it here. Once landed,
-	// it will need its own entry in AllStages and the transition matrix
-	// rather than an alias.
 }
 
 // NormalizeStage canonicalises a stage string read off disk or
@@ -90,36 +93,51 @@ func IsValidStage(s Stage) bool {
 // abandoned are terminal except for the explicit unblock paths.
 var allowedTransitions = map[Stage]map[Stage]bool{
 	StageProposed: {
-		StageSpecced:   true,
-		StagePlanning:  true,
-		StageCoding:    true,
-		StageBlocked:   true,
-		StageShelved:   true,
-		StageAbandoned: true,
+		StageSpecced:          true,
+		StageAwaitingApproval: true,
+		StagePlanning:         true,
+		StageCoding:           true,
+		StageBlocked:          true,
+		StageShelved:          true,
+		StageAbandoned:        true,
 	},
 	StageSpecced: {
-		StageProposed:  true,
-		StagePlanning:  true,
-		StageCoding:    true,
-		StageBlocked:   true,
-		StageShelved:   true,
-		StageAbandoned: true,
+		StageProposed:         true,
+		StageAwaitingApproval: true,
+		StagePlanning:         true,
+		StageCoding:           true,
+		StageBlocked:          true,
+		StageShelved:          true,
+		StageAbandoned:        true,
+	},
+	StageAwaitingApproval: {
+		// APPROVE → coding, REJECT → shelved, COMMENT → self,
+		// safety valve → abandoned. blocked is allowed for parity with
+		// other active stages (operator can mark "stuck waiting on
+		// external review" while still in this state).
+		StageAwaitingApproval: true,
+		StageCoding:           true,
+		StageShelved:          true,
+		StageAbandoned:        true,
+		StageBlocked:          true,
 	},
 	StagePlanning: {
-		StageSpecced:   true,
-		StageCoding:    true,
-		StageReviewing: true,
-		StageBlocked:   true,
-		StageShelved:   true,
-		StageAbandoned: true,
+		StageSpecced:          true,
+		StageAwaitingApproval: true,
+		StageCoding:           true,
+		StageReviewing:        true,
+		StageBlocked:          true,
+		StageShelved:          true,
+		StageAbandoned:        true,
 	},
 	StageCoding: {
-		StageSpecced:   true,
-		StagePlanning:  true,
-		StageReviewing: true,
-		StageBlocked:   true,
-		StageShelved:   true,
-		StageAbandoned: true,
+		StageSpecced:          true,
+		StageAwaitingApproval: true,
+		StagePlanning:         true,
+		StageReviewing:        true,
+		StageBlocked:          true,
+		StageShelved:          true,
+		StageAbandoned:        true,
 	},
 	StageReviewing: {
 		StagePlanning:    true,
@@ -144,32 +162,31 @@ var allowedTransitions = map[Stage]map[Stage]bool{
 	},
 	StageBlocked: {
 		// Unblock back into whichever stage was current. Callers pick.
-		StageProposed:    true,
-		StageSpecced:     true,
-		StagePlanning:    true,
-		StageCoding:      true,
-		StageReviewing:   true,
-		StageIntegrating: true,
-		StageShelved:     true,
-		StageAbandoned:   true,
+		StageProposed:         true,
+		StageSpecced:          true,
+		StageAwaitingApproval: true,
+		StagePlanning:         true,
+		StageCoding:           true,
+		StageReviewing:        true,
+		StageIntegrating:      true,
+		StageShelved:          true,
+		StageAbandoned:        true,
 	},
 	StageShelved: {
 		// Coming off the shelf — operator picks where to resume.
-		StageProposed:  true,
-		StageSpecced:   true,
-		StagePlanning:  true,
-		StageCoding:    true,
-		StageReviewing: true,
-		StageBlocked:   true,
-		StageAbandoned: true,
+		StageProposed:         true,
+		StageSpecced:          true,
+		StageAwaitingApproval: true,
+		StagePlanning:         true,
+		StageCoding:           true,
+		StageReviewing:        true,
+		StageBlocked:          true,
+		StageAbandoned:        true,
 	},
 	StageAbandoned: {
 		// Reopen explicitly into coding if someone changes their mind.
 		StageCoding: true,
 	},
-	// Placeholder: worker-zane's `awaiting_approval` stage will need its
-	// own row here once it lands, plus entries pointing into it from
-	// whichever stages can request approval.
 }
 
 // CanTransition reports whether moving from→to is permitted. An empty

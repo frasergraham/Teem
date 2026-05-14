@@ -839,8 +839,8 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	switch sub {
-	case "":
+	switch {
+	case sub == "":
 		// Whole-team operations.
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -863,8 +863,10 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		removeTeamRegistration(id)
 		d.persistStateSnapshot()
 		w.WriteHeader(http.StatusNoContent)
-	case "pulse":
+	case sub == "pulse":
 		d.handlePulseControl(w, r, rt)
+	case strings.HasPrefix(sub, "tasks/"):
+		d.handleControlTaskAction(w, r, rt, strings.TrimPrefix(sub, "tasks/"))
 	default:
 		http.NotFound(w, r)
 	}
@@ -1742,6 +1744,10 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		// SSR jobs pages — unauth like the dashboard (tailnet boundary).
 		if agentID, ok := resolveAgentJobsRoute(suffix); ok {
 			d.renderAgentJobs(w, r, rt, agentID)
+			return
+		}
+		if taskID, action, ok := resolveTaskActionRoute(suffix); ok {
+			d.handleTaskActionForm(w, r, rt, taskID, action)
 			return
 		}
 		if taskID, ok := resolveTaskFlowRoute(suffix); ok {

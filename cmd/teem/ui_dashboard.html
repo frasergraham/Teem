@@ -89,16 +89,18 @@
   .pill.paused  { background: var(--warn); color: white; }
   .pill.error   { background: var(--error); color: white; }
   .pill.notes   { background: var(--info); color: white; }
+  .pill.approval { background: var(--info); color: white; }
 
   /* Stage pills — colour-coded by lifecycle. */
   .stage { display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:500; text-transform: uppercase; letter-spacing: 0.03em; }
-  .stage.proposed    { background: var(--pill-bg); color: var(--muted); }
-  .stage.specced     { background: var(--pill-bg); color: var(--info); }
-  .stage.planning    { background: var(--pill-bg); color: var(--warn); border: 1px solid var(--warn); }
-  .stage.coding      { background: var(--warn); color: #fff; }
-  .stage.reviewing   { background: var(--info); color: #fff; }
-  .stage.integrating { background: #7c3aed; color: #fff; }
-  .stage.verified    { background: var(--accent); color: #fff; }
+  .stage.proposed          { background: var(--pill-bg); color: var(--muted); }
+  .stage.specced           { background: var(--pill-bg); color: var(--info); }
+  .stage.awaiting_approval { background: var(--info); color: #fff; }
+  .stage.planning          { background: var(--pill-bg); color: var(--warn); border: 1px solid var(--warn); }
+  .stage.coding            { background: var(--warn); color: #fff; }
+  .stage.reviewing         { background: var(--info); color: #fff; }
+  .stage.integrating       { background: #7c3aed; color: #fff; }
+  .stage.verified          { background: var(--accent); color: #fff; }
   .stage.blocked   { background: var(--error); color: #fff; }
   .stage.shelved   { background: var(--pill-bg); color: var(--muted); border: 1px dashed var(--muted); padding: 0 6px; }
   .stage.abandoned { background: var(--pill-bg); color: var(--muted); text-decoration: line-through; }
@@ -106,6 +108,75 @@
   /* Shelved section: muted to signal "intentionally paused, not in flight." */
   .shelved-section h3 { color: var(--muted); }
   .shelved-section .tasks tbody tr { opacity: 0.75; }
+
+  /* Awaiting-approval section: prominent. Sits at the top of the team
+     page so the operator notices the request without scrolling. */
+  .approval-section {
+    border: 1px solid var(--info);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin: 0 0 14px 0;
+    background: color-mix(in srgb, var(--info) 8%, var(--card));
+  }
+  .approval-section h3 {
+    margin: 0 0 8px 0;
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--info);
+    font-weight: 700;
+  }
+  .approval-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+  }
+  .approval-card:last-child { margin-bottom: 0; }
+  .approval-card .head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
+  .approval-card .head .id { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: var(--muted); }
+  .approval-card .head .title { font-weight: 600; }
+  .approval-card .head .title a { color: inherit; text-decoration: none; }
+  .approval-card .head .title a:hover { text-decoration: underline; }
+  .approval-card .head .when { color: var(--muted); font-size: 12px; margin-left: auto; }
+  .approval-card .preview { font-size: 13px; color: var(--fg); white-space: pre-wrap; margin: 6px 0; }
+  .approval-card .evidence { font-size: 12px; color: var(--muted); margin: 6px 0; }
+  .approval-card .evidence a { color: var(--info); text-decoration: none; margin-right: 8px; }
+  .approval-card .actions {
+    display: flex; gap: 8px; align-items: stretch; margin-top: 8px; flex-wrap: wrap;
+  }
+  .approval-card .actions input[type=text] {
+    flex: 1; min-width: 200px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--fg);
+    font-size: 13px;
+    font-family: inherit;
+  }
+  .approval-card .actions button {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--fg);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+  }
+  .approval-card .actions button:hover { border-color: var(--muted); }
+  .approval-card .actions button.approve { background: var(--accent); color: white; border-color: var(--accent); }
+  .approval-card .actions button.reject  { background: var(--error);  color: white; border-color: var(--error); }
+  .approval-card .actions button.comment { background: var(--info);   color: white; border-color: var(--info); }
+
+  .flash {
+    background: var(--accent); color: #fff;
+    padding: 8px 12px; border-radius: 6px;
+    margin: 0 0 12px 0; font-size: 13px;
+  }
 
   .leader-card {
     background: var(--card);
@@ -387,6 +458,7 @@
               {{ else }}<span class="pill running">pulse running</span>{{ end }}
             {{ else }}<span class="pill">pulse off</span>{{ end }}
             {{ if gt .UnreadNotes 0 }}<span class="pill notes">{{ .UnreadNotes }} note{{ if gt .UnreadNotes 1 }}s{{ end }}</span>{{ end }}
+            {{ if gt .AwaitingApprovalCount 0 }}<span class="pill approval">{{ .AwaitingApprovalCount }} awaiting approval</span>{{ end }}
           </h2>
           <div class="meta">registered {{ .RegisteredAgo }}</div>
 
@@ -477,6 +549,40 @@
         <span class="stat"><span class="n">{{ .InFlight }}</span><span class="lbl">in flight</span></span>
         <span class="stat"><span class="n">{{ .OpenTaskCount }}</span><span class="lbl">open task{{ if ne .OpenTaskCount 1 }}s{{ end }}</span></span>
       </div>
+
+      {{ if .Flash }}<div class="flash">{{ .Flash }}</div>{{ end }}
+
+      {{ if .AwaitingApproval }}
+      <div class="approval-section">
+        <h3>Awaiting approval — operator action needed</h3>
+        {{ range .AwaitingApproval }}
+          <div class="approval-card">
+            <div class="head">
+              <span class="title"><a href="{{ .URL }}">{{ .Title }}</a></span>
+              <span class="id">{{ .ID }}</span>
+              {{ if .StageAgo }}<span class="when">awaiting {{ .StageAgo }}</span>{{ end }}
+            </div>
+            {{ if .NotesLong }}
+              <details class="expandable"><summary><div class="preview">{{ .NotesPreview }}</div></summary><div class="expanded">{{ .Notes }}</div></details>
+            {{ else if .NotesPreview }}
+              <div class="preview">{{ .NotesPreview }}</div>
+            {{ end }}
+            {{ if .Evidence }}
+              <div class="evidence">
+                evidence:
+                {{ range .Evidence }}<a href="/jobs/{{ . }}">{{ . }}</a>{{ end }}
+              </div>
+            {{ end }}
+            <form class="actions" method="post" action="{{ .ApproveURL }}">
+              <input type="text" name="comment" placeholder="optional comment / required reason for reject">
+              <button class="approve" type="submit" formaction="{{ .ApproveURL }}">APPROVE</button>
+              <button class="reject"  type="submit" formaction="{{ .RejectURL }}">REJECT</button>
+              <button class="comment" type="submit" formaction="{{ .CommentURL }}">COMMENT</button>
+            </form>
+          </div>
+        {{ end }}
+      </div>
+      {{ end }}
 
       <div class="leader-card">
         <h3>Status board</h3>

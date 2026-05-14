@@ -163,6 +163,69 @@ func TestPlan_StageRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAwaitingApproval_StatusIsInProgress(t *testing.T) {
+	if got := statusForStage(StageAwaitingApproval); got != StatusInProgress {
+		t.Errorf("statusForStage(awaiting_approval) = %q, want in_progress", got)
+	}
+}
+
+func TestAwaitingApproval_TransitionsIn(t *testing.T) {
+	// Per task spec: transitions TO awaiting_approval are allowed from
+	// specced, planning, coding, and proposed (rare but valid).
+	for _, from := range []Stage{StageProposed, StageSpecced, StagePlanning, StageCoding} {
+		if !CanTransition(from, StageAwaitingApproval) {
+			t.Errorf("%q → awaiting_approval should be allowed", from)
+		}
+	}
+}
+
+func TestAwaitingApproval_TransitionsOut(t *testing.T) {
+	// APPROVE → coding, REJECT → shelved, COMMENT → self, safety → abandoned.
+	for _, to := range []Stage{StageCoding, StageShelved, StageAwaitingApproval, StageAbandoned} {
+		if !CanTransition(StageAwaitingApproval, to) {
+			t.Errorf("awaiting_approval → %q should be allowed", to)
+		}
+	}
+	// Should NOT jump straight to reviewing, integrating, or verified.
+	for _, to := range []Stage{StageReviewing, StageIntegrating, StageVerified} {
+		if CanTransition(StageAwaitingApproval, to) {
+			t.Errorf("awaiting_approval → %q should be forbidden", to)
+		}
+	}
+}
+
+func TestAwaitingApproval_AppearsInAllStages(t *testing.T) {
+	for _, s := range AllStages {
+		if s == StageAwaitingApproval {
+			return
+		}
+	}
+	t.Error("AllStages should include awaiting_approval")
+}
+
+func TestUpdateTask_AwaitingApprovalSelfTransition(t *testing.T) {
+	// COMMENT path: the task stays in awaiting_approval, only notes
+	// are appended. Should not return ErrInvalidStage.
+	p := openTest(t)
+	defer p.Close()
+	task, _ := p.AddTask(NewTaskInput{Title: "doc"})
+	if _, err := p.UpdateTask(task.ID, UpdateInput{Stage: StageSpecced}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.UpdateTask(task.ID, UpdateInput{Stage: StageAwaitingApproval}); err != nil {
+		t.Fatal(err)
+	}
+	// Self-transition (no actual stage change) must be a no-op for the
+	// matrix check.
+	if _, err := p.UpdateTask(task.ID, UpdateInput{Stage: StageAwaitingApproval}); err != nil {
+		t.Errorf("self-transition to awaiting_approval should succeed, got %v", err)
+	}
+	got, _ := p.Get(task.ID)
+	if got.Status != StatusInProgress {
+		t.Errorf("status after awaiting_approval = %q, want in_progress", got.Status)
+	}
+}
+
 func TestListFilter_ByStage(t *testing.T) {
 	p := openTest(t)
 	defer p.Close()

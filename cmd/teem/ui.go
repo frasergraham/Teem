@@ -115,12 +115,16 @@ type summaryTile struct {
 	ActiveAgentCount int
 	InFlight         int64
 	CompletedToday   int
-	LeaderStatusText string // truncated to ~140 chars; empty when never set
-	LeaderStatusAgo  string
-	PulseRunning     bool
-	PulsePaused      bool
-	UnreadNotes      int
-	BranchCount      int
+	// AwaitingApprovalCount surfaces "operator action needed" tasks on
+	// the dashboard root tile so the count is visible without opening
+	// the team page.
+	AwaitingApprovalCount int
+	LeaderStatusText      string // truncated to ~140 chars; empty when never set
+	LeaderStatusAgo       string
+	PulseRunning          bool
+	PulsePaused           bool
+	UnreadNotes           int
+	BranchCount           int
 }
 
 // teamPageSnapshot wraps a single dashboardTeam for the detail page,
@@ -142,12 +146,23 @@ type dashboardTeam struct {
 	// ID is the canonical team id used in URLs (e.g. the ping form
 	// posts to /control/teams/<id>/ping). Name is the human-readable
 	// display label.
-	ID             string
-	Name           string
-	RegisteredAgo  string
-	Agents         []dashboardAgent
-	OpenTaskCount  int
-	OpenTasks      []dashboardTask
+	ID            string
+	Name          string
+	RegisteredAgo string
+	Agents        []dashboardAgent
+	OpenTaskCount int
+	OpenTasks     []dashboardTask
+	// AwaitingApproval lists tasks currently in stage=awaiting_approval.
+	// Rendered as a dedicated, prominent section at the top of the team
+	// page with APPROVE / REJECT / COMMENT controls per row. These tasks
+	// are ALSO included in OpenTaskCount (they're open) but pulled out
+	// of OpenTasks so the main table isn't duplicated.
+	AwaitingApproval []awaitingApprovalTask
+	// Flash is a short status banner shown above the awaiting-approval
+	// section after a successful form POST redirect ("task_approved",
+	// "task_rejected", "task_commented", or ping outcomes via
+	// flashFromQuery's whitelist).
+	Flash          string
 	Shelved        []dashboardTask
 	RecentDone     []dashboardTask
 	LeaderStatus   *leaderRow // pinned "leader" entry, if any
@@ -185,6 +200,24 @@ type leaderRow struct {
 type taskLink struct {
 	ID  string
 	URL string
+}
+
+// awaitingApprovalTask is the per-row data the team-detail page renders
+// inside the "Awaiting approval" section. Carries the bits the operator
+// needs to decide: title, id, the leader's notes preview, evidence
+// links, and the URLs the inline form posts to.
+type awaitingApprovalTask struct {
+	ID           string
+	Title        string
+	NotesPreview string
+	Notes        string // full notes (used by <details> for expansion)
+	NotesLong    bool   // true when Notes exceeds the preview cap
+	Evidence     []string
+	StageAgo     string
+	URL          string // /teams/<id>/tasks/<id> (deep link)
+	ApproveURL   string
+	RejectURL    string
+	CommentURL   string
 }
 
 type dashboardTask struct {
@@ -265,11 +298,23 @@ func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID s
 	}
 
 	state := readDaemonStateFileSafe()
+	team := teamSnapshot(found)
+	// flash is set by the form-POST redirect (?flash=task_approved etc).
+	// Whitelisted to a known set so a malicious link can't inject
+	// arbitrary text into the page header.
+	switch r.URL.Query().Get("flash") {
+	case "task_approved":
+		team.Flash = "Approved — task moved to coding"
+	case "task_rejected":
+		team.Flash = "Rejected — task shelved"
+	case "task_commented":
+		team.Flash = "Comment added"
+	}
 	snap := teamPageSnapshot{
 		Endpoint:     d.endpoint,
 		UptimeAgo:    agoShort(state.StartedAt),
 		NowFormatted: time.Now().Local().Format("Mon Jan 2 15:04:05"),
-		Team:         teamSnapshot(found),
+		Team:         team,
 		Flash:        flashFromQuery(r.URL.Query().Get("flash")),
 	}
 
@@ -287,16 +332,17 @@ func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID s
 func teamTileSnapshot(rt *registeredTeam) summaryTile {
 	ts := teamSnapshot(rt)
 	tile := summaryTile{
-		Name:             rt.team.Name,
-		Slug:             rt.team.ID,
-		RegisteredAgo:    ts.RegisteredAgo,
-		OpenTaskCount:    ts.OpenTaskCount,
-		ActiveAgentCount: len(ts.Agents),
-		InFlight:         ts.InFlight,
-		PulseRunning:     ts.PulseRunning,
-		PulsePaused:      ts.PulsePaused,
-		UnreadNotes:      ts.UnreadNotes,
-		BranchCount:      len(ts.Branches),
+		Name:                  rt.team.Name,
+		Slug:                  rt.team.ID,
+		RegisteredAgo:         ts.RegisteredAgo,
+		OpenTaskCount:         ts.OpenTaskCount,
+		ActiveAgentCount:      len(ts.Agents),
+		InFlight:              ts.InFlight,
+		PulseRunning:          ts.PulseRunning,
+		PulsePaused:           ts.PulsePaused,
+		UnreadNotes:           ts.UnreadNotes,
+		BranchCount:           len(ts.Branches),
+		AwaitingApprovalCount: len(ts.AwaitingApproval),
 	}
 	tile.URL = "/teams/" + tile.Slug
 
@@ -336,7 +382,8 @@ func teamTileSnapshot(rt *registeredTeam) summaryTile {
 // flash rendered).
 func flashFromQuery(v string) string {
 	switch v {
-	case "pinged", "busy", "paused":
+	case "pinged", "busy", "paused",
+		"task_approved", "task_rejected", "task_commented":
 		return v
 	default:
 		return ""
@@ -422,14 +469,29 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	if rt.plan != nil {
 		all := rt.plan.List(plan.Filter{})
 		var shelved []plan.Task
+		var awaiting []plan.Task
 		for _, t := range all {
 			switch {
+			case t.Stage == plan.StageAwaitingApproval:
+				// Counts as "open" (still needs attention) but lives in
+				// its own section so the operator-action-required tasks
+				// jump out at the top of the page.
+				out.OpenTaskCount++
+				awaiting = append(awaiting, t)
 			case t.Status.IsOpen():
 				out.OpenTaskCount++
 				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.ID, t, liveAgents))
 			case t.Status.IsShelved():
 				shelved = append(shelved, t)
 			}
+		}
+		// Awaiting-approval: newest-entered first by StageEnteredAt so a
+		// fresh request for signoff sits at the top of the section.
+		sort.SliceStable(awaiting, func(i, j int) bool {
+			return awaiting[i].StageEnteredAt.After(awaiting[j].StageEnteredAt)
+		})
+		for _, t := range awaiting {
+			out.AwaitingApproval = append(out.AwaitingApproval, taskToAwaitingApprovalTask(rt.team.ID, t))
 		}
 		// Sort open tasks by stage order then created.
 		sort.SliceStable(out.OpenTasks, func(i, j int) bool {
@@ -558,6 +620,41 @@ func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool) d
 	}
 }
 
+// taskToAwaitingApprovalTask packages a plan.Task in awaiting_approval
+// stage for the dashboard's prominent "Awaiting approval" section,
+// pre-baking the form action URLs and a clamped notes preview.
+func taskToAwaitingApprovalTask(team string, t plan.Task) awaitingApprovalTask {
+	const previewMax = 200
+	preview := t.Notes
+	long := false
+	if len(preview) > previewMax {
+		end := previewMax
+		for end > 0 && !utf8.RuneStart(preview[end]) {
+			end--
+		}
+		preview = preview[:end] + "…"
+		long = true
+	}
+	stageAgo := ""
+	if !t.StageEnteredAt.IsZero() {
+		stageAgo = agoShort(t.StageEnteredAt)
+	}
+	base := fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID)
+	return awaitingApprovalTask{
+		ID:           t.ID,
+		Title:        t.Title,
+		NotesPreview: preview,
+		Notes:        t.Notes,
+		NotesLong:    long,
+		Evidence:     append([]string(nil), t.Evidence...),
+		StageAgo:     stageAgo,
+		URL:          base,
+		ApproveURL:   base + "/approve",
+		RejectURL:    base + "/reject",
+		CommentURL:   base + "/comment",
+	}
+}
+
 // leaderStatusToRow converts a leaderstatus.Entry to the dashboard
 // row shape, resolving task ids to clickable links.
 func leaderStatusToRow(team string, e leaderstatus.Entry) leaderRow {
@@ -584,20 +681,22 @@ func stageOrder(s string) int {
 		return 0
 	case plan.StageSpecced:
 		return 1
-	case plan.StagePlanning:
+	case plan.StageAwaitingApproval:
 		return 2
-	case plan.StageCoding:
+	case plan.StagePlanning:
 		return 3
-	case plan.StageReviewing:
+	case plan.StageCoding:
 		return 4
-	case plan.StageIntegrating:
+	case plan.StageReviewing:
 		return 5
-	case plan.StageVerified:
+	case plan.StageIntegrating:
 		return 6
-	case plan.StageBlocked:
+	case plan.StageVerified:
 		return 7
-	case plan.StageAbandoned:
+	case plan.StageBlocked:
 		return 8
+	case plan.StageAbandoned:
+		return 9
 	}
 	return 99
 }

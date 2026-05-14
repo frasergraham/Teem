@@ -110,6 +110,12 @@ var ErrTaskNotFound = errors.New("plan: task not found")
 // a stage transition that the allowed-transitions matrix forbids.
 var ErrInvalidStage = errors.New("plan: invalid stage transition")
 
+// ErrStageChanged is returned by UpdateTaskIfStage when the task's
+// current stage no longer matches the caller's expected stage. Used to
+// detect lost-update races on read-then-write decision flows (e.g. two
+// concurrent approvals racing on the same awaiting_approval task).
+var ErrStageChanged = errors.New("plan: task stage changed since read")
+
 // Open opens (creating if needed) the JSONL file at path. Replays
 // every event into the snapshot so callers can immediately list/get.
 func Open(path string) (*Plan, error) {
@@ -221,7 +227,7 @@ func statusForStage(st Stage) Status {
 	switch st {
 	case StageProposed, StageSpecced:
 		return StatusPending
-	case StagePlanning, StageCoding, StageReviewing, StageIntegrating:
+	case StageAwaitingApproval, StagePlanning, StageCoding, StageReviewing, StageIntegrating:
 		return StatusInProgress
 	case StageBlocked:
 		return StatusBlocked
@@ -411,17 +417,42 @@ func (p *Plan) UpdateTask(id string, in UpdateInput) (Task, error) {
 	// post-rename canonical stage stored on disk.
 	in.Stage = NormalizeStage(in.Stage)
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	existing, ok := p.tasks[id]
-	var currentStage Stage
-	var currentStatus Status
-	if ok {
-		currentStage = existing.Stage
-		currentStatus = existing.Status
-	}
-	p.mu.Unlock()
 	if !ok {
 		return Task{}, ErrTaskNotFound
 	}
+	return p.updateTaskLocked(id, existing, in)
+}
+
+// UpdateTaskIfStage applies the mutation only if the task's current
+// Stage equals expected. The check and the write happen under the same
+// mutex acquisition, so two concurrent callers reading the same stage
+// can't both pass and clobber each other's writes. Returns
+// ErrTaskNotFound when the id is missing, ErrStageChanged when the
+// stage no longer matches, ErrInvalidStage on a forbidden transition,
+// or any underlying write error.
+func (p *Plan) UpdateTaskIfStage(id string, expected Stage, in UpdateInput) (Task, error) {
+	if id == "" {
+		return Task{}, errors.New("plan: id is required")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	existing, ok := p.tasks[id]
+	if !ok {
+		return Task{}, ErrTaskNotFound
+	}
+	if existing.Stage != expected {
+		return Task{}, ErrStageChanged
+	}
+	return p.updateTaskLocked(id, existing, in)
+}
+
+// updateTaskLocked is the shared body for UpdateTask and
+// UpdateTaskIfStage. Caller must hold p.mu.
+func (p *Plan) updateTaskLocked(id string, existing *Task, in UpdateInput) (Task, error) {
+	currentStage := existing.Stage
+	currentStatus := existing.Status
 	// Resolve the *effective* (stage, status) the caller is asking for.
 	// We treat which field was explicitly set as a signal of intent —
 	// otherwise a status-only mutation with a stale Stage would silently
@@ -479,11 +510,14 @@ func (p *Plan) UpdateTask(id string, in UpdateInput) (Task, error) {
 		Notes:       in.Notes,
 		AddEvidence: in.AddEvidence,
 	}
-	if err := p.write(ev); err != nil {
+	if err := p.writeLocked(ev); err != nil {
 		return Task{}, err
 	}
-	t, _ := p.Get(id)
-	return t, nil
+	t, ok := p.tasks[id]
+	if !ok {
+		return Task{}, ErrTaskNotFound
+	}
+	return cloneTask(*t), nil
 }
 
 // LinkJob adds jobID to the task's evidence list — shortcut for
@@ -587,13 +621,20 @@ func (p *Plan) Close() error {
 // snapshot. Single critical section so disk-vs-memory state can't
 // drift if two writers race.
 func (p *Plan) write(ev Event) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.writeLocked(ev)
+}
+
+// writeLocked is the inner half of write; caller must hold p.mu.
+// Used by updateTaskLocked so the read-check-write sequence in
+// UpdateTaskIfStage stays under a single lock acquisition.
+func (p *Plan) writeLocked(ev Event) error {
 	body, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("plan: marshal: %w", err)
 	}
 	body = append(body, '\n')
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.f == nil {
 		return errors.New("plan: closed")
 	}
