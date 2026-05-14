@@ -82,6 +82,21 @@ func cleanupLegacyPluginDir() {
 	}
 }
 
+// cleanupLegacyCommands removes slash-command files that earlier teem
+// versions shipped but have since been retired. Idempotent and silent:
+// missing files are not an error. Keep in sync with the embedded set in
+// `plugin/commands/`.
+func cleanupLegacyCommands() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	commandsDir := filepath.Join(home, ".claude", "commands")
+	for _, name := range []string{"teem-team.md", "teem-spawn.md", "teem-audit.md"} {
+		_ = os.Remove(filepath.Join(commandsDir, name))
+	}
+}
+
 // quietEnsurePlugin is called from `teem chat` before exec'ing claude.
 // First-run install only — silent no-op afterwards. We don't want to
 // surprise an operator who customised their commands.
@@ -91,6 +106,7 @@ func quietEnsurePlugin() {
 		fmt.Fprintf(os.Stderr, "[teem] installed %d teem command/skill file(s) under ~/.claude/\n", written)
 	}
 	cleanupLegacyPluginDir()
+	cleanupLegacyCommands()
 }
 
 // installPluginForInit is the explicit-onboarding variant for `teem
@@ -103,10 +119,11 @@ func installPluginForInit() error {
 	}
 	if written > 0 {
 		fmt.Printf("Installed %d teem command/skill file(s) under ~/.claude/.\n", written)
-		fmt.Println("Available slash commands in Claude Code: /teem-team, /teem-spawn, /teem-audit")
+		fmt.Println("Available slash commands in Claude Code: /teem-status")
 	} else {
 		fmt.Println("Teem commands + skill already installed under ~/.claude/.")
 	}
 	cleanupLegacyPluginDir()
+	cleanupLegacyCommands()
 	return nil
 }

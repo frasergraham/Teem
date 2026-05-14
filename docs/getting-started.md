@@ -104,9 +104,8 @@ skill is loaded; the leader has these MCP tools available:
 
 Slash commands the plugin ships:
 
-- `/teem-team` — show the roster + which instances are running.
-- `/teem-spawn <role>` — spawn an instance.
-- `/teem-audit [agent-id]` — summarize recent audit events.
+- `/teem-status` — one-glance status: leader status, active workers,
+  open tasks, in-flight count, pulse state.
 
 A typical session:
 
