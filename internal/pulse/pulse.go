@@ -1,9 +1,13 @@
 // Package pulse is the autonomous-leader heartbeat. A Pulse owns a
-// goroutine that periodically invokes `claude -p --resume <session>`
-// with a freshly-composed context snapshot, so the leader can take
-// turns when no human is connected. Event-driven wakes are handled by
-// the channels mechanism (teem-channel stdio shim) when a chat client
-// is attached; Pulse covers the disconnected case.
+// goroutine that periodically (and, in later phases, in response to
+// audit events) invokes `claude -p --resume <session>` with a
+// freshly-composed context snapshot, so the leader can take turns
+// between human chats.
+//
+// Phase 3 scope: timer-only ticks. No event triggers, no guard rails
+// beyond a mutex (no overlapping ticks) and a pause file. Phase 4
+// adds the CLI/control surface; phase 5 adds debounced event triggers
+// and tick budget.
 package pulse
 
 import (
@@ -52,6 +56,8 @@ type Config struct {
 	// are skipped and counted but emit no claude invocation. A pause
 	// flag and stop() are the override knobs.
 	MaxPerHour int
+	// DebounceWindow groups audit nudges into one tick. Default 500ms.
+	DebounceWindow time.Duration
 	// IdleBackoffAfter is how many no-tool-call ticks in a row before
 	// the effective interval doubles. Default 3.
 	IdleBackoffAfter int
@@ -68,6 +74,8 @@ type Pulse struct {
 	tickN    atomic.Int64
 
 	// Sliding window of recent tick timestamps for budget enforcement.
+	// Protected by budgetMu so the nudger and the timer loop don't
+	// race on the slice.
 	budgetMu  sync.Mutex
 	tickTimes []time.Time
 
@@ -75,6 +83,11 @@ type Pulse struct {
 	// the effective interval after IdleBackoffAfter; reset on the
 	// next tick that calls a tool.
 	idleStreak atomic.Int32
+
+	// Event-trigger debouncer: a single goroutine consumes nudges and
+	// fires Tick after DebounceWindow of quiet. Buffered so callers
+	// never block.
+	nudgeCh chan string
 }
 
 // New constructs a Pulse from a Config. Sensible defaults are applied
@@ -92,17 +105,20 @@ func New(cfg Config) *Pulse {
 	if cfg.MaxPerHour == 0 {
 		cfg.MaxPerHour = 30
 	}
+	if cfg.DebounceWindow == 0 {
+		cfg.DebounceWindow = 500 * time.Millisecond
+	}
 	if cfg.IdleBackoffAfter == 0 {
 		cfg.IdleBackoffAfter = 3
 	}
-	return &Pulse{cfg: cfg}
+	return &Pulse{cfg: cfg, nudgeCh: make(chan string, 32)}
 }
 
-// Start kicks off the periodic loop. Idempotent — calling Start on an
-// already-running Pulse is a no-op. The loop exits when Stop is called
-// or the parent context is cancelled. Writes a "running" flag file so
-// a daemon restart can auto-resume Pulse without operator
-// intervention.
+// Start kicks off the periodic loop AND the audit-event debouncer.
+// Idempotent — calling Start on an already-running Pulse is a no-op.
+// The loops exit when Stop is called or the parent context is
+// cancelled. Writes a "running" flag file so a daemon restart can
+// auto-resume Pulse without operator intervention.
 func (p *Pulse) Start(parent context.Context) {
 	if !p.running.CompareAndSwap(false, true) {
 		return
@@ -111,6 +127,7 @@ func (p *Pulse) Start(parent context.Context) {
 	p.cancel = cancel
 	_ = p.writeRunningFlag()
 	go p.run(ctx)
+	go p.runDebouncer(ctx)
 }
 
 // Stop ends the loop. Safe to call multiple times; safe to call before
@@ -254,9 +271,100 @@ func (p *Pulse) effectiveInterval() time.Duration {
 	return p.cfg.Interval * time.Duration(mult)
 }
 
+// runDebouncer collects nudges (audit-event triggers) and fires one
+// Tick per debounce window. Multiple nudges inside the window
+// coalesce — important when a worker emits a flurry of events on a
+// fast job.
+func (p *Pulse) runDebouncer(ctx context.Context) {
+	var (
+		pending  bool
+		reason   string
+		timer    *time.Timer
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case r := <-p.nudgeCh:
+			if !pending {
+				pending = true
+				reason = r
+				timer = time.NewTimer(p.cfg.DebounceWindow)
+			} else {
+				// Already armed — reset window so a busy burst
+				// produces exactly one tick after the burst ends.
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(p.cfg.DebounceWindow)
+			}
+		case <-debounceFire(timer):
+			pending = false
+			r := reason
+			reason = ""
+			timer = nil
+			if err := p.Tick(ctx, "event:"+r); err != nil && !errors.Is(err, context.Canceled) {
+				p.logErr(err)
+			}
+		}
+	}
+}
+
+// debounceFire returns the timer's channel when armed, or nil (which
+// blocks forever in a select). Avoids a ranges-over-nil-channel
+// special case.
+func debounceFire(t *time.Timer) <-chan time.Time {
+	if t == nil {
+		return nil
+	}
+	return t.C
+}
+
+// NudgeFromAudit is the entry point the daemon's audit-handler wrapper
+// calls every time workers POST events. Pulse inspects the events for
+// "interesting" kinds (job lifecycle, errors) and, if Pulse is
+// running, schedules a debounced tick.
+func (p *Pulse) NudgeFromAudit(events []audit.Event) {
+	if !p.Running() {
+		return
+	}
+	for _, e := range events {
+		if !isInterestingKind(e.Kind) {
+			continue
+		}
+		reason := string(e.Kind)
+		if e.AgentID != "" {
+			reason = string(e.Kind) + "@" + e.AgentID
+		}
+		select {
+		case p.nudgeCh <- reason:
+		default:
+			// Channel full — already enough nudges queued; drop.
+		}
+		return // one nudge per batch is enough
+	}
+}
+
+// isInterestingKind decides whether an audit event should wake the
+// leader. Lifecycle and error signals matter; heartbeats and
+// pulse_tick echoes don't (we'd loop on our own audit writes).
+func isInterestingKind(k audit.Kind) bool {
+	switch k {
+	case audit.KindJobComplete, audit.KindJobError, audit.KindNote:
+		return true
+	}
+	return false
+}
+
 // Tick performs a single autonomous turn. Idempotent under concurrent
 // callers (mutex). Returns nil even when paused — pause is "skip
 // quietly," not "error."
+//
+// Phase 3 keeps trigger as a free-form string ("timer"); phase 5 will
+// use it to record what woke us up (e.g. "event:job_complete").
 func (p *Pulse) Tick(ctx context.Context, trigger string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
