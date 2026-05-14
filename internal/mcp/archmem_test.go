@@ -108,6 +108,57 @@ func TestAppendArchetypeMemoryTool(t *testing.T) {
 	}
 }
 
+// TestArchetypeMemoryTool_LeaderRole verifies the MCP tools accept
+// role="leader" (per-team leader memory) even though it isn't in the
+// team's archetype list. read+append must both succeed.
+func TestArchetypeMemoryTool_LeaderRole(t *testing.T) {
+	srv, store, _ := newArchMemServer(t)
+	// Append a leader note via MCP.
+	appendReq := mcpgo.CallToolRequest{}
+	appendReq.Params.Name = "append_archetype_memory"
+	appendReq.Params.Arguments = map[string]any{
+		"role": "leader",
+		"note": "decided to defer T7 until next week",
+	}
+	res, err := srv.handleAppendArchetypeMemory(context.Background(), appendReq)
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("append unexpected error: %s", resultText(t, res))
+	}
+
+	// Read the leader memory back via MCP.
+	readReq := mcpgo.CallToolRequest{}
+	readReq.Params.Name = "read_archetype_memory"
+	readReq.Params.Arguments = map[string]any{"role": "leader"}
+	res, err = srv.handleReadArchetypeMemory(context.Background(), readReq)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("read unexpected error: %s", resultText(t, res))
+	}
+	var resp struct {
+		Role string `json:"role"`
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res)), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Role != "leader" {
+		t.Errorf("role = %q, want leader", resp.Role)
+	}
+	if !strings.Contains(resp.Body, "decided to defer T7") {
+		t.Errorf("body missing leader note:\n%s", resp.Body)
+	}
+	// Sanity: file lives alongside worker.md, not somewhere else.
+	body, _ := store.Load("leader")
+	if !strings.Contains(body, "role: leader") {
+		t.Errorf("leader frontmatter missing:\n%s", body)
+	}
+}
+
 func TestAppendArchetypeMemoryTool_RejectsUnknownRole(t *testing.T) {
 	srv, _, _ := newArchMemServer(t)
 	req := mcpgo.CallToolRequest{}

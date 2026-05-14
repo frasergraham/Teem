@@ -256,6 +256,14 @@ yesterday". Default response is the 25 most recent jobs — scope with
 each by default); when you see a `<truncated>` marker, the worker's
 git branch is the place to find the full diff.
 
+For longer-horizon context, `read_archetype_memory` returns the
+rolling LLM digest + recent-entries list a role accumulates across
+sessions. Pass `role="leader"` to read the per-team leader memory
+(folded into your own brief on every `teem chat`); any archetype role
+returns what its workers have been doing. `append_archetype_memory`
+adds a one-line operator note that future spawns of that role
+inherit — use sparingly.
+
 `get_results(job_id)` also reads the audit log on cache miss, so
 calling it with a job_id you remember from days ago will still
 work — provided the audit JSONL hasn't been deleted.

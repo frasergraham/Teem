@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/agent"
+	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/claudeflags"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/provisioner"
@@ -49,6 +50,8 @@ func main() {
 		err = runStatus(args)
 	case "pulse":
 		err = runPulse(args)
+	case "memory":
+		err = runMemory(args)
 	case "version":
 		fmt.Println(versionString())
 	case "-h", "--help", "help":
@@ -75,6 +78,7 @@ Usage:
   teem chat    [--team teem.yaml] [--new-session]      register the current team with the daemon, launch Claude
   teem audit   [--agent ID] [--since RFC3339] [--limit 50] [--follow]
   teem pulse   <start|stop|pause|resume|tick|status> [--team t] [--interval 5m]
+  teem memory  <show|append|edit> --role X [--team t] [text]
   teem version
 
 Run 'teem <subcommand> -h' for flags.
@@ -143,8 +147,9 @@ func runChat(args []string) error {
 	}
 
 	// 5. Team brief + first-run plugin install + show any notes the
-	//    leader left while we were away.
-	brief := t.LeaderSystemPrompt()
+	//    leader left while we were away. The brief carries any
+	//    accumulated leader memory (per-team digest of prior sessions).
+	brief := assembleLeaderBrief(t, defaultMemoryDir(t.Name))
 	quietEnsurePlugin()
 	showUnreadNotes(t.Name)
 
@@ -176,6 +181,34 @@ func runChat(args []string) error {
 	argv = append(argv, claudeflags.ChannelFlags()...)
 	fmt.Fprintf(os.Stderr, "[teem] team %q → %s — launching claude\n", t.Name, regResp.MCPURL)
 	return syscall.Exec(claudePath, argv, os.Environ())
+}
+
+// assembleLeaderBrief builds the system prompt the leader subprocess
+// is launched with. Loads any accumulated leader memory from memDir
+// and prepends it as a "# Leader memory (prior sessions)" block above
+// the team's standard brief. A freshly-initialised file with header-only
+// content (no digest text and no entries) is treated as empty so we
+// don't inject a meaningless "Leader memory" section into the brief.
+func assembleLeaderBrief(t *team.Team, memDir string) string {
+	base := t.LeaderSystemPrompt()
+	store := archmem.New(memDir, nil)
+	digest, entries, err := store.LoadParsed(archmem.LeaderRole)
+	if err != nil {
+		return base
+	}
+	if digest == "" && len(entries) == 0 {
+		return base
+	}
+	body, err := store.Load(archmem.LeaderRole)
+	if err != nil || strings.TrimSpace(body) == "" {
+		return base
+	}
+	var b strings.Builder
+	b.WriteString("# Leader memory (prior sessions)\n\n")
+	b.WriteString(strings.TrimSpace(body))
+	b.WriteString("\n\n---\n\n")
+	b.WriteString(base)
+	return b.String()
 }
 
 // claudeSessionFlags returns the claude CLI args needed to resume the

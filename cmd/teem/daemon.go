@@ -38,6 +38,23 @@ import (
 	"github.com/frasergraham/teem/internal/team"
 )
 
+// leaderAwareRoles returns a RolesFunc whose result is the team's
+// current archetype roles plus the reserved leader role. Used as a
+// single source of truth so the archmem.Store validator and the
+// Summarizer's Roles callback can't drift apart if the archetype set
+// changes.
+func leaderAwareRoles(t *team.Team) archmem.RolesFunc {
+	return func() []string {
+		archs := t.SnapshotArchetypes()
+		roles := make([]string, 0, len(archs)+1)
+		for _, a := range archs {
+			roles = append(roles, a.Role)
+		}
+		roles = append(roles, archmem.LeaderRole)
+		return roles
+	}
+}
+
 // daemonFlags is the shared flag set for the daemon-mode commands.
 //
 // foreground keeps the daemon attached to the terminal (default is
@@ -915,14 +932,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// spawned worker. Created up-front so the spawner can read from
 	// it and the audit hook can append to it.
 	archMemDir := defaultMemoryDir(t.Name)
-	archMemStore := archmem.New(archMemDir, func() []string {
-		archs := t.SnapshotArchetypes()
-		roles := make([]string, 0, len(archs))
-		for _, a := range archs {
-			roles = append(roles, a.Role)
-		}
-		return roles
-	})
+	archMemStore := archmem.New(archMemDir, leaderAwareRoles(t))
 	archMemStore.SweepTmp()
 
 	transcriptsDir := filepath.Join(defaultStateDir(t.Name), "transcripts")
@@ -1127,14 +1137,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	summarizer := &archmem.Summarizer{
 		Store:  archMemStore,
 		Client: sumClient,
-		Roles: func() []string {
-			archs := t.SnapshotArchetypes()
-			roles := make([]string, 0, len(archs))
-			for _, a := range archs {
-				roles = append(roles, a.Role)
-			}
-			return roles
-		},
+		Roles:  leaderAwareRoles(t),
 	}
 	safeGo("archmem.summarizer:"+t.Name, func() { _ = summarizer.Run(archMemCtx) })
 

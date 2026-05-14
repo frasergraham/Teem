@@ -336,15 +336,15 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("read_archetype_memory",
-			mcpgo.WithDescription("Return the persisted long-term memory for an archetype role: the rolling LLM digest plus the recent-entries list every freshly-spawned worker of that role inherits as baseline context. Use when triaging an agent's behavior or before adjusting how a role should work."),
-			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Archetype role (e.g. worker, reviewer).")),
+			mcpgo.WithDescription("Return the persisted long-term memory for a role: the rolling LLM digest plus the recent-entries list every freshly-spawned worker of that role inherits as baseline context. Pass role=\"leader\" to read the per-team leader memory (folded into the leader's brief on every `teem chat`). Use when triaging an agent's behavior or before adjusting how a role should work."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Archetype role (e.g. worker, reviewer) or \"leader\" for the per-team leader memory.")),
 		),
 		s.handleReadArchetypeMemory,
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("append_archetype_memory",
-			mcpgo.WithDescription("Append an operator-authored note to an archetype's memory file. Use sparingly — every line shows up as baseline context in future worker spawns. Good for one-off corrections (\"this role should always X\") that the LLM-generated digest hasn't picked up yet."),
-			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Archetype role to write under.")),
+			mcpgo.WithDescription("Append an operator-authored note to a role's memory file. Use sparingly — every line shows up as baseline context in future worker spawns (or, for role=\"leader\", in the leader's next `teem chat` brief). Good for one-off corrections (\"this role should always X\") that the LLM-generated digest hasn't picked up yet."),
+			mcpgo.WithString("role", mcpgo.Required(), mcpgo.Description("Archetype role to write under, or \"leader\" for the per-team leader memory.")),
 			mcpgo.WithString("note", mcpgo.Required(), mcpgo.Description("The note text — one line, no markdown headers.")),
 		),
 		s.handleAppendArchetypeMemory,

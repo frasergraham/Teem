@@ -278,8 +278,8 @@ func (s *Server) handleReadArchetypeMemory(_ context.Context, req mcpgo.CallTool
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	if s.team != nil && s.team.FindArchetypeByRole(role) == nil {
-		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
+	if role != archmem.LeaderRole && s.team != nil && s.team.FindArchetypeByRole(role) == nil {
+		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster (use %q for the per-team leader memory)", role, archmem.LeaderRole), nil
 	}
 	body, err := s.archMem.Load(role)
 	if err != nil {
@@ -301,8 +301,8 @@ func (s *Server) handleAppendArchetypeMemory(_ context.Context, req mcpgo.CallTo
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
-	if s.team != nil && s.team.FindArchetypeByRole(role) == nil {
-		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster", role), nil
+	if role != archmem.LeaderRole && s.team != nil && s.team.FindArchetypeByRole(role) == nil {
+		return mcpgo.NewToolResultErrorf("no archetype with role %q in team roster (use %q for the per-team leader memory)", role, archmem.LeaderRole), nil
 	}
 	// Bound operator notes the same way job-complete summaries are
 	// bounded — keeps the file from being grown unboundedly by repeated

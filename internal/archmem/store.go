@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -35,15 +36,35 @@ import (
 const (
 	recentHeader = "# Recent entries"
 	digestHeader = "# Digest"
+
+	// LeaderRole is the reserved role name for per-team leader memory.
+	// Always considered valid by the Store regardless of the team's
+	// declared archetype set.
+	LeaderRole = "leader"
 )
+
+// roleRE bounds a role to a path-safe slug. Same shape as the team
+// archetype role validator and tight enough to keep the on-disk file
+// name (`<role>.md`) inside the memory directory.
+var roleRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+
+// IsValidRoleName reports whether s matches the role slug grammar
+// (`^[a-z][a-z0-9_-]*$`). Exposed so the CLI can reject bad input
+// before touching the filesystem.
+func IsValidRoleName(s string) bool { return roleRE.MatchString(s) }
 
 // Entry is one append-only line in the "Recent entries" section.
 type Entry struct {
 	Timestamp time.Time
 	AgentID   string
 	JobID     string
-	Status    string // "done" | "error"
-	Summary   string // single-line human summary (no newlines)
+	// Status is one of:
+	//   "done"  — job completed successfully (workers, summarizer)
+	//   "error" — job ended in failure
+	//   "note"  — operator annotation added via `teem memory append`;
+	//             not a job-complete log, so JobID is typically empty
+	Status  string
+	Summary string // single-line human summary (no newlines)
 }
 
 // Frontmatter is the YAML-ish header at the top of each file. Kept
@@ -113,15 +134,19 @@ func (s *Store) lockRole(role string) func() {
 
 // path returns the on-disk path for role; "" if role is invalid.
 func (s *Store) path(role string) string {
-	if role == "" || strings.ContainsAny(role, "/\\") {
+	if !roleRE.MatchString(role) {
 		return ""
 	}
 	return filepath.Join(s.dir, role+".md")
 }
 
 // validRole reports whether role is in the current archetype set (or
-// no RolesFunc was supplied).
+// no RolesFunc was supplied). The reserved leader role is always
+// considered valid — it is per-team memory, not an archetype.
 func (s *Store) validRole(role string) bool {
+	if role == LeaderRole {
+		return true
+	}
 	if s.roles == nil {
 		return true
 	}
@@ -201,6 +226,24 @@ func (s *Store) LoadDigest(role string) (string, error) {
 		return body, nil
 	}
 	return digest, nil
+}
+
+// LoadParsed returns the parsed digest text and entries for role. The
+// digest is the literal text between "# Digest" and "# Recent entries"
+// (trimmed); a missing or empty digest section returns "". Unlike
+// LoadDigest, this never falls back to returning the whole file body —
+// callers who need to know whether the file has any real content can
+// check (digest == "" && len(entries) == 0).
+func (s *Store) LoadParsed(role string) (string, []Entry, error) {
+	body, err := s.Load(role)
+	if err != nil || body == "" {
+		return "", nil, err
+	}
+	_, digest, entries, perr := parse(body)
+	if perr != nil {
+		return "", nil, perr
+	}
+	return strings.TrimSpace(digest), entries, nil
 }
 
 // LoadEntries parses the role's "Recent entries" section into Entry

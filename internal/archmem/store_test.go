@@ -144,6 +144,85 @@ func TestCorruptFileTolerated(t *testing.T) {
 	}
 }
 
+// TestLeaderRoleAlwaysValid pins the rule that "leader" is accepted by
+// AppendEntry even when it isn't part of the team's archetype set —
+// per-team leader memory is parallel to per-archetype worker memory,
+// not a member of it.
+func TestLeaderRoleAlwaysValid(t *testing.T) {
+	s := newStore(t, "worker") // RolesFunc returns only "worker"
+	if err := s.AppendEntry(LeaderRole, Entry{
+		Timestamp: time.Date(2026, 5, 14, 9, 0, 0, 0, time.UTC),
+		AgentID:   "leader",
+		JobID:     "",
+		Status:    "note",
+		Summary:   "spawned reviewer-blake to look at T4",
+	}); err != nil {
+		t.Fatalf("append leader: %v", err)
+	}
+	body, err := s.Load(LeaderRole)
+	if err != nil {
+		t.Fatalf("load leader: %v", err)
+	}
+	if !strings.Contains(body, "role: leader") {
+		t.Errorf("frontmatter role missing:\n%s", body)
+	}
+	if !strings.Contains(body, "spawned reviewer-blake") {
+		t.Errorf("entry summary missing:\n%s", body)
+	}
+	// The file must be co-located with worker.md, not somewhere else.
+	if _, err := os.Stat(filepath.Join(s.Dir(), "leader.md")); err != nil {
+		t.Errorf("leader.md should exist: %v", err)
+	}
+}
+
+// TestRoleNameRegex pins the path-traversal guard. Anything that
+// doesn't match ^[a-z][a-z0-9_-]*$ must be rejected by AppendEntry
+// without writing a file.
+func TestRoleNameRegex(t *testing.T) {
+	s := newStore(t, "worker", "leader")
+	bad := []string{"", "../etc", "Worker", "1abc", "with space", "a/b", "a\\b"}
+	for _, role := range bad {
+		err := s.AppendEntry(role, Entry{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "x",
+			JobID:     "y",
+			Status:    "done",
+			Summary:   "z",
+		})
+		if err == nil {
+			t.Errorf("expected error for role %q", role)
+		}
+	}
+}
+
+// TestSummarizerLeaderRole verifies the summariser handles "leader" as
+// a first-class role even though it isn't in the archetype set.
+func TestSummarizerLeaderRole(t *testing.T) {
+	s := newStore(t, "worker")
+	now := time.Now().UTC()
+	_ = s.AppendEntry(LeaderRole, Entry{
+		Timestamp: now.Add(-1 * time.Hour),
+		AgentID:   "leader",
+		JobID:     "",
+		Status:    "note",
+		Summary:   "moved T1 to in_review",
+	})
+	stub := &stubLLM{out: "Leader has been triaging T1."}
+	sm := &Summarizer{
+		Store:           s,
+		Client:          stub,
+		Roles:           func() []string { return []string{"worker", LeaderRole} },
+		RetentionWindow: 7 * 24 * time.Hour,
+	}
+	if err := sm.summarizeRole(context.Background(), LeaderRole); err != nil {
+		t.Fatalf("summarize leader: %v", err)
+	}
+	body, _ := s.Load(LeaderRole)
+	if !strings.Contains(body, "Leader has been triaging T1.") {
+		t.Errorf("digest missing from leader body:\n%s", body)
+	}
+}
+
 func TestUnknownRoleRejected(t *testing.T) {
 	s := newStore(t, "worker")
 	err := s.AppendEntry("ghost", Entry{
