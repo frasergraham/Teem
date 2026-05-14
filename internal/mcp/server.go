@@ -262,9 +262,9 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("update_task",
-			mcpgo.WithDescription("Mutate a task's status, assignee, notes, depends_on, or evidence. Any subset of fields can be supplied; omitted fields are left as-is. To change the pipeline stage (proposed/specced/building/in_review/merging/verified/blocked/abandoned), use set_task_stage instead — it enforces the transitions matrix."),
+			mcpgo.WithDescription("Mutate a task's status, assignee, notes, depends_on, or evidence. Any subset of fields can be supplied; omitted fields are left as-is. To change the pipeline stage (proposed/specced/building/in_review/merging/verified/blocked/shelved/abandoned), use set_task_stage instead — it enforces the transitions matrix."),
 			mcpgo.WithString("id", mcpgo.Required(), mcpgo.Description("Task id.")),
-			mcpgo.WithString("status", mcpgo.Description("New status: pending, in_progress, blocked, done, abandoned.")),
+			mcpgo.WithString("status", mcpgo.Description("New status: pending, in_progress, blocked, shelved (paused, will pick up later), done, abandoned.")),
 			mcpgo.WithString("assigned_to", mcpgo.Description("Agent id currently working on this task.")),
 			mcpgo.WithString("notes", mcpgo.Description("Replace the notes field.")),
 			mcpgo.WithString("depends_on", mcpgo.Description("Comma-separated task ids; replaces existing list.")),
@@ -276,9 +276,9 @@ func (s *Server) registerTools() {
 		mcpgo.NewTool("list_tasks",
 			mcpgo.WithDescription("List tasks in the plan, optionally filtered. Returns the materialised view (title, status, stage, stage_entered_at, assigned_to, depends_on, evidence, timestamps)."),
 			mcpgo.WithString("status", mcpgo.Description("Restrict to one status.")),
-			mcpgo.WithString("stage", mcpgo.Description("Restrict to one stage (proposed/specced/building/in_review/merging/verified/blocked/abandoned).")),
+			mcpgo.WithString("stage", mcpgo.Description("Restrict to one stage (proposed/specced/building/in_review/merging/verified/blocked/shelved/abandoned).")),
 			mcpgo.WithString("parent_id", mcpgo.Description("Only direct children of this task.")),
-			mcpgo.WithString("open_only", mcpgo.Description("If 'true', skip done/abandoned tasks.")),
+			mcpgo.WithString("open_only", mcpgo.Description("If 'true', skip non-open tasks (only returns pending/in_progress/blocked).")),
 		),
 		s.handleListTasks,
 	)
@@ -339,7 +339,7 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("set_task_stage",
-			mcpgo.WithDescription("Move a task to a new pipeline stage: proposed, specced, building, in_review, merging, verified, blocked, abandoned. Stage is the lifecycle marker the dashboard pipeline view uses; Status (open/done) is separate. Invalid transitions (e.g. verified → proposed) return an error."),
+			mcpgo.WithDescription("Move a task to a new pipeline stage: proposed, specced, building, in_review, merging, verified, blocked, shelved, abandoned. Stage is the lifecycle marker the dashboard pipeline view uses; Status (open/done) is separate. Shelved is for tasks intentionally paused — they leave the open pipeline but stay visible in their own dashboard section. Invalid transitions (e.g. verified → proposed) return an error."),
 			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id.")),
 			mcpgo.WithString("stage", mcpgo.Required(), mcpgo.Description("Target stage.")),
 		),

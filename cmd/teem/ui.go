@@ -101,6 +101,7 @@ type dashboardTeam struct {
 	Agents         []dashboardAgent
 	OpenTaskCount  int
 	OpenTasks      []dashboardTask
+	Shelved        []dashboardTask
 	RecentDone     []dashboardTask
 	LeaderStatus   *leaderRow // pinned "leader" entry, if any
 	OtherStatuses  []leaderRow
@@ -237,16 +238,27 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	// proposed → verified) and the 5 most-recently-completed tasks.
 	if rt.plan != nil {
 		all := rt.plan.List(plan.Filter{})
+		var shelved []plan.Task
 		for _, t := range all {
-			if t.Status.IsOpen() {
+			switch {
+			case t.Status.IsOpen():
 				out.OpenTaskCount++
 				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.Name, t))
+			case t.Status.IsShelved():
+				shelved = append(shelved, t)
 			}
 		}
 		// Sort open tasks by stage order then created.
 		sort.SliceStable(out.OpenTasks, func(i, j int) bool {
 			return stageOrder(out.OpenTasks[i].Stage) < stageOrder(out.OpenTasks[j].Stage)
 		})
+		// Shelved tasks: newest-shelved first so a task you just put
+		// down is easy to find again. Not capped — the section exists
+		// so the operator doesn't forget what they paused on.
+		sort.Slice(shelved, func(i, j int) bool { return shelved[i].UpdatedAt.After(shelved[j].UpdatedAt) })
+		for _, t := range shelved {
+			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.Name, t))
+		}
 		// Recent completed: tasks whose status moved to done, newest
 		// first by UpdatedAt; capped to 5.
 		var done []plan.Task

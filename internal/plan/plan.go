@@ -35,12 +35,23 @@ const (
 	StatusBlocked    Status = "blocked"
 	StatusDone       Status = "done"
 	StatusAbandoned  Status = "abandoned"
+	// StatusShelved is a deliberate "paused, will be picked up later"
+	// state. The leader explicitly steps away from the task without
+	// completing or abandoning it. Distinct from Blocked (which implies
+	// "stuck on something external") and from Abandoned (which implies
+	// "won't do"). Visible on the dashboard in its own section so the
+	// task stays discoverable.
+	StatusShelved Status = "shelved"
 )
 
 // IsOpen reports whether the task still needs leader attention.
+// Shelved is NOT open — it's been intentionally set aside.
 func (s Status) IsOpen() bool {
 	return s == StatusPending || s == StatusInProgress || s == StatusBlocked
 }
+
+// IsShelved reports whether the task is paused (not active, not done).
+func (s Status) IsShelved() bool { return s == StatusShelved }
 
 // Task is the materialised view of a task assembled by replaying
 // events. The leader sees this shape via list_tasks; the daemon uses
@@ -172,6 +183,8 @@ func stageFromLegacyStatus(s Status) Stage {
 		return StageVerified
 	case StatusAbandoned:
 		return StageAbandoned
+	case StatusShelved:
+		return StageShelved
 	}
 	return StageProposed
 }

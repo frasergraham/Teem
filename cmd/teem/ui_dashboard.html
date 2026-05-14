@@ -91,7 +91,12 @@
     .stage.merging   { background: #7c3aed; color: #fff; }
     .stage.verified  { background: var(--accent); color: #fff; }
     .stage.blocked   { background: var(--error); color: #fff; }
+    .stage.shelved   { background: var(--pill-bg); color: var(--muted); border: 1px dashed var(--muted); padding: 0 6px; }
     .stage.abandoned { background: var(--pill-bg); color: var(--muted); text-decoration: line-through; }
+
+    /* Shelved section: muted to signal "intentionally paused, not in flight." */
+    .shelved-section h3 { color: var(--muted); }
+    .shelved-section .tasks tbody tr { opacity: 0.75; }
 
     .leader-card {
       background: var(--card);
@@ -242,6 +247,25 @@
         </table>
         {{ end }}
       </div>
+
+      {{ if .Shelved }}
+      <div class="section shelved-section">
+        <h3>Shelved — paused, will pick up later</h3>
+        <table class="tasks">
+          <tbody>
+            {{ range .Shelved }}
+              <tr>
+                <td class="id"><a href="{{ .URL }}">{{ .ID }}</a></td>
+                <td><a href="{{ .URL }}">{{ .Title }}</a></td>
+                <td>{{ if .Stage }}<span class="stage {{ .Stage }}">{{ .Stage }}</span>{{ end }}</td>
+                <td class="assignee">{{ if .AssignedTo }}{{ .AssignedTo }}{{ else }}—{{ end }}</td>
+                <td class="when">{{ .StageAgo }}</td>
+              </tr>
+            {{ end }}
+          </tbody>
+        </table>
+      </div>
+      {{ end }}
 
       {{ if .RecentDone }}
       <div class="section">
