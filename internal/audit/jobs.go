@@ -20,6 +20,15 @@ type MaterializedJob struct {
 	Error       string    `json:"error,omitempty"`
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at,omitempty"`
+
+	// TranscriptPath is the worker-side file path of the full
+	// stream-json transcript for this job (informational; the canonical
+	// copy lives on the leader at ~/.teem/state/<team>/transcripts/...).
+	TranscriptPath  string `json:"transcript_path,omitempty"`
+	TranscriptBytes int    `json:"transcript_bytes,omitempty"`
+	// Summary is the first chunk of the final assistant text, captured
+	// alongside the transcript event for cheap previews.
+	Summary string `json:"summary,omitempty"`
 }
 
 // Duration returns CompletedAt-StartedAt when both are set.
@@ -78,6 +87,16 @@ func MaterializeJobs(events []Event) []MaterializedJob {
 			}
 			if n, ok := intFromMeta(e.Meta, "output_bytes"); ok {
 				j.OutputBytes = n
+			}
+		case KindJobTranscriptReady:
+			if p, ok := stringFromMeta(e.Meta, "path"); ok {
+				j.TranscriptPath = p
+			}
+			if n, ok := intFromMeta(e.Meta, "bytes"); ok {
+				j.TranscriptBytes = n
+			}
+			if s, ok := stringFromMeta(e.Meta, "summary"); ok {
+				j.Summary = s
 			}
 		case KindJobError:
 			j.Status = "error"

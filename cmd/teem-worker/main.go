@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,13 +86,18 @@ func (r *jobRecord) snapshot() (jobStatus, string, string) {
 }
 
 type worker struct {
-	agentID    string
-	role       string
-	hostname   string
-	token      string
-	workingDir string
-	exec       executor.Executor
-	outbox     *outbox
+	agentID       string
+	role          string
+	hostname      string
+	token         string
+	workingDir    string
+	transcriptDir string
+	exec          executor.Executor
+	outbox        *outbox
+	// leaderURL is the (trailing-slash-stripped) leader endpoint used
+	// for one-shot uploads like transcript bodies. The outbox uses its
+	// own client/url internally.
+	leaderURL string
 
 	// Git auto-push wiring; populated when TEEM_GIT_REPO_URL was set at
 	// startup. gitAutoPush is the resolved boolean (true only when both
@@ -100,8 +106,8 @@ type worker struct {
 	gitOpts     gitsetup.Options
 	gitAutoPush bool
 
-	mu      sync.Mutex
-	jobs    map[string]*jobRecord
+	mu       sync.Mutex
+	jobs     map[string]*jobRecord
 	inFlight atomic.Int64
 }
 
@@ -156,25 +162,37 @@ func run() error {
 		fmt.Fprintf(os.Stderr, "[teem-worker] git: cloned %s into %s on branch %s\n", cfg.gitRepoURL, clone, gitsetup.Branch(gitOpts))
 	}
 
+	// Outbox + transcript paths share a common .teem-events directory
+	// rooted at the worker's workdir (so they get cleaned up when the
+	// workdir does). Computed first so we can hand the transcript dir
+	// to the executor.
+	outboxDir := filepath.Join(cfg.workingDir, ".teem-events")
+	if cfg.workingDir == "" {
+		outboxDir = filepath.Join(os.TempDir(), "teem-worker-"+cfg.agentID, "events")
+	}
+	transcriptDir := filepath.Join(outboxDir, "transcripts")
+
+	procExec := executor.NewProcess(transport.LocalTransport{}, jobCwd, nil)
+	procExec.AgentID = cfg.agentID
+	procExec.TranscriptDir = transcriptDir
+
 	w := &worker{
-		agentID:    cfg.agentID,
-		role:       cfg.role,
-		hostname:   cfg.hostname,
-		token:      cfg.token,
-		workingDir: jobCwd,
-		exec:       executor.NewProcess(transport.LocalTransport{}, jobCwd, nil),
-		jobs:       map[string]*jobRecord{},
-		gitOpts:    gitOpts,
-		gitAutoPush: cfg.gitAutoPush && cfg.gitRepoURL != "",
+		agentID:       cfg.agentID,
+		role:          cfg.role,
+		hostname:      cfg.hostname,
+		token:         cfg.token,
+		workingDir:    jobCwd,
+		exec:          procExec,
+		transcriptDir: transcriptDir,
+		leaderURL:     cfg.leaderURL,
+		jobs:          map[string]*jobRecord{},
+		gitOpts:       gitOpts,
+		gitAutoPush:   cfg.gitAutoPush && cfg.gitRepoURL != "",
 	}
 
 	// Audit outbox: events buffer on disk and drain to the leader when
 	// it's reachable. Configured lazily — without a leader URL, events
 	// still get written to disk but the sender goroutine is a no-op.
-	outboxDir := filepath.Join(cfg.workingDir, ".teem-events")
-	if cfg.workingDir == "" {
-		outboxDir = filepath.Join(os.TempDir(), "teem-worker-"+cfg.agentID, "events")
-	}
 	ob, err := newOutbox(outboxDir, cfg.leaderURL, cfg.token, cfg.agentID, nil)
 	if err != nil {
 		return fmt.Errorf("outbox: %w", err)
@@ -307,20 +325,20 @@ type config struct {
 
 func loadConfig(portFlag string) (*config, error) {
 	c := &config{
-		agentID:         os.Getenv("TEEM_AGENT_ID"),
-		role:            os.Getenv("TEEM_AGENT_ROLE"),
-		hostname:        os.Getenv("TEEM_WORKER_HOSTNAME"),
-		token:           os.Getenv("TEEM_WORKER_TOKEN"),
-		tsAuthKey:       os.Getenv("TS_AUTHKEY"),
-		workingDir:      os.Getenv("TEEM_WORKER_WORKDIR"),
+		agentID:           os.Getenv("TEEM_AGENT_ID"),
+		role:              os.Getenv("TEEM_AGENT_ROLE"),
+		hostname:          os.Getenv("TEEM_WORKER_HOSTNAME"),
+		token:             os.Getenv("TEEM_WORKER_TOKEN"),
+		tsAuthKey:         os.Getenv("TS_AUTHKEY"),
+		workingDir:        os.Getenv("TEEM_WORKER_WORKDIR"),
 		leaderURL:         strings.TrimRight(os.Getenv("TEEM_LEADER_URL"), "/"),
 		heartbeatInterval: parseHeartbeatInterval(os.Getenv("TEEM_HEARTBEAT_INTERVAL"), 60*time.Second),
-		gitRepoURL:      os.Getenv("TEEM_GIT_REPO_URL"),
-		gitToken:        os.Getenv("TEEM_GIT_TOKEN"),
-		gitUsername:     os.Getenv("TEEM_GIT_USERNAME"),
-		gitAuthorName:   os.Getenv("TEEM_GIT_AUTHOR_NAME"),
-		gitAuthorEmail:  os.Getenv("TEEM_GIT_AUTHOR_EMAIL"),
-		gitBranchPrefix: os.Getenv("TEEM_GIT_BRANCH_PREFIX"),
+		gitRepoURL:        os.Getenv("TEEM_GIT_REPO_URL"),
+		gitToken:          os.Getenv("TEEM_GIT_TOKEN"),
+		gitUsername:       os.Getenv("TEEM_GIT_USERNAME"),
+		gitAuthorName:     os.Getenv("TEEM_GIT_AUTHOR_NAME"),
+		gitAuthorEmail:    os.Getenv("TEEM_GIT_AUTHOR_EMAIL"),
+		gitBranchPrefix:   os.Getenv("TEEM_GIT_BRANCH_PREFIX"),
 		// Default true: ephemeral remote workers lose their work without
 		// a push, so unless the operator explicitly opts out we push
 		// after every successful job.
@@ -364,11 +382,11 @@ func withAuth(token string, h http.Handler) http.Handler {
 }
 
 type healthResponse struct {
-	OK             bool   `json:"ok"`
-	Hostname       string `json:"hostname"`
-	AgentID        string `json:"agent_id"`
-	Role           string `json:"role,omitempty"`
-	JobsInFlight   int64  `json:"jobs_in_flight"`
+	OK           bool   `json:"ok"`
+	Hostname     string `json:"hostname"`
+	AgentID      string `json:"agent_id"`
+	Role         string `json:"role,omitempty"`
+	JobsInFlight int64  `json:"jobs_in_flight"`
 }
 
 func (w *worker) handleHealth(rw http.ResponseWriter, _ *http.Request) {
@@ -382,10 +400,10 @@ func (w *worker) handleHealth(rw http.ResponseWriter, _ *http.Request) {
 }
 
 type jobRequest struct {
-	JobID   string         `json:"job_id"`
-	Prompt  string         `json:"prompt"`
-	Context string         `json:"context,omitempty"`
-	MCPs    []team.MCPRef  `json:"mcps,omitempty"`
+	JobID   string        `json:"job_id"`
+	Prompt  string        `json:"prompt"`
+	Context string        `json:"context,omitempty"`
+	MCPs    []team.MCPRef `json:"mcps,omitempty"`
 }
 
 type jobResponse struct {
@@ -483,6 +501,12 @@ func (w *worker) runJob(parent context.Context, req jobRequest, rec *jobRecord) 
 		},
 	})
 
+	// Best-effort: push the full stream-json transcript to the leader
+	// and emit a job_transcript_ready event with metadata. Failures are
+	// surfaced via audit but never fail the job (the output is already
+	// captured in job_complete).
+	w.uploadTranscript(ctx, req.JobID, out)
+
 	// Auto-push the agent's branch when configured. Failures are
 	// surfaced via audit but don't fail the job — a push retry is
 	// always something the operator can do manually.
@@ -551,6 +575,73 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// uploadTranscript reads the transcript file the executor produced for
+// this job and POSTs the body to the leader's /transcripts/<agent>/<job>
+// endpoint. On success it emits job_transcript_ready with a summary
+// (first chunk of the final assistant text). Failures surface as a
+// transcript_upload_failed event but never fail the job.
+func (w *worker) uploadTranscript(ctx context.Context, jobID, finalOutput string) {
+	if w.transcriptDir == "" {
+		return
+	}
+	path := filepath.Join(w.transcriptDir, w.agentID, jobID+".jsonl")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		_ = w.outbox.Emit(audit.Event{
+			JobID:   jobID,
+			Kind:    "transcript_upload_failed",
+			Message: "read transcript: " + err.Error(),
+			Meta:    map[string]any{"path": path},
+		})
+		return
+	}
+	eventCount := bytes.Count(body, []byte{'\n'})
+
+	if w.leaderURL != "" {
+		url := w.leaderURL + "/transcripts/" + w.agentID + "/" + jobID
+		req, rerr := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if rerr == nil {
+			req.Header.Set("Authorization", "Bearer "+w.token)
+			req.Header.Set("Content-Type", "application/x-ndjson")
+			resp, derr := w.outbox.client.Do(req)
+			if derr != nil {
+				_ = w.outbox.Emit(audit.Event{
+					JobID:   jobID,
+					Kind:    "transcript_upload_failed",
+					Message: derr.Error(),
+					Meta:    map[string]any{"path": path, "bytes": len(body)},
+				})
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				_ = w.outbox.Emit(audit.Event{
+					JobID:   jobID,
+					Kind:    "transcript_upload_failed",
+					Message: "leader returned " + resp.Status,
+					Meta:    map[string]any{"path": path, "bytes": len(body)},
+				})
+				return
+			}
+		}
+	}
+
+	summary := finalOutput
+	if len(summary) > 200 {
+		summary = summary[:200]
+	}
+	_ = w.outbox.Emit(audit.Event{
+		JobID: jobID,
+		Kind:  audit.KindJobTranscriptReady,
+		Meta: map[string]any{
+			"path":        path,
+			"bytes":       len(body),
+			"event_count": eventCount,
+			"summary":     summary,
+		},
+	})
 }
 
 // runHeartbeat ticks every interval and emits a heartbeat audit event.

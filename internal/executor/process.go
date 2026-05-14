@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/frasergraham/teem/internal/team"
 	"github.com/frasergraham/teem/internal/transport"
@@ -19,11 +20,29 @@ type ProcessExecutor struct {
 	Transport  transport.Transport
 	WorkingDir string
 	MCPs       []team.MCPRef
+
+	// AgentID, when set, is used to organize transcript files by agent
+	// (one subdirectory per agent under TranscriptDir).
+	AgentID string
+	// TranscriptDir, when set, is the directory under which each job's
+	// raw stream-json transcript is written as <agent_id>/<job_id>.jsonl.
+	// Empty disables transcript capture.
+	TranscriptDir string
 }
 
 // NewProcess constructs a ProcessExecutor.
 func NewProcess(t transport.Transport, workingDir string, mcps []team.MCPRef) *ProcessExecutor {
 	return &ProcessExecutor{Transport: t, WorkingDir: workingDir, MCPs: mcps}
+}
+
+// TranscriptPath returns the path the executor would (or did) write the
+// transcript for a job to. Returns "" when transcript capture is
+// disabled (no TranscriptDir or AgentID).
+func (p *ProcessExecutor) TranscriptPath(jobID string) string {
+	if p.TranscriptDir == "" || p.AgentID == "" || jobID == "" {
+		return ""
+	}
+	return filepath.Join(p.TranscriptDir, p.AgentID, jobID+".jsonl")
 }
 
 // Execute runs claude for the supplied job and returns the final assistant
@@ -74,24 +93,56 @@ func (p *ProcessExecutor) Execute(ctx context.Context, job Job) (string, error) 
 	}
 	_ = proc.Stdin().Close()
 
-	final, parseErr := ParseClaudeStreamJSON(proc.Stdout())
+	var sink io.Writer
+	if path := p.TranscriptPath(job.ID); path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return "", fmt.Errorf("transcript mkdir: %w", err)
+		}
+		tf, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+		if err != nil {
+			return "", fmt.Errorf("transcript open: %w", err)
+		}
+		defer tf.Close()
+		sink = tf
+	}
+
+	res, parseErr := ParseClaudeStreamJSON(proc.Stdout(), sink)
 	if err := proc.Wait(); err != nil {
-		return final, fmt.Errorf("claude exit: %w", err)
+		return res.FinalText, fmt.Errorf("claude exit: %w", err)
 	}
 	if parseErr != nil {
-		return final, parseErr
+		return res.FinalText, parseErr
 	}
-	return final, nil
+	return res.FinalText, nil
+}
+
+// StreamResult is the parsed return value from ParseClaudeStreamJSON.
+type StreamResult struct {
+	FinalText  string
+	EventCount int
 }
 
 // ParseClaudeStreamJSON consumes Claude Code's stream-json output and
-// returns the final assistant text. Tolerates unrecognised event types
-// because the schema evolves; only "result" and "assistant" are read.
-func ParseClaudeStreamJSON(r io.Reader) (string, error) {
+// returns the final assistant text plus an event count. When sink is
+// non-nil each input line (with its trailing newline) is teed through
+// verbatim — callers can capture the full transcript without buffering
+// it all in memory. Tolerates unrecognised event types because the
+// schema evolves; only "result" and "assistant" are read.
+func ParseClaudeStreamJSON(r io.Reader, sink io.Writer) (StreamResult, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	var final string
+	var res StreamResult
 	for scanner.Scan() {
+		line := scanner.Bytes()
+		if sink != nil {
+			if _, err := sink.Write(line); err != nil {
+				return res, fmt.Errorf("transcript write: %w", err)
+			}
+			if _, err := sink.Write([]byte{'\n'}); err != nil {
+				return res, fmt.Errorf("transcript write: %w", err)
+			}
+		}
+		res.EventCount++
 		var ev struct {
 			Type    string          `json:"type"`
 			Result  string          `json:"result"`
@@ -103,26 +154,26 @@ func ParseClaudeStreamJSON(r io.Reader) (string, error) {
 				} `json:"content"`
 			} `json:"message"`
 		}
-		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+		if err := json.Unmarshal(line, &ev); err != nil {
 			continue
 		}
 		switch ev.Type {
 		case "result":
 			if ev.Result != "" {
-				final = ev.Result
+				res.FinalText = ev.Result
 			}
 		case "assistant":
 			for _, c := range ev.Message.Content {
 				if c.Type == "text" {
-					final = c.Text
+					res.FinalText = c.Text
 				}
 			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return final, fmt.Errorf("read stream: %w", err)
+		return res, fmt.Errorf("read stream: %w", err)
 	}
-	return final, nil
+	return res, nil
 }
 
 // WriteMCPConfig writes a Claude Code MCP config JSON to a temp file and

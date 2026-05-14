@@ -84,6 +84,36 @@ func TestMaterializeJobs_FiltersUnscopedEvents(t *testing.T) {
 	}
 }
 
+func TestMaterializeJobs_TranscriptReadyPopulatesFields(t *testing.T) {
+	t0 := time.Date(2026, 5, 13, 10, 0, 0, 0, time.UTC)
+	events := []Event{
+		{Timestamp: t0, AgentID: "wk-1", JobID: "j5", Kind: KindJobReceived,
+			Meta: map[string]any{"prompt": "ship it"}},
+		{Timestamp: t0.Add(2 * time.Second), AgentID: "wk-1", JobID: "j5", Kind: KindJobComplete,
+			Meta: map[string]any{"output": "shipped"}},
+		{Timestamp: t0.Add(3 * time.Second), AgentID: "wk-1", JobID: "j5", Kind: KindJobTranscriptReady,
+			Meta: map[string]any{
+				"path":        "/var/lib/teem/.teem-events/transcripts/wk-1/j5.jsonl",
+				"bytes":       4242,
+				"event_count": 17,
+				"summary":     "shipped",
+			}},
+	}
+	j, ok := MaterializeJob(events, "j5")
+	if !ok {
+		t.Fatal("expected job j5")
+	}
+	if j.TranscriptPath != "/var/lib/teem/.teem-events/transcripts/wk-1/j5.jsonl" {
+		t.Errorf("transcript path: %q", j.TranscriptPath)
+	}
+	if j.TranscriptBytes != 4242 {
+		t.Errorf("transcript bytes: %d", j.TranscriptBytes)
+	}
+	if j.Summary != "shipped" {
+		t.Errorf("summary: %q", j.Summary)
+	}
+}
+
 func TestMaterializeJob_SingleLookup(t *testing.T) {
 	t0 := time.Now()
 	events := []Event{

@@ -36,13 +36,14 @@ type Server struct {
 	handler http.Handler
 	http    *http.Server
 
-	bus      bus.Bus
-	team     *team.Team
-	registry *Registry
-	spawner  Spawner
-	audit    audit.Sink
-	plan     *plan.Plan
-	notes    *notes.Inbox
+	bus            bus.Bus
+	team           *team.Team
+	registry       *Registry
+	spawner        Spawner
+	audit          audit.Sink
+	plan           *plan.Plan
+	notes          *notes.Inbox
+	transcriptsDir string
 }
 
 // Config holds the deps the orchestrator server needs.
@@ -60,6 +61,11 @@ type Config struct {
 	// Notes is the user-notes inbox the write_user_note tool appends
 	// to. Optional — if nil the tool returns a clear error.
 	Notes *notes.Inbox
+	// TranscriptsDir is the leader-side root directory mirroring
+	// worker transcripts (<dir>/<agent_id>/<job_id>.jsonl). When
+	// empty, the get_job_transcript tool returns an error explaining
+	// transcripts aren't configured.
+	TranscriptsDir string
 }
 
 // New builds an orchestrator MCP server. Call Serve to start serving on a
@@ -74,14 +80,15 @@ func New(cfg Config) (*Server, error) {
 		mcpsrv.WithToolCapabilities(true),
 	)
 	s := &Server{
-		core:     core,
-		bus:      cfg.Bus,
-		team:     cfg.Team,
-		registry: cfg.Registry,
-		spawner:  cfg.Spawner,
-		audit:    cfg.Audit,
-		plan:     cfg.Plan,
-		notes:    cfg.Notes,
+		core:           core,
+		bus:            cfg.Bus,
+		team:           cfg.Team,
+		registry:       cfg.Registry,
+		spawner:        cfg.Spawner,
+		audit:          cfg.Audit,
+		plan:           cfg.Plan,
+		notes:          cfg.Notes,
+		transcriptsDir: cfg.TranscriptsDir,
 	}
 	s.registerTools()
 	s.handler = mcpsrv.NewStreamableHTTPServer(core)
@@ -249,6 +256,16 @@ func (s *Server) registerTools() {
 			mcpgo.WithString("job_id", mcpgo.Required(), mcpgo.Description("Job id from assign_job.")),
 		),
 		s.handleLinkTaskToJob,
+	)
+	s.core.AddTool(
+		mcpgo.NewTool("get_job_transcript",
+			mcpgo.WithDescription("Fetch the full stream-json transcript a worker produced for a job. Use this to inspect what a sub-agent actually did beyond the truncated final assistant text in recall_jobs / query_audit. Returns either the raw NDJSON events ('raw') or a flat 'role: text' rendering ('text', default). Body is capped at 200 KiB; use head=N to fetch only the first N events."),
+			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Agent that ran the job.")),
+			mcpgo.WithString("job_id", mcpgo.Required(), mcpgo.Description("Job id from assign_job.")),
+			mcpgo.WithString("head", mcpgo.Description("Optional. Return only the first N stream-json events.")),
+			mcpgo.WithString("format", mcpgo.Description("'raw' (NDJSON verbatim) or 'text' (flat role/text rendering). Default 'text'.")),
+		),
+		s.handleGetJobTranscript,
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("write_user_note",

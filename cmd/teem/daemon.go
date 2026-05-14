@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -177,9 +178,9 @@ func runTeams(args []string) error {
 // ~/.teem/daemon.json. teem chat / teem status / teem teams read it.
 type daemonStateFile struct {
 	PID       int       `json:"pid"`
-	Endpoint  string    `json:"endpoint"`            // http://<host>:<port>
-	Token     string    `json:"worker_token"`        // shared bearer for /audit and /control
-	Teams     []string  `json:"teams,omitempty"`     // registered team names
+	Endpoint  string    `json:"endpoint"`        // http://<host>:<port>
+	Token     string    `json:"worker_token"`    // shared bearer for /audit and /control
+	Teams     []string  `json:"teams,omitempty"` // registered team names
 	StartedAt time.Time `json:"started_at"`
 }
 
@@ -191,9 +192,9 @@ func daemonHomeDir() string {
 	return filepath.Join(home, ".teem")
 }
 
-func daemonPIDPath() string     { return filepath.Join(daemonHomeDir(), "daemon.pid") }
-func daemonJSONPath() string    { return filepath.Join(daemonHomeDir(), "daemon.json") }
-func daemonLogPath() string     { return filepath.Join(daemonHomeDir(), "daemon.log") }
+func daemonPIDPath() string  { return filepath.Join(daemonHomeDir(), "daemon.pid") }
+func daemonJSONPath() string { return filepath.Join(daemonHomeDir(), "daemon.json") }
+func daemonLogPath() string  { return filepath.Join(daemonHomeDir(), "daemon.log") }
 
 func readDaemonPID() (int, bool) {
 	body, err := os.ReadFile(daemonPIDPath())
@@ -282,6 +283,9 @@ type registeredTeam struct {
 	registry   *mcpsrv.Registry
 	leaderURL  string
 	registered time.Time
+	// transcriptsDir is the leader-side mirror root for worker
+	// transcript files: <stateDir>/transcripts/<agent>/<job>.jsonl.
+	transcriptsDir string
 }
 
 // serveDaemon runs the multi-tenant orchestrator until ctx is cancelled.
@@ -767,14 +771,17 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		SocketDir:        defaultSocketDir(t.Name),
 	})
 
+	transcriptsDir := filepath.Join(defaultStateDir(t.Name), "transcripts")
+
 	srv, err := mcpsrv.New(mcpsrv.Config{
-		Bus:      bs,
-		Team:     t,
-		Registry: reg,
-		Spawner:  spawner,
-		Audit:    auditSink,
-		Plan:     planStore,
-		Notes:    notesInbox,
+		Bus:            bs,
+		Team:           t,
+		Registry:       reg,
+		Spawner:        spawner,
+		Audit:          auditSink,
+		Plan:           planStore,
+		Notes:          notesInbox,
+		TranscriptsDir: transcriptsDir,
 	})
 	if err != nil {
 		_ = auditSink.Close()
@@ -819,23 +826,81 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		fmt.Fprintf(os.Stderr, "[teemd] auto-resumed Pulse for %q\n", t.Name)
 	}
 
+	// Wake hook: publish on the in-process leader.wake bus topic
+	// whenever a worker emits a job-terminal event. Pulse already
+	// debounces via NudgeFromAudit (called by the same handler hook);
+	// this is the additive T6 signal future chat clients can subscribe
+	// to. Today no chat client consumes it because runChat exec()s
+	// directly into claude.
+	wakeHook := func(events []audit.Event) {
+		for _, e := range events {
+			if !isWakeKind(e.Kind) {
+				continue
+			}
+			payload, _ := json.Marshal(map[string]string{
+				"kind":     string(e.Kind),
+				"agent_id": e.AgentID,
+				"job_id":   e.JobID,
+			})
+			_ = bs.Publish(d.baseCtx, bus.Message{
+				ID:        bus.NewID(),
+				Topic:     "leader.wake",
+				From:      e.AgentID,
+				Kind:      bus.KindStatus,
+				Payload:   payload,
+				CreatedAt: time.Now().UTC(),
+			})
+		}
+	}
+
 	return &registeredTeam{
 		team:      t,
 		mcp:       srv,
 		spawner:   spawner,
 		auditSink: auditSink,
 		// Audit handler fans every POST out to: write to disk, bump
-		// the agent's LastSeen, AND nudge Pulse so an event-triggered
-		// tick can fire after the debounce window.
-		auditH:     newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, pulseInst.NudgeFromAudit),
-		plan:       planStore,
-		notes:      notesInbox,
-		pulse:      pulseInst,
-		inFlight:   inFlightLog,
-		registry:   reg,
-		leaderURL:  leaderURL,
-		registered: time.Now(),
+		// the agent's LastSeen, nudge Pulse (debounced tick), AND
+		// publish on bus topic "leader.wake" for terminal worker
+		// events. Note the double-publish: NudgeFromAudit + wakeHook
+		// run on every accepted POST.
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(pulseInst.NudgeFromAudit, wakeHook)),
+		plan:           planStore,
+		notes:          notesInbox,
+		pulse:          pulseInst,
+		inFlight:       inFlightLog,
+		registry:       reg,
+		leaderURL:      leaderURL,
+		registered:     time.Now(),
+		transcriptsDir: transcriptsDir,
 	}, nil
+}
+
+// isWakeKind decides whether a worker event should fire a leader.wake
+// publish. Mirrors pulse.isInterestingKind but is intentionally
+// independent — different consumers (a future chat banner) may want
+// different signals.
+func isWakeKind(k audit.Kind) bool {
+	switch k {
+	case audit.KindJobComplete, audit.KindJobError, audit.KindJobTranscriptReady:
+		// KindWorkerStopped is reserved for T4's self-termination flow
+		// and will be added here once a producer exists.
+		return true
+	}
+	return false
+}
+
+// combineHooks chains two audit hooks; either may be nil.
+func combineHooks(a, b auditHook) auditHook {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	return func(events []audit.Event) {
+		a(events)
+		b(events)
+	}
 }
 
 // auditHook is a side-channel callback invoked on every accepted
@@ -930,9 +995,116 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = "/audit"
 		rt.auditH.ServeHTTP(w, r2)
+	case strings.HasPrefix(suffix, "/transcripts/"):
+		d.handleTranscripts(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// validIDRegexp matches the agent_id / job_id forms accepted on the
+// transcripts route. Restricted to letters, digits, and `.`/`_`/`-`
+// so URL handlers can't be tricked into writing outside the team's
+// transcripts directory. isSafeID layers on top of the regex to
+// reject the dot-only literals `.` and `..` which the character class
+// would otherwise accept and which filepath.Join resolves to a path
+// escape.
+var validIDRegexp = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+func isSafeID(s string) bool {
+	return validIDRegexp.MatchString(s) && s != "." && s != ".."
+}
+
+// handleTranscripts implements GET/POST /teams/<name>/transcripts/<agent>/<job>.
+// Bearer-auth gated (same shared token as /audit). POST writes the body
+// to the team's transcripts mirror; GET serves it back. ?head=N on GET
+// returns the first N NDJSON events (lines) rather than the whole body.
+func (d *daemon) handleTranscripts(w http.ResponseWriter, r *http.Request, rt *registeredTeam, rest string) {
+	if r.Header.Get("Authorization") != "Bearer "+d.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		http.Error(w, "want /transcripts/<agent_id>/<job_id>", http.StatusBadRequest)
+		return
+	}
+	agentID, jobID := rest[:slash], rest[slash+1:]
+	if !isSafeID(agentID) || !isSafeID(jobID) {
+		http.Error(w, "bad agent_id or job_id (must match [A-Za-z0-9._-]+ and not be . or ..)", http.StatusBadRequest)
+		return
+	}
+	if rt.transcriptsDir == "" {
+		http.Error(w, "transcripts not configured", http.StatusInternalServerError)
+		return
+	}
+	path := filepath.Join(rt.transcriptsDir, agentID, jobID+".jsonl")
+	switch r.Method {
+	case http.MethodPost:
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			http.Error(w, "mkdir: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// MaxBytesReader (not LimitReader) — surfaces the cap as a
+		// returned error so we can 413 instead of silently truncating
+		// a too-large upload.
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024*1024)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				http.Error(w, "transcript too large (>64 MiB)", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := atomicWrite(path, body); err != nil {
+			http.Error(w, "write: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	case http.MethodGet:
+		body, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.NotFound(w, r)
+				return
+			}
+			http.Error(w, "read: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		if h := r.URL.Query().Get("head"); h != "" {
+			n, err := strconv.Atoi(h)
+			if err != nil || n < 0 {
+				http.Error(w, "bad head", http.StatusBadRequest)
+				return
+			}
+			body = headLines(body, n)
+		}
+		_, _ = w.Write(body)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// headLines returns the first n NDJSON lines from body (preserving
+// trailing newlines). n <= 0 returns body unchanged.
+func headLines(body []byte, n int) []byte {
+	if n <= 0 {
+		return body
+	}
+	count := 0
+	for i, c := range body {
+		if c == '\n' {
+			count++
+			if count == n {
+				return body[:i+1]
+			}
+		}
+	}
+	return body
 }
 
 // --- state snapshot --------------------------------------------------------
