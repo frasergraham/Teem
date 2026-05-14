@@ -24,6 +24,7 @@ import (
 	"github.com/frasergraham/teem/internal/archmem"
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/bus"
+	"github.com/frasergraham/teem/internal/channelbus"
 	"github.com/frasergraham/teem/internal/inflight"
 	"github.com/frasergraham/teem/internal/leaderstatus"
 	"github.com/frasergraham/teem/internal/llm"
@@ -307,6 +308,10 @@ type registeredTeam struct {
 	// "Active branches" section renders an empty placeholder in that
 	// case. Comes straight from the registration payload.
 	repoRoot string
+	// channelBus fans channel events (PushChannel calls) out to every
+	// teem-channel SSE subscriber. One bus per team; survives daemon
+	// lifetime, no persistence.
+	channelBus *channelbus.Bus
 }
 
 // serveDaemon runs the multi-tenant orchestrator until ctx is cancelled.
@@ -932,6 +937,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 
 	bs := bus.NewMemBus()
 	reg := mcpsrv.NewRegistry()
+	chBus := channelbus.New(0)
 
 	// Archetype memory store: per-team directory of per-role markdown
 	// files the leader injects as baseline context for every freshly
@@ -1010,6 +1016,9 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		ArchMem:        archMemStore,
 		LeaderStatus:   leaderStatusStore,
 		Prompts:        promptBuilder,
+		ChannelSink: func(content string, meta map[string]string) {
+			chBus.Publish(channelbus.Event{Content: content, Meta: meta})
+		},
 	})
 	if err != nil {
 		_ = auditSink.Close()
@@ -1022,7 +1031,8 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// (phase 4's `teem pulse start` activates it). Needs the team's
 	// MCP URL via a small JSON file pulse hands to claude.
 	pulseMCPPath := filepath.Join(defaultStateDir(t.Name), "pulse-mcp.json")
-	if err := pulse.WriteMCPConfig(pulseMCPPath, leaderURL+"/mcp"); err != nil {
+	shimPath, _ := exec.LookPath("teem-channel")
+	if err := pulse.WriteMCPConfig(pulseMCPPath, leaderURL+"/mcp", t.Name, d.endpoint, shimPath); err != nil {
 		_ = auditSink.Close()
 		_ = planStore.Close()
 		_ = notesInbox.Close()
@@ -1185,6 +1195,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		registered:     time.Now(),
 		transcriptsDir: transcriptsDir,
 		repoRoot:       repoRoot,
+		channelBus:     chBus,
 	}, nil
 }
 
@@ -1473,6 +1484,8 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		rt.auditH.ServeHTTP(w, r2)
 	case strings.HasPrefix(suffix, "/transcripts/"):
 		d.handleTranscripts(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
+	case suffix == "/channel-events" || strings.HasPrefix(suffix, "/channel-events?"):
+		d.handleChannelEvents(w, r, rt)
 	default:
 		// SSR jobs pages — unauth like the dashboard (tailnet boundary).
 		if agentID, ok := resolveAgentJobsRoute(suffix); ok {
@@ -1575,6 +1588,74 @@ func (d *daemon) handleTranscripts(w http.ResponseWriter, r *http.Request, rt *r
 		_, _ = w.Write(body)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleChannelEvents serves the team's channel-event SSE stream to a
+// teem-channel stdio shim. The shim runs as a subprocess of Claude
+// Code, holds open one GET against this endpoint, and re-emits every
+// received Event as a notifications/claude/channel message on its
+// stdio MCP transport — which is what claude actually listens on for
+// channels. Bearer-auth (same worker_token as /audit).
+//
+// Event wire format: SSE frames with event name "channel" and a JSON
+// data line { "content": "...", "meta": { "agent_id": "...", ... } }.
+// A periodic ":keepalive\n\n" comment keeps the connection through
+// upstream idle timeouts.
+func (d *daemon) handleChannelEvents(w http.ResponseWriter, r *http.Request, rt *registeredTeam) {
+	if r.Header.Get("Authorization") != "Bearer "+d.token {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if rt.channelBus == nil {
+		http.Error(w, "channel bus not configured", http.StatusInternalServerError)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	_, ch, cancel := rt.channelBus.Subscribe()
+	defer cancel()
+
+	keepalive := time.NewTicker(25 * time.Second)
+	defer keepalive.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-keepalive.C:
+			if _, err := io.WriteString(w, ":keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			payload, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "event: channel\ndata: %s\n\n", payload); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
 	}
 }
 

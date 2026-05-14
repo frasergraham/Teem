@@ -59,6 +59,7 @@ type Server struct {
 	leaderStatus   *leaderstatus.Store
 	prompts        *prompts.Builder
 	transcriptsDir string
+	channelSink    func(content string, meta map[string]string)
 }
 
 // Config holds the deps the orchestrator server needs.
@@ -94,6 +95,14 @@ type Config struct {
 	// read_prompt / append_prompt tools. When nil those tools
 	// return an error explaining the feature is unconfigured.
 	Prompts *prompts.Builder
+	// ChannelSink, when non-nil, receives every PushChannel call in
+	// addition to the in-process MCP notification. The daemon plugs
+	// a channelbus.Bus.Publish here so the teem-channel stdio shim
+	// (which is the transport Claude Code actually listens on for
+	// channel notifications) can forward the event. The legacy
+	// SendNotificationToAllClients path is preserved for unit tests
+	// and so a future native HTTP-channels client would still work.
+	ChannelSink func(content string, meta map[string]string)
 }
 
 // New builds an orchestrator MCP server. Call Serve to start serving on a
@@ -126,6 +135,7 @@ func New(cfg Config) (*Server, error) {
 		leaderStatus:   cfg.LeaderStatus,
 		prompts:        cfg.Prompts,
 		transcriptsDir: cfg.TranscriptsDir,
+		channelSink:    cfg.ChannelSink,
 	}
 	s.registerTools()
 	s.handler = mcpsrv.NewStreamableHTTPServer(core)
@@ -170,6 +180,19 @@ func (s *Server) PushChannel(content string, meta map[string]string) {
 		params["meta"] = m
 	}
 	s.core.SendNotificationToAllClients("notifications/claude/channel", params)
+	if s.channelSink != nil {
+		// Copy so a downstream subscriber that mutates the map can't
+		// corrupt the caller's reference (callers commonly literal-init
+		// the meta map).
+		var metaCopy map[string]string
+		if len(meta) > 0 {
+			metaCopy = make(map[string]string, len(meta))
+			for k, v := range meta {
+				metaCopy[k] = v
+			}
+		}
+		s.channelSink(content, metaCopy)
+	}
 }
 
 // Shutdown gracefully stops the HTTP server.

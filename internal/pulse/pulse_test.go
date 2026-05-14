@@ -83,7 +83,7 @@ func newTestPulse(t *testing.T, claudePath string, sessionOK bool) (*Pulse, *aud
 	sink := tempSink(t)
 	dir := t.TempDir()
 	mcpCfg := filepath.Join(dir, "pulse-mcp.json")
-	if err := WriteMCPConfig(mcpCfg, "http://127.0.0.1:7777/teams/x/mcp"); err != nil {
+	if err := WriteMCPConfig(mcpCfg, "http://127.0.0.1:7777/teams/x/mcp", "x", "http://127.0.0.1:7777", ""); err != nil {
 		t.Fatal(err)
 	}
 	cfg := Config{
@@ -324,7 +324,7 @@ func TestPulse_RunningFlagFile(t *testing.T) {
 		Audit:       tempSink(t),
 		Interval:    1 * time.Hour, // long; we just want the flag side-effects
 	}
-	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp")
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
 
 	p := New(cfg)
 	if p.WasRunning() {

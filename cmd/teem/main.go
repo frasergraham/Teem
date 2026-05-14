@@ -146,7 +146,7 @@ func runChat(args []string) error {
 
 	// 4. Write the MCP config Claude Code consumes.
 	mcpCfgPath := filepath.Join(defaultStateDir(t.Name), "claude-mcp.json")
-	if err := writeClaudeMCPConfig(mcpCfgPath, regResp.MCPURL); err != nil {
+	if err := writeClaudeMCPConfig(mcpCfgPath, regResp.MCPURL, t.Name, ds.Endpoint); err != nil {
 		return fmt.Errorf("write claude mcp config: %w", err)
 	}
 
@@ -357,16 +357,37 @@ func registerWithDaemon(ds daemonStateFile, yamlBody, repoRoot string) (*registe
 }
 
 // writeClaudeMCPConfig writes the JSON Claude Code's --mcp-config flag
-// expects.
-func writeClaudeMCPConfig(path, url string) error {
+// expects. Two servers are registered:
+//
+//   - "teem": the HTTP orchestrator MCP server (tools live here).
+//   - "teem-channel": a stdio subprocess Claude Code spawns and
+//     listens to for notifications/claude/channel. The shim
+//     subscribes to the daemon's per-team SSE channel-events stream
+//     and forwards each event over its stdio MCP transport. This is
+//     the path that actually wakes the leader — the HTTP server's
+//     PushChannel notifications go into the void because Claude Code
+//     only fires channel listeners on stdio servers it spawned.
+func writeClaudeMCPConfig(path, mcpURL, teamName, daemonEndpoint string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
+	}
+	shimPath, err := exec.LookPath("teem-channel")
+	if err != nil {
+		// Fall back to the bare name; claude will surface the error if
+		// the binary isn't on PATH. The HTTP MCP entry is still
+		// usable, so tools keep working.
+		shimPath = "teem-channel"
 	}
 	body, err := json.MarshalIndent(map[string]any{
 		"mcpServers": map[string]any{
 			"teem": map[string]any{
 				"type": "http",
-				"url":  url,
+				"url":  mcpURL,
+			},
+			"teem-channel": map[string]any{
+				"type":    "stdio",
+				"command": shimPath,
+				"args":    []string{"--team", teamName, "--endpoint", daemonEndpoint},
 			},
 		},
 	}, "", "  ")

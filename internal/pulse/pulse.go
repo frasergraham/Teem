@@ -678,22 +678,38 @@ func roundDuration(d time.Duration) string {
 }
 
 // WriteMCPConfig writes the per-team MCP config that Pulse passes to
-// claude. Pulse needs the same MCP config the human chat uses; rather
-// than reach into cmd/teem helpers, the daemon precomputes the URL
-// and asks pulse to write it. Returns the path written.
-func WriteMCPConfig(path, mcpURL string) error {
-	body := fmt.Sprintf(`{
-  "mcpServers": {
-    "teem": {
-      "type": "http",
-      "url": %q
-    }
-  }
-}`, mcpURL)
+// claude. Pulse needs the same MCP config the human chat uses, with
+// two servers registered: the HTTP "teem" orchestrator (tools), and a
+// stdio "teem-channel" shim that forwards channel notifications from
+// the daemon's SSE endpoint into the claude subprocess. teamName +
+// daemonEndpoint drive the shim's argv. shimPath is the absolute path
+// to the teem-channel binary, or empty to fall back to a bare
+// "teem-channel" lookup on PATH.
+func WriteMCPConfig(path, mcpURL, teamName, daemonEndpoint, shimPath string) error {
+	if shimPath == "" {
+		shimPath = "teem-channel"
+	}
+	cfg := map[string]any{
+		"mcpServers": map[string]any{
+			"teem": map[string]any{
+				"type": "http",
+				"url":  mcpURL,
+			},
+			"teem-channel": map[string]any{
+				"type":    "stdio",
+				"command": shimPath,
+				"args":    []string{"--team", teamName, "--endpoint", daemonEndpoint},
+			},
+		},
+	}
+	body, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return atomicWrite(path, []byte(body))
+	return atomicWrite(path, body)
 }
 
 func atomicWrite(path string, body []byte) error {

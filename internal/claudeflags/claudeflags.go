@@ -1,7 +1,11 @@
 // Package claudeflags centralises the argv fragment that subscribes a
-// Claude Code subprocess to the team MCP server's channel stream
-// (`notifications/claude/channel`). The "teem" token references the
-// key under `mcpServers` in claude-mcp.json / pulse-mcp.json.
+// Claude Code subprocess to the channel notifications stream
+// (`notifications/claude/channel`). The `teem-channel` token
+// references the stdio MCP server registered under that key in
+// claude-mcp.json / pulse-mcp.json — Claude Code only fires channel
+// listeners on stdio servers it spawned itself, so the leader
+// subscribes to the dedicated `teem-channel` shim rather than to the
+// HTTP `teem` orchestrator.
 //
 // Channels remain preview-gated upstream: until the capability is
 // approved, Claude Code requires `--dangerously-load-development-channels`
@@ -13,9 +17,9 @@ package claudeflags
 import "os"
 
 // ChannelFlags returns the argv segment for `claude` that opts the
-// process into the team MCP server's channel stream.
+// process into the team's channel stream.
 func ChannelFlags() []string {
-	const token = "server:teem"
+	const token = "server:teem-channel"
 	if os.Getenv("TEEM_CHANNELS_DEV") == "1" {
 		return []string{"--dangerously-load-development-channels", token}
 	}
