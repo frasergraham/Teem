@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/frasergraham/teem/internal/team"
 )
@@ -223,5 +225,293 @@ func TestMigrateLegacyTeamDirs_HandlesPartialOnRerun(t *testing.T) {
 	}
 	if canonical != 1 {
 		t.Errorf("want 1 canonical state dir, got %d: %v", canonical, entries)
+	}
+}
+
+// seedRestoreCandidate writes a state dir at <stateRoot>/<dirName> with
+// a registration.json carrying the supplied yaml body. mtime sets the
+// registration.json mtime so dedup-by-most-recent is testable.
+func seedRestoreCandidate(t *testing.T, stateRoot, dirName, yamlBody string, mtime time.Time) string {
+	t.Helper()
+	dir := filepath.Join(stateRoot, dirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reg := teamRegistration{TeamYAML: yamlBody, RegisteredAt: mtime}
+	body, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	regPath := filepath.Join(dir, "registration.json")
+	if err := os.WriteFile(regPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(regPath, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	return regPath
+}
+
+// TestPlanTeamRestores_DedupsSameID is the simplest dedup case: two
+// state dirs whose registrations resolve to the same id. Can happen
+// when migration found `state/<id>` already present and left the
+// legacy slug dir alone — both then get walked at restore.
+func TestPlanTeamRestores_DedupsSameID(t *testing.T) {
+	_, base := migrationFixture(t)
+	stateRoot := filepath.Join(base, "state")
+	id := "t-deadbeefcafef00d"
+	yaml := `team:
+  id: ` + id + `
+  name: alpha
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: worker, placement: local, max_concurrent: 1}
+`
+	now := time.Now()
+	// Canonical dir, newer mtime — should win.
+	seedRestoreCandidate(t, stateRoot, id, yaml, now)
+	// Stale slug dir with the SAME id in its yaml, older mtime.
+	seedRestoreCandidate(t, stateRoot, "alpha", yaml, now.Add(-time.Hour))
+
+	got := planTeamRestores(stateRoot)
+	if len(got) != 1 {
+		t.Fatalf("want 1 candidate, got %d: %+v", len(got), got)
+	}
+	if got[0].team.ID != id {
+		t.Errorf("winner id = %q, want %q", got[0].team.ID, id)
+	}
+	if got[0].dirName != id {
+		t.Errorf("winner dirName = %q, want %q (newer reg.mtime should win)", got[0].dirName, id)
+	}
+}
+
+// TestPlanTeamRestores_DedupsSameNameDistinctIDs is the phantom case:
+// two state dirs, distinct ids, same Name. A past partial migration
+// minted a phantom while the canonical id-dir already existed; we keep
+// only one (most recent reg.mtime) so the daemon doesn't end up with
+// two *team.Team entries for what the operator considers one team.
+func TestPlanTeamRestores_DedupsSameNameDistinctIDs(t *testing.T) {
+	_, base := migrationFixture(t)
+	stateRoot := filepath.Join(base, "state")
+	canonical := "t-857d9294a3ea3c68"
+	phantom := "t-708a353a82401d7c"
+	yamlFor := func(id string) string {
+		return `team:
+  id: ` + id + `
+  name: example-team
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: worker, placement: local, max_concurrent: 1}
+`
+	}
+	now := time.Now()
+	// Canonical: newer reg.mtime — should win.
+	seedRestoreCandidate(t, stateRoot, canonical, yamlFor(canonical), now)
+	// Phantom: older reg.mtime — should be dropped with a WARN.
+	seedRestoreCandidate(t, stateRoot, phantom, yamlFor(phantom), now.Add(-2*time.Hour))
+
+	got := planTeamRestores(stateRoot)
+	if len(got) != 1 {
+		t.Fatalf("want 1 candidate (phantom must be dropped), got %d: %+v", len(got), got)
+	}
+	if got[0].team.ID != canonical {
+		t.Errorf("winner id = %q, want canonical %q", got[0].team.ID, canonical)
+	}
+	if got[0].team.Name != "example-team" {
+		t.Errorf("winner name = %q, want example-team", got[0].team.Name)
+	}
+}
+
+// TestPlanTeamRestores_PartialMigrationState is the operator scenario
+// from t-8a632a46 verbatim: a canonical id-dir, a phantom id-dir for
+// the same Name, AND a legacy slug dir whose yaml carries the canonical
+// id (the migration-target-already-exists leftover). Restore must
+// collapse all three into a single canonical entry.
+func TestPlanTeamRestores_PartialMigrationState(t *testing.T) {
+	_, base := migrationFixture(t)
+	stateRoot := filepath.Join(base, "state")
+	canonical := "t-857d9294a3ea3c68"
+	phantom := "t-708a353a82401d7c"
+	canonicalYAML := `team:
+  id: ` + canonical + `
+  name: example-team
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: worker, placement: local, max_concurrent: 1}
+`
+	phantomYAML := `team:
+  id: ` + phantom + `
+  name: example-team
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: worker, placement: local, max_concurrent: 1}
+`
+	now := time.Now()
+	seedRestoreCandidate(t, stateRoot, canonical, canonicalYAML, now)
+	seedRestoreCandidate(t, stateRoot, phantom, phantomYAML, now.Add(-time.Hour))
+	seedRestoreCandidate(t, stateRoot, "example-team", canonicalYAML, now.Add(-30*time.Minute))
+
+	got := planTeamRestores(stateRoot)
+	if len(got) != 1 {
+		t.Fatalf("want 1 candidate, got %d: %+v", len(got), got)
+	}
+	if got[0].team.ID != canonical {
+		t.Errorf("winner id = %q, want canonical %q", got[0].team.ID, canonical)
+	}
+}
+
+// seedRestoreCandidateWithRepo is seedRestoreCandidate plus a repo_root
+// in the registration so candidateAnchored can find the operator's
+// teem.yaml. The teem.yaml itself must be written separately by the
+// caller (typically with a specific id-or-no-id).
+func seedRestoreCandidateWithRepo(t *testing.T, stateRoot, dirName, yamlBody, repoRoot string, mtime time.Time) {
+	t.Helper()
+	dir := filepath.Join(stateRoot, dirName)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	reg := teamRegistration{TeamYAML: yamlBody, RepoRoot: repoRoot, RegisteredAt: mtime}
+	body, err := json.MarshalIndent(reg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	regPath := filepath.Join(dir, "registration.json")
+	if err := os.WriteFile(regPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(regPath, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPlanTeamRestores_PrefersTeamYamlAnchoredID is the round-2
+// regression: in the phantom case, the operator's `<repo>/teem.yaml`
+// is the source of truth for which id is canonical — NOT mtime. This
+// test reverses round-1's convenient mtime arrangement (phantom is
+// NEWER on disk) and asserts canonical still wins because teem.yaml
+// names it.
+func TestPlanTeamRestores_PrefersTeamYamlAnchoredID(t *testing.T) {
+	_, base := migrationFixture(t)
+	stateRoot := filepath.Join(base, "state")
+	canonical := "t-857d9294a3ea3c68"
+	phantom := "t-708a353a82401d7c"
+	yamlFor := func(id string) string {
+		return `team:
+  id: ` + id + `
+  name: example-team
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: worker, placement: local, max_concurrent: 1}
+`
+	}
+	// Operator's working tree carries the canonical id.
+	repoRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoRoot, "teem.yaml"), []byte(yamlFor(canonical)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	// Canonical: OLDER mtime — would lose under round-1's pure-mtime rule.
+	seedRestoreCandidateWithRepo(t, stateRoot, canonical, yamlFor(canonical), repoRoot, now.Add(-2*time.Hour))
+	// Phantom: NEWER mtime + same RepoRoot (typical for a fresh mint
+	// triggered by the operator's own teem.yaml). The teem.yaml does
+	// NOT carry phantom's id, so it is not anchored.
+	seedRestoreCandidateWithRepo(t, stateRoot, phantom, yamlFor(phantom), repoRoot, now)
+
+	got := planTeamRestores(stateRoot)
+	if len(got) != 1 {
+		t.Fatalf("want 1 candidate, got %d: %+v", len(got), got)
+	}
+	if got[0].team.ID != canonical {
+		t.Errorf("winner id = %q, want canonical %q (teem.yaml anchor must beat newer mtime)", got[0].team.ID, canonical)
+	}
+}
+
+// TestPlanTeamRestores_IsIdempotent asserts that calling planTeamRestores
+// twice on the same state dir produces identical results AND leaves the
+// on-disk state unchanged between calls. The brief explicitly called
+// this out as a requirement (running daemon boot twice in a row must
+// be a no-op).
+func TestPlanTeamRestores_IsIdempotent(t *testing.T) {
+	_, base := migrationFixture(t)
+	stateRoot := filepath.Join(base, "state")
+	yaml := `team:
+  id: t-1111111111111111
+  name: alpha
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: worker, placement: local, max_concurrent: 1}
+`
+	now := time.Now()
+	seedRestoreCandidate(t, stateRoot, "t-1111111111111111", yaml, now)
+
+	snapshotState := func() map[string]string {
+		t.Helper()
+		out := map[string]string{}
+		entries, err := os.ReadDir(stateRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			p := filepath.Join(stateRoot, e.Name(), "registration.json")
+			body, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			out[e.Name()] = string(body)
+		}
+		return out
+	}
+
+	before := snapshotState()
+	first := planTeamRestores(stateRoot)
+	mid := snapshotState()
+	second := planTeamRestores(stateRoot)
+	after := snapshotState()
+
+	if len(first) != len(second) {
+		t.Fatalf("candidate count drifted: first=%d second=%d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i].team.ID != second[i].team.ID || first[i].dirName != second[i].dirName {
+			t.Errorf("candidate[%d] drifted: first=%+v second=%+v", i, first[i], second[i])
+		}
+	}
+	if !reflect.DeepEqual(before, mid) {
+		t.Errorf("first call mutated disk state:\nbefore=%v\nafter=%v", before, mid)
+	}
+	if !reflect.DeepEqual(mid, after) {
+		t.Errorf("second call mutated disk state:\nbefore=%v\nafter=%v", mid, after)
+	}
+}
+
+// TestPlanTeamRestores_DistinctTeamsBothKept is the negative-control:
+// two state dirs with distinct ids AND distinct Names must both come
+// through. Without this, an over-eager dedup (e.g. by id-prefix or
+// dir-name fuzziness) would silently drop real teams.
+func TestPlanTeamRestores_DistinctTeamsBothKept(t *testing.T) {
+	_, base := migrationFixture(t)
+	stateRoot := filepath.Join(base, "state")
+	ids := []string{"t-1111111111111111", "t-2222222222222222"}
+	names := []string{"alpha", "beta"}
+	now := time.Now()
+	for i, id := range ids {
+		yaml := `team:
+  id: ` + id + `
+  name: ` + names[i] + `
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: worker, placement: local, max_concurrent: 1}
+`
+		seedRestoreCandidate(t, stateRoot, id, yaml, now)
+	}
+	got := planTeamRestores(stateRoot)
+	if len(got) != 2 {
+		t.Fatalf("want 2 candidates, got %d: %+v", len(got), got)
+	}
+	gotIDs := map[string]bool{got[0].team.ID: true, got[1].team.ID: true}
+	for _, id := range ids {
+		if !gotIDs[id] {
+			t.Errorf("missing id %q in restored set %v", id, gotIDs)
+		}
 	}
 }

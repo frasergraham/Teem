@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -725,15 +726,93 @@ func (d *daemon) restoreTeams() {
 	}
 	migrateLegacyTeamDirs(home)
 	stateRoot := filepath.Join(home, ".teem", "state")
+	for _, c := range planTeamRestores(stateRoot) {
+		// Append the synthesised project_manager archetype if the
+		// team is wired to a tracker. Best-effort: if the role
+		// already exists in the YAML (operator added it manually)
+		// AddArchetype returns ErrArchetypeExists and we skip.
+		if pm := team.MaybePMArchetype(c.team); pm != nil {
+			if err := c.team.AddArchetype(*pm); err != nil && !errors.Is(err, team.ErrArchetypeExists) {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: append project_manager: %v\n", c.team.Name, err)
+			}
+		}
+		rt, err := d.buildTeamServices(c.team, c.reg.RepoRoot, c.reg.WorktreeBase)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] skip %s: build services: %v\n", c.dirName, err)
+			continue
+		}
+		// Preserve the original registration time so the dashboard
+		// doesn't show "registered just now" after every restart.
+		if !c.reg.RegisteredAt.IsZero() {
+			rt.registered = c.reg.RegisteredAt
+		}
+		d.mu.Lock()
+		d.teams[c.team.ID] = rt
+		d.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "[teemd] restored team %q (id %s, pulse %s)\n", c.team.Name, c.team.ID, pulseStateLabel(rt))
+		// Reconcile workers and persistent agents asynchronously so a
+		// slow Fargate API call doesn't block boot.
+		rtRef := rt
+		safeGo("reconcile.restored:"+rtRef.team.ID, func() {
+			if n := rtRef.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: reattached %d local worker(s)\n", rtRef.team.Name, n)
+			}
+			if n := rtRef.spawner.Reconcile(context.Background()); n > 0 {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: reconciled %d persistent agent(s)\n", rtRef.team.Name, n)
+			}
+		})
+	}
+	d.persistStateSnapshot()
+}
+
+// restoreCandidate is one fully-loaded team ready to wire into d.teams.
+// Returned by planTeamRestores after dedup so callers can register
+// without re-checking for collisions.
+type restoreCandidate struct {
+	dirName string // basename of the state dir the candidate came from
+	team    *team.Team
+	reg     teamRegistration
+}
+
+// planTeamRestores scans state dirs under stateRoot, parses each
+// registration.json, and returns one candidate per restored team. It
+// guarantees idempotency in two dimensions:
+//
+//  1. Same id from multiple state dirs (typical when a legacy slug dir
+//     survived migration because its target id-dir already existed):
+//     the dir whose registration.json was modified most recently wins;
+//     the others are logged and skipped.
+//  2. Distinct ids for the same Name (typical phantom — a past
+//     partial migration minted a fresh id while the operator's
+//     canonical state dir already existed): prefer the candidate whose
+//     id is the one referenced by `<reg.RepoRoot>/teem.yaml` (the
+//     operator's source of truth — same signal migrateLegacyTeamDirs
+//     uses when back-filling); fall back to most-recent-mtime only if
+//     no candidate is teem.yaml-anchored (or both are). A loud WARN
+//     names both ids so the operator can remove the stale dir.
+//
+// Side-effects despite the "plan" framing: when a registration's YAML
+// lacks an id, this function mints one via EnsureIDFile and writes the
+// back-filled YAML into the registration.json (mirroring the
+// pre-refactor inline mint path in restoreTeams). The mint is
+// idempotent — once written, a second call observes the id and skips
+// the mint, so running daemon boot twice in a row leaves disk state
+// unchanged.
+func planTeamRestores(stateRoot string) []restoreCandidate {
 	entries, err := os.ReadDir(stateRoot)
 	if err != nil {
-		return
+		return nil
 	}
+	var all []loadedTeam
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		regPath := filepath.Join(stateRoot, e.Name(), "registration.json")
+		info, err := os.Stat(regPath)
+		if err != nil {
+			continue
+		}
 		body, err := os.ReadFile(regPath)
 		if err != nil {
 			continue
@@ -772,42 +851,121 @@ func (d *daemon) restoreTeams() {
 			_ = writeTeamRegistration(t.ID, reg)
 		}
 		_ = os.Remove(tmpFile)
-		// Append the synthesised project_manager archetype if the
-		// team is wired to a tracker. Best-effort: if the role
-		// already exists in the YAML (operator added it manually)
-		// AddArchetype returns ErrArchetypeExists and we skip.
-		if pm := team.MaybePMArchetype(t); pm != nil {
-			if err := t.AddArchetype(*pm); err != nil && !errors.Is(err, team.ErrArchetypeExists) {
-				fmt.Fprintf(os.Stderr, "[teemd] %s: append project_manager: %v\n", t.Name, err)
-			}
-		}
-		rt, err := d.buildTeamServices(t, reg.RepoRoot, reg.WorktreeBase)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[teemd] skip %s: build services: %v\n", e.Name(), err)
-			continue
-		}
-		// Preserve the original registration time so the dashboard
-		// doesn't show "registered just now" after every restart.
-		if !reg.RegisteredAt.IsZero() {
-			rt.registered = reg.RegisteredAt
-		}
-		d.mu.Lock()
-		d.teams[t.ID] = rt
-		d.mu.Unlock()
-		fmt.Fprintf(os.Stderr, "[teemd] restored team %q (id %s, pulse %s)\n", t.Name, t.ID, pulseStateLabel(rt))
-		// Reconcile workers and persistent agents asynchronously so a
-		// slow Fargate API call doesn't block boot.
-		rtRef := rt
-		safeGo("reconcile.restored:"+rtRef.team.ID, func() {
-			if n := rtRef.spawner.ReconcileLocalSockets(context.Background()); n > 0 {
-				fmt.Fprintf(os.Stderr, "[teemd] %s: reattached %d local worker(s)\n", rtRef.team.Name, n)
-			}
-			if n := rtRef.spawner.Reconcile(context.Background()); n > 0 {
-				fmt.Fprintf(os.Stderr, "[teemd] %s: reconciled %d persistent agent(s)\n", rtRef.team.Name, n)
-			}
+		all = append(all, loadedTeam{
+			dirName:  e.Name(),
+			regMTime: info.ModTime(),
+			reg:      reg,
+			t:        t,
 		})
 	}
-	d.persistStateSnapshot()
+	// Pass 1: collapse same-id duplicates. The teem.yaml anchor is
+	// irrelevant here (both candidates share an id by definition) so
+	// pickWinner falls through to mtime — most recent reg.json mtime
+	// wins, ties broken by lexicographic dirName.
+	byID := make(map[string]loadedTeam, len(all))
+	for _, l := range all {
+		prev, dup := byID[l.t.ID]
+		if !dup {
+			byID[l.t.ID] = l
+			continue
+		}
+		winner, loser := pickWinner(prev, l)
+		fmt.Fprintf(os.Stderr, "[teemd] skip %s: id %s already restored from %s (idempotent dedup; consider removing the stale state dir under ~/.teem/state/)\n",
+			loser.dirName, loser.t.ID, winner.dirName)
+		byID[l.t.ID] = winner
+	}
+	// Pass 2: collapse same-name distinct-id collisions (the phantom
+	// case). Iterate byID in sorted key order so log output is
+	// deterministic when ≥3 candidates share a Name. WARN names both
+	// ids so the operator can investigate.
+	idKeys := make([]string, 0, len(byID))
+	for k := range byID {
+		idKeys = append(idKeys, k)
+	}
+	sort.Strings(idKeys)
+	byName := make(map[string]loadedTeam, len(byID))
+	for _, k := range idKeys {
+		l := byID[k]
+		prev, dup := byName[l.t.Name]
+		if !dup {
+			byName[l.t.Name] = l
+			continue
+		}
+		winner, loser := pickWinner(prev, l)
+		fmt.Fprintf(os.Stderr, "[teemd] WARN: team %q has two state dirs with different ids — keeping %s (from %s); skipping %s (from %s). Operator should remove the stale dir under ~/.teem/state/.\n",
+			l.t.Name, winner.t.ID, winner.dirName, loser.t.ID, loser.dirName)
+		byName[l.t.Name] = winner
+	}
+	out := make([]restoreCandidate, 0, len(byName))
+	for _, l := range byName {
+		out = append(out, restoreCandidate{
+			dirName: l.dirName,
+			team:    l.t,
+			reg:     l.reg,
+		})
+	}
+	// Stable order for callers/tests: by id.
+	sort.Slice(out, func(i, j int) bool { return out[i].team.ID < out[j].team.ID })
+	return out
+}
+
+// loadedTeam is one parsed state-dir entry mid-flight inside
+// planTeamRestores. Hoisted to package scope only so pickWinner can
+// reference it; not part of any external contract.
+type loadedTeam struct {
+	dirName  string
+	regMTime time.Time
+	reg      teamRegistration
+	t        *team.Team
+}
+
+// pickWinner returns (winner, loser) for two candidates that collide on
+// id (pass 1) or Name (pass 2). The teem.yaml anchor at
+// `<reg.RepoRoot>/teem.yaml` is the operator's source of truth — the
+// id it carries was either chosen by the operator or back-filled by
+// migrateLegacyTeamDirs — so if exactly one candidate is anchored
+// there, it wins regardless of mtime. This is the round-2 fix for the
+// phantom case where the phantom dir was created *after* the canonical
+// dir and so had a newer mtime under the round-1 pure-mtime rule.
+//
+// When neither (or both) candidate(s) are anchored, fall through to the
+// mtime rule: most recent reg.json mtime wins; ties broken by
+// lexicographic dirName for deterministic output.
+func pickWinner(a, b loadedTeam) (winner, loser loadedTeam) {
+	aAnchored := candidateAnchored(a)
+	bAnchored := candidateAnchored(b)
+	if aAnchored && !bAnchored {
+		return a, b
+	}
+	if bAnchored && !aAnchored {
+		return b, a
+	}
+	if a.regMTime.After(b.regMTime) {
+		return a, b
+	}
+	if b.regMTime.After(a.regMTime) {
+		return b, a
+	}
+	if a.dirName < b.dirName {
+		return a, b
+	}
+	return b, a
+}
+
+// candidateAnchored reports whether the candidate's id is the one
+// recorded in `<reg.RepoRoot>/teem.yaml`. Empty RepoRoot, missing /
+// unreadable file, or unparseable YAML all read as "not anchored" —
+// callers fall back to the mtime tiebreaker.
+func candidateAnchored(l loadedTeam) bool {
+	if l.reg.RepoRoot == "" {
+		return false
+	}
+	yamlPath := filepath.Join(l.reg.RepoRoot, "teem.yaml")
+	t, err := team.Load(yamlPath)
+	if err != nil {
+		return false
+	}
+	return t.ID != "" && t.ID == l.t.ID
 }
 
 func pulseStateLabel(rt *registeredTeam) string {
