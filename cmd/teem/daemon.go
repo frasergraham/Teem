@@ -1557,15 +1557,41 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 		req.TeamYAML = string(updated)
 	}
 
-	// Idempotent: re-registering an existing team is a no-op that
-	// returns the same URLs. (Trade-off: we don't pick up YAML edits
-	// without an explicit DELETE first. Document.)
+	// Re-register: refresh safe display fields in place, warn on
+	// structural diffs, always rewrite registration.json so the next
+	// daemon bounce picks up the operator's edits. Structural changes
+	// (archetype add/remove, tracker config, tailnet) wire goroutines
+	// and provisioners that can't be torn down mid-flight; the warning
+	// tells the operator to restart to apply them.
 	d.mu.Lock()
 	existing, ok := d.teams[t.ID]
 	d.mu.Unlock()
 	if ok {
+		displayChanged, structural := safeReregisterDelta(existing.team, t)
+		if displayChanged {
+			d.mu.Lock()
+			existing.team.Name = t.Name
+			existing.team.Leader.SystemPrompt = t.Leader.SystemPrompt
+			d.mu.Unlock()
+		}
+		if len(structural) > 0 {
+			fmt.Fprintf(os.Stderr,
+				"[teemd] re-register %s: structural changes detected, restart daemon to apply: %s\n",
+				t.ID, strings.Join(structural, "; "))
+		}
+		if werr := writeTeamRegistration(t.ID, teamRegistration{
+			TeamYAML:     req.TeamYAML,
+			RepoRoot:     req.RepoRoot,
+			WorktreeBase: req.WorktreeBase,
+			RegisteredAt: existing.registered,
+		}); werr != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] warning: persist registration for %q: %v\n", t.Name, werr)
+		}
+		if displayChanged {
+			d.persistStateSnapshot()
+		}
 		writeJSON(w, http.StatusOK, registerResponse{
-			Team:     existing.team.Name,
+			Team:     t.Name,
 			MCPURL:   d.endpoint + "/teams/" + t.ID + "/mcp",
 			AuditURL: d.endpoint + "/teams/" + t.ID + "/audit",
 		})
