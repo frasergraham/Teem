@@ -291,12 +291,12 @@ func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 
 // renderTeamPage serves the deep view for a single team at
 // /teams/<slug>. The slug is the canonical filesystem / routing key
-// (display name lives inside the page body). Returns 404 when no team
+// (display name lives inside the page body). Accepts either the
+// canonical id or the team's display name as the URL key — the
+// resolver in daemon.go aliases them. Returns 404 when no team
 // matches.
 func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID string) {
-	d.mu.Lock()
-	found := d.teams[teamID]
-	d.mu.Unlock()
+	found := d.resolveTeam(teamID)
 	if found == nil {
 		http.NotFound(w, r)
 		return

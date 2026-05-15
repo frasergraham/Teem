@@ -842,19 +842,20 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "bad team id", http.StatusBadRequest)
 		return
 	}
-	// Split into <id> and optional <subresource>.
-	id := rest
+	// Split into <key> (id or name alias) and optional <subresource>.
+	key := rest
 	sub := ""
 	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		id, sub = rest[:i], rest[i+1:]
+		key, sub = rest[:i], rest[i+1:]
 	}
-	d.mu.Lock()
-	rt, ok := d.teams[id]
-	d.mu.Unlock()
-	if !ok {
+	rt := d.resolveTeam(key)
+	if rt == nil {
 		http.NotFound(w, r)
 		return
 	}
+	// Subsequent map mutations / state-file paths must use the
+	// canonical id, not the URL key (which may be a slug alias).
+	id := rt.team.ID
 
 	switch {
 	case sub == "":
@@ -971,18 +972,19 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 	}
 	// Path is /control/teams/<id>/ping.
 	rest := strings.TrimPrefix(r.URL.Path, "/control/teams/")
-	id := strings.TrimSuffix(rest, "/ping")
-	if id == "" || strings.ContainsRune(id, '/') {
+	key := strings.TrimSuffix(rest, "/ping")
+	if key == "" || strings.ContainsRune(key, '/') {
 		http.Error(w, "bad team id", http.StatusBadRequest)
 		return
 	}
-	d.mu.Lock()
-	rt, ok := d.teams[id]
-	d.mu.Unlock()
-	if !ok {
+	rt := d.resolveTeam(key)
+	if rt == nil {
 		http.NotFound(w, r)
 		return
 	}
+	// Audit event + ping_ts redirect always carry the canonical id so
+	// the team page (also id-keyed) can correlate the tick.
+	id := rt.team.ID
 
 	if rt.pulse == nil {
 		http.Error(w, "pulse not configured", http.StatusInternalServerError)
@@ -1768,6 +1770,32 @@ func writeTempYAML(body string) (string, error) {
 
 // --- /teams/<name>/* handlers ---------------------------------------------
 
+// resolveTeam looks a team up by its canonical id (the `t-<hex>`
+// routing key) or, as a fallback, by its display name. The id match
+// always wins, so when two teams happen to share a Name (rare, since
+// init/register checks for it) the alias is best-effort and won't
+// shadow an id lookup. Returns nil if no team matches.
+//
+// The name alias exists so URLs that long-lived clients captured
+// before the T33 / TI1 migration — when the daemon keyed `d.teams`
+// by t.Name — still resolve after a restart. Concretely: a `teem
+// chat` Claude Code subprocess holds a stale `/teams/<old-name>/mcp`
+// URL; the alias keeps that handshake alive instead of forcing a
+// reconnect.
+func (d *daemon) resolveTeam(key string) *registeredTeam {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if rt, ok := d.teams[key]; ok {
+		return rt
+	}
+	for _, rt := range d.teams {
+		if rt.team != nil && rt.team.Name == key {
+			return rt
+		}
+	}
+	return nil
+}
+
 // handleTeamRoute dispatches /teams/<id>/(mcp|audit) to the matching
 // per-team handler after stripping the team prefix from the request
 // path. The MCP handler is path-agnostic; the audit handler reads
@@ -1785,10 +1813,8 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, suffix := rest[:slash], rest[slash:]
-	d.mu.Lock()
-	rt, ok := d.teams[id]
-	d.mu.Unlock()
-	if !ok {
+	rt := d.resolveTeam(id)
+	if rt == nil {
 		http.NotFound(w, r)
 		return
 	}
