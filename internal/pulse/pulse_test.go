@@ -456,8 +456,8 @@ func TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels(t *testing.T) {
 		t.Fatal("empty args")
 	}
 	prompt := args[len(args)-1]
-	if prompt != "Take your next turn." {
-		t.Errorf("last arg should be the prompt, got %q", prompt)
+	if prompt != defaultWakePrompt {
+		t.Errorf("last arg should be the defaultWakePrompt, got %q", prompt)
 	}
 	// Each tick is ephemeral — no session resumption.
 	for i, a := range args {
@@ -488,6 +488,23 @@ func TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels(t *testing.T) {
 	}
 	if !foundTerminator {
 		t.Errorf("--channels variadic is followed only by positionals; the prompt %q will be swallowed.\nargs: %v", prompt, args)
+	}
+}
+
+// TestPulse_DefaultWakePrompt_IsDirective guards against accidental
+// regression to a generic "Take your next turn." prompt. The leader needs
+// concrete scan instructions or it answers "Idle." with zero tool calls.
+func TestPulse_DefaultWakePrompt_IsDirective(t *testing.T) {
+	keywords := []string{
+		"list_tasks",
+		"list_agents",
+		"awaiting_approval",
+		"update_leader_status",
+	}
+	for _, kw := range keywords {
+		if !strings.Contains(defaultWakePrompt, kw) {
+			t.Errorf("defaultWakePrompt missing required keyword %q; prompt should direct the leader to scan concrete state", kw)
+		}
 	}
 }
 

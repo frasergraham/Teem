@@ -701,6 +701,22 @@ func (p *Pulse) invokeClaude(ctx context.Context, contextBody string) (tickResul
 	return res, nil
 }
 
+// defaultWakePrompt is the message pulse passes as the leader's first turn.
+// It must direct the leader to actively SCAN current state — not assume
+// nothing changed since the last tick. Lazy "Idle." replies happen when the
+// prompt is generic; an active scan picks up operator approvals, stuck
+// workers, and decision queues that arrived between ticks.
+const defaultWakePrompt = `You're being woken on a pulse tick. Actively scan state before deciding what to do — do not assume the previous turn's "idle" still holds.
+
+Check in order:
+1. list_tasks(open_only=true) — look for tasks that transitioned out of awaiting_approval (operator approvals get appended to notes with [APPROVED …] markers). Any new approvals need implementation work dispatched, or sub-tasks filed.
+2. list_agents — look for stuck workers (state=busy with stale last_seen) or unexpectedly-stopped agents.
+3. query_audit — recent operator decisions, blockers, or unusual events.
+
+Then take the next action: dispatch waiting work, reincarnate stuck workers, escalate decisions you can't make alone, or fast-forward main if an integrator branch is ready. Only conclude "idle" AFTER an actual scan shows nothing actionable.
+
+Update update_leader_status with what you found, even if the result is idle — the operator reads it.`
+
 // buildClaudeArgs assembles the argv passed to `claude` for one tick.
 //
 // Ticks are ephemeral: no --resume / --session-id. Each invocation
@@ -724,7 +740,7 @@ func buildClaudeArgs(mcpConfig, contextBody string) []string {
 		"--append-system-prompt", contextBody,
 		"--dangerously-skip-permissions",
 	)
-	args = append(args, "Take your next turn.")
+	args = append(args, defaultWakePrompt)
 	return args
 }
 
