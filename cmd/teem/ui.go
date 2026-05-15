@@ -18,6 +18,7 @@ import (
 	"github.com/frasergraham/teem/internal/plan"
 	"github.com/frasergraham/teem/internal/pulse"
 	"github.com/frasergraham/teem/internal/team"
+	"github.com/frasergraham/teem/internal/usage"
 )
 
 //go:embed ui_dashboard.html
@@ -210,6 +211,45 @@ type dashboardTeam struct {
 	// severity=question), and open blockers (record_blocker against a
 	// task still at stage=blocked). Sorted newest-first by timestamp.
 	Decisions []decisionRow
+	// Usage is the daily-token-budget card rendered near the top of the
+	// team-detail page. Nil when the daemon has no Aggregator wired (the
+	// card is suppressed in that case).
+	Usage *usageSnapshot
+}
+
+// usageSnapshot is the data behind the team-detail "Usage" card. Built
+// from the daemon-global usage.Aggregator. Configured=false → the
+// operator hasn't set daily_token_budget; the card shows the
+// configuration hint instead of the bar.
+type usageSnapshot struct {
+	Configured  bool
+	Used        int64
+	Cap         int64
+	PercentUsed float64
+	Throttle    bool
+	NextReset   time.Time
+	LastReset   time.Time
+	// NextResetIn is the formatted "in 4h 23m" countdown. NextResetAbs
+	// is the wall-clock tooltip (local time). Both empty when the
+	// anchor parse fails (defensive — operator sees no countdown).
+	NextResetIn  string
+	NextResetAbs string
+	LastResetAbs string
+	PerModel     []modelUsage
+	BarColour    string // "green" | "amber" | "red"
+}
+
+// modelUsage is one row in the per-model breakdown. Total is
+// Input+Output+CacheCreate (matches the billable definition used by
+// the throttle); CacheRead is reported separately so the operator can
+// see read-side caching activity without it inflating the cap.
+type modelUsage struct {
+	Model       string
+	Input       int64
+	Output      int64
+	CacheCreate int64
+	CacheRead   int64
+	Total       int64
 }
 
 // decisionRow is one row in the unified Decisions panel. TypeClass is
@@ -458,6 +498,7 @@ func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID s
 
 	state := readDaemonStateFileSafe()
 	team := teamSnapshot(found)
+	team.Usage = buildUsageSnapshot(d.usageAgg, time.Now())
 	// flash is set by the form-POST redirect (?flash=task_approved etc).
 	// Whitelisted to a known set so a malicious link can't inject
 	// arbitrary text into the page header.
@@ -1356,6 +1397,100 @@ func buildStatusHeadline(team *dashboardTeam) string {
 		return truncateForTile(team.LeaderStatus.Text, 200)
 	}
 	return "All quiet on the bridge — leader hasn't posted a status yet."
+}
+
+// buildUsageSnapshot turns the daemon-global usage.Aggregator into the
+// per-team-page Usage card payload. Nil aggregator returns nil (card
+// suppressed). When daily_token_budget == 0 the snapshot is marked
+// Configured=false so the template renders the configuration hint
+// instead of the progress bar.
+//
+// PerModel rows are sorted by Total descending so the loudest model
+// reads first; CacheRead is reported separately because it isn't part
+// of the billable total the throttle gates on.
+func buildUsageSnapshot(agg *usage.Aggregator, now time.Time) *usageSnapshot {
+	if agg == nil {
+		return nil
+	}
+	cfg := agg.Config()
+	snap := agg.Snapshot()
+	used, capLimit, throttle, _ := agg.AvailableQuota(now)
+
+	out := &usageSnapshot{
+		Configured: cfg.DailyTokenBudget > 0,
+		Used:       used,
+		Cap:        capLimit,
+		Throttle:   throttle,
+		LastReset:  snap.LastReset,
+	}
+	if !snap.LastReset.IsZero() {
+		out.LastResetAbs = snap.LastReset.Local().Format("Mon Jan 2 15:04 MST")
+	}
+	if next, err := cfg.NextReset(now); err == nil {
+		out.NextReset = next
+		until := next.Sub(now)
+		out.NextResetIn = formatUntil(until)
+		out.NextResetAbs = next.Local().Format("Mon Jan 2 15:04 MST")
+	}
+	if out.Configured {
+		pct := 100 * float64(used) / float64(capLimit)
+		if pct < 0 {
+			pct = 0
+		}
+		out.PercentUsed = pct
+		out.BarColour = usageBarColour(pct)
+	}
+	for model, t := range snap.ByModel {
+		out.PerModel = append(out.PerModel, modelUsage{
+			Model:       model,
+			Input:       t.Input,
+			Output:      t.Output,
+			CacheCreate: t.CacheCreate,
+			CacheRead:   t.CacheRead,
+			Total:       t.Input + t.Output + t.CacheCreate,
+		})
+	}
+	sort.Slice(out.PerModel, func(i, j int) bool {
+		if out.PerModel[i].Total != out.PerModel[j].Total {
+			return out.PerModel[i].Total > out.PerModel[j].Total
+		}
+		return out.PerModel[i].Model < out.PerModel[j].Model
+	})
+	return out
+}
+
+// usageBarColour picks the progress-bar shade by percent-used. The
+// breakpoints match the spec (green <50, amber 50-80, red ≥80); 80% is
+// the default throttle threshold so the visual cue lines up with the
+// gate.
+func usageBarColour(pct float64) string {
+	switch {
+	case pct >= 80:
+		return "red"
+	case pct >= 50:
+		return "amber"
+	default:
+		return "green"
+	}
+}
+
+// formatUntil renders a future duration as "4h 23m" / "23m" / "now".
+// Sub-minute precision is dropped because the operator never needs it
+// for a daily-reset countdown.
+func formatUntil(d time.Duration) string {
+	if d <= 0 {
+		return "now"
+	}
+	h := int(d / time.Hour)
+	m := int((d % time.Hour) / time.Minute)
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%dh %dm", h, m)
+	case h > 0:
+		return fmt.Sprintf("%dh", h)
+	default:
+		return fmt.Sprintf("%dm", m)
+	}
 }
 
 // taskToDashboardTask converts a plan.Task to the row shape rendered

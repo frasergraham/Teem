@@ -1243,6 +1243,158 @@
   @media (max-width: 720px) {
     .pulse-grid { grid-template-columns: 1fr; }
   }
+
+  /* --- Usage panel --------------------------------------------------
+     Daily token budget for the daemon-global usage.Aggregator. Sits
+     just under the workers manifest so the operator notices throttle
+     pressure before scanning the decisions feed. */
+  body.team-detail-page .usage-panel {
+    background: #11151c;
+    border: 1px solid #1f2632;
+    border-radius: 4px;
+    padding: 16px 20px 14px;
+    margin: 0 0 14px 0;
+    position: relative;
+  }
+  body.team-detail-page .usage-panel::before,
+  body.team-detail-page .usage-panel::after {
+    content: "";
+    position: absolute;
+    width: 8px; height: 8px;
+    pointer-events: none;
+    border-color: #ffb347;
+  }
+  body.team-detail-page .usage-panel::before {
+    top: -1px; left: -1px;
+    border-left: 1px solid; border-top: 1px solid;
+  }
+  body.team-detail-page .usage-panel::after {
+    bottom: -1px; right: -1px;
+    border-right: 1px solid; border-bottom: 1px solid;
+  }
+  body.team-detail-page .usage-panel .panel-label {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #6a7280;
+    margin: 0 0 10px 0;
+    display: flex; align-items: center; gap: 10px;
+  }
+  body.team-detail-page .usage-panel .panel-label::after {
+    content: "";
+    flex: 1; height: 1px;
+    background: linear-gradient(to right, #1f2632, transparent);
+  }
+  body.team-detail-page .usage-panel .panel-label .pct {
+    color: #ffb347; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .usage-headline-row {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .usage-headline-row .usage-numbers {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 13px;
+    color: #9aa1ad;
+    font-variant-numeric: tabular-nums;
+  }
+  .usage-headline-row .usage-numbers .n { color: #e8e6df; font-weight: 600; }
+  .throttling-badge {
+    display: inline-block;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    padding: 3px 10px;
+    border-radius: 2px;
+    background: #ef4444;
+    color: #0a0d12;
+    font-weight: 700;
+    animation: bridge-breathe 2.6s ease-in-out infinite;
+  }
+  .usage-bar {
+    height: 10px;
+    background: #0a0d12;
+    border: 1px solid #1f2632;
+    border-radius: 4px;
+    overflow: hidden;
+    margin: 6px 0 10px;
+  }
+  .usage-bar-fill { height: 100%; transition: width 0.4s ease; }
+  .usage-bar-fill.green { background: #7fc88f; }
+  .usage-bar-fill.amber { background: #ffb347; }
+  .usage-bar-fill.red   { background: #ef4444; }
+  .usage-meta {
+    display: flex; flex-wrap: wrap; gap: 12px 24px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: #6a7280;
+  }
+  .usage-meta .label { color: #6a7280; letter-spacing: 0.08em; text-transform: uppercase; margin-right: 4px; }
+  .usage-meta .value { color: #9aa1ad; font-variant-numeric: tabular-nums; }
+  .usage-hint {
+    color: #9aa1ad;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 8px 0 2px;
+  }
+  .usage-hint code {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 12px;
+    background: #0a0d12;
+    border: 1px solid #1f2632;
+    padding: 1px 6px;
+    border-radius: 2px;
+    color: #ffb347;
+  }
+  details.usage-models {
+    margin-top: 10px;
+    border-top: 1px dashed #181d26;
+    padding-top: 8px;
+  }
+  details.usage-models > summary {
+    cursor: pointer;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #9aa1ad;
+    list-style: none;
+  }
+  details.usage-models > summary::-webkit-details-marker { display: none; }
+  details.usage-models > summary::before {
+    content: "▸ ";
+    color: #6a7280;
+  }
+  details.usage-models[open] > summary::before { content: "▾ "; }
+  table.usage-models-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  table.usage-models-table th,
+  table.usage-models-table td {
+    text-align: right;
+    padding: 4px 8px;
+    border-bottom: 1px dashed #181d26;
+    color: #9aa1ad;
+  }
+  table.usage-models-table th {
+    color: #6a7280;
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+  }
+  table.usage-models-table th:first-child,
+  table.usage-models-table td:first-child {
+    text-align: left;
+    color: #e8e6df;
+  }
 </style>
 {{ end }}
 
@@ -1379,6 +1531,51 @@
           </form>
         </div>
       </section>
+
+      {{ with .Usage }}
+      <section class="usage-panel" aria-label="daily token usage">
+        <h3 class="panel-label">Usage
+          {{ if .Configured }}<span class="pct">· {{ printf "%.1f" .PercentUsed }}%</span>{{ end }}
+          {{ if .Throttle }}<span class="throttling-badge" role="status">THROTTLING</span>{{ end }}
+        </h3>
+        {{ if .Configured }}
+          <div class="usage-headline-row">
+            <span class="usage-numbers"><span class="n">{{ .Used }}</span> / {{ .Cap }} tokens</span>
+          </div>
+          <div class="usage-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ printf "%.1f" .PercentUsed }}">
+            <div class="usage-bar-fill {{ .BarColour }}" style="width: {{ printf "%.2f" .PercentUsed }}%;"></div>
+          </div>
+          <div class="usage-meta">
+            {{ if .NextResetIn }}<span><span class="label">next reset</span><span class="value" title="{{ .NextResetAbs }}">in {{ .NextResetIn }}</span></span>{{ end }}
+            {{ if .LastResetAbs }}<span><span class="label">last reset</span><span class="value">{{ .LastResetAbs }}</span></span>{{ end }}
+          </div>
+        {{ else }}
+          <div class="usage-hint">
+            Daily token budget not configured. Add a cap to <code>~/.teem/usage.yaml</code>:<br>
+            <code>usage:&nbsp;&nbsp;daily_token_budget:&nbsp;5000000</code>
+          </div>
+        {{ end }}
+        {{ if .PerModel }}
+          <details class="usage-models" id="details-usage-models">
+            <summary>per-model breakdown ({{ len .PerModel }})</summary>
+            <table class="usage-models-table">
+              <thead><tr><th>model</th><th>input</th><th>output</th><th>cache create</th><th>cache read</th></tr></thead>
+              <tbody>
+                {{ range .PerModel }}
+                <tr>
+                  <td>{{ .Model }}</td>
+                  <td>{{ .Input }}</td>
+                  <td>{{ .Output }}</td>
+                  <td>{{ .CacheCreate }}</td>
+                  <td>{{ .CacheRead }}</td>
+                </tr>
+                {{ end }}
+              </tbody>
+            </table>
+          </details>
+        {{ end }}
+      </section>
+      {{ end }}
 
       <div class="summary">
         <span class="stat"><span class="n">{{ .InFlight }}</span><span class="lbl">in flight</span></span>
