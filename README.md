@@ -1,5 +1,7 @@
 # Teem
 
+> See [CLAUDE.md](CLAUDE.md) for the worker quickstart.
+
 Orchestrate Claude Code subprocesses as a coordinated team of agents. A
 **Leader** Claude session chats with you and delegates work to **Worker**
 Claude sessions placed on local or remote hosts. The Leader talks to
