@@ -135,7 +135,7 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 	cap := usage.NewCapture(startedAt)
 	parseErr := streamChatResponse(stdout, w, flusher, cap)
 	waitErr := wait()
-	d.recordChatUsage(rt, cap.Summary())
+	d.recordChatUsage(rt, cap.Summary(), "leader-chat")
 	if waitErr != nil && parseErr == nil {
 		writeSSE(w, flusher, "error", waitErr.Error())
 		return
@@ -149,18 +149,20 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 
 // recordChatUsage emits a KindUsageEvent for an operator chat turn and
 // updates the daemon-global aggregator so chat spend hits the same
-// budget gate as pulse ticks and worker jobs. agent_id is "leader-chat"
-// — distinct from "leader" (pulse) so dashboards can tell who burned
-// the tokens. Direct auditSink.Write bypasses the HTTP audit hooks, so
-// we have to call usageAgg.Record explicitly (the audit hook chain only
-// fires for events that come in over the /audit endpoint).
-func (d *daemon) recordChatUsage(rt *registeredTeam, s usage.UsageSummary) {
+// budget gate as pulse ticks and worker jobs. agentID is supplied by
+// the caller — "leader-chat" for the dashboard panel, "leader-telegram-chat"
+// for inbound Telegram /reply — distinct from "leader" (pulse) so
+// dashboards can tell who burned the tokens. Direct auditSink.Write
+// bypasses the HTTP audit hooks, so we have to call usageAgg.Record
+// explicitly (the audit hook chain only fires for events that come in
+// over the /audit endpoint).
+func (d *daemon) recordChatUsage(rt *registeredTeam, s usage.UsageSummary, agentID string) {
 	if rt != nil && rt.auditSink != nil {
 		_ = rt.auditSink.Write(audit.Event{
 			Timestamp: time.Now().UTC(),
-			AgentID:   "leader-chat",
+			AgentID:   agentID,
 			Kind:      audit.KindUsageEvent,
-			Meta:      usage.AuditMeta(s, "leader-chat", ""),
+			Meta:      usage.AuditMeta(s, agentID, ""),
 		})
 	}
 	if d.usageAgg != nil {

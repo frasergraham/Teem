@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/messaging"
+	"github.com/frasergraham/teem/internal/usage"
 )
 
 // telegramIdleTimeout caps how long a single /reply turn (Claude
@@ -273,6 +274,7 @@ func (d *daemon) runTelegramTurn(token, userMessage string, chatID int64, rctx m
 		rctx.TaskID, rctx.AgentID, time.Now().UTC().Format(time.RFC3339),
 	)
 
+	startedAt := time.Now().UTC()
 	stdout, wait, err := runner(turnCtx, mcpConfig, rt.repoRoot, contextBody, userMessage)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[messaging-webhook] start: %v\n", err)
@@ -282,8 +284,10 @@ func (d *daemon) runTelegramTurn(token, userMessage string, chatID int64, rctx m
 		return
 	}
 
-	text, parseErr := collectChatTurn(stdout)
+	cap := usage.NewCapture(startedAt)
+	text, parseErr := collectChatTurn(stdout, cap)
 	waitErr := wait()
+	d.recordChatUsage(rt, cap.Summary(), "leader-telegram-chat")
 
 	if errors.Is(turnCtx.Err(), context.DeadlineExceeded) {
 		if rep != nil && chatID != 0 {
@@ -316,8 +320,11 @@ func (d *daemon) runTelegramTurn(token, userMessage string, chatID int64, rctx m
 }
 
 // collectChatTurn drains Claude Code's stream-json and returns the
-// accumulated assistant text plus any parse error.
-func collectChatTurn(r io.Reader) (string, error) {
+// accumulated assistant text plus any parse error. Each raw line is
+// also fed through the supplied usage.Capture so Telegram chat spend
+// flows through the same usage extractor as dashboard chat and pulse
+// ticks. cap may be nil.
+func collectChatTurn(r io.Reader, cap *usage.Capture) (string, error) {
 	type contentBlock struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -337,8 +344,12 @@ func collectChatTurn(r io.Reader) (string, error) {
 		resultText string
 	)
 	for sc.Scan() {
+		line := sc.Bytes()
+		if cap != nil {
+			cap.Feed(line)
+		}
 		var e ev
-		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+		if err := json.Unmarshal(line, &e); err != nil {
 			continue
 		}
 		switch e.Type {

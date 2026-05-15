@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/messaging"
 )
 
@@ -292,6 +293,71 @@ func TestWebhook_IdleKill_RespectsContextDeadline(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("runner not called")
+	}
+}
+
+// TestWebhook_EmitsUsageEvent asserts the Telegram /reply path writes
+// a KindUsageEvent with agent_id="leader-telegram-chat" so inbound
+// chat spend hits the daily budget gate. Mirrors
+// TestChatEndpoint_EmitsUsageEvent for the dashboard chat path.
+func TestWebhook_EmitsUsageEvent(t *testing.T) {
+	d, _ := newWebhookTestDaemon(t)
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	tok, err := d.messagingReplyTokens.Issue(messaging.ReplyContext{
+		TeamID: "alpha", TaskID: "t-3a2f", AgentID: "worker-una",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+		stream := strings.Join([]string{
+			`{"type":"system","subtype":"init","model":"claude-opus-4-7"}`,
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"Hi"}]}}`,
+			`{"type":"result","result":"Hi","usage":{"input_tokens":120,"output_tokens":45,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}`,
+		}, "\n") + "\n"
+		return io.NopCloser(strings.NewReader(stream)), func() error { return nil }, nil
+	}
+
+	body := strings.NewReader(`{"message":{"chat":{"id":42},"text":"/reply ` + tok + ` hello"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", body)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var usageEvent *audit.Event
+	waitFor(t, func() bool {
+		events, err := rt.auditSink.Query("", time.Time{}, 100)
+		if err != nil {
+			return false
+		}
+		for i, e := range events {
+			if e.Kind == audit.KindUsageEvent {
+				usageEvent = &events[i]
+				return true
+			}
+		}
+		return false
+	})
+
+	if usageEvent.AgentID != "leader-telegram-chat" {
+		t.Errorf("AgentID=%q want leader-telegram-chat", usageEvent.AgentID)
+	}
+	if got, _ := usageEvent.Meta["input_tokens"].(float64); got != 120 {
+		t.Errorf("Meta input_tokens=%v want 120 (meta=%v)", got, usageEvent.Meta)
+	}
+	if got, _ := usageEvent.Meta["output_tokens"].(float64); got != 45 {
+		t.Errorf("Meta output_tokens=%v want 45", got)
+	}
+	if got, _ := usageEvent.Meta["model"].(string); got != "claude-opus-4-7" {
+		t.Errorf("Meta model=%q want claude-opus-4-7", got)
+	}
+	if got, _ := usageEvent.Meta["agent_id"].(string); got != "leader-telegram-chat" {
+		t.Errorf("Meta agent_id=%q want leader-telegram-chat", got)
 	}
 }
 
