@@ -208,6 +208,10 @@
   /* Assignee whose worker is no longer active: muted + suffixed. */
   table.tasks .assignee.gone { opacity: 0.55; text-decoration: line-through; }
   table.tasks .assignee.gone::after { content: " (gone)"; text-decoration: none; font-style: italic; }
+  /* Assignee inferred from the latest evidence job (no explicit
+     assigned_to). Italicised so the operator can tell explicit
+     assignment from inference. */
+  table.tasks .assignee.derived { font-style: italic; }
   /* STALE pill: an active-pipeline task whose worker has vanished. */
   .stale-pill {
     display: inline-block;
@@ -751,7 +755,7 @@
                 <td class="id"><a href="{{ .URL }}">{{ .ID }}</a></td>
                 <td><a href="{{ .URL }}">{{ .Title }}</a></td>
                 <td>{{ if .Stage }}<span class="stage {{ .Stage }}">{{ .Stage }}</span>{{ end }}{{ if .Stale }}<span class="stale-pill" title="active stage but the assignee is no longer running — reassign or move the task">STALE</span>{{ end }}</td>
-                <td class="assignee{{ if and .AssignedTo (not .AssigneeActive) }} gone{{ end }}">{{ if .AssignedTo }}{{ .AssignedTo }}{{ else }}—{{ end }}</td>
+                <td class="assignee{{ if and .AssignedTo (not .AssigneeActive) }} gone{{ end }}{{ if .AssigneeDerived }} derived{{ end }}"{{ if .AssigneeDerived }} title="inferred from the latest evidence job"{{ end }}>{{ if .AssignedTo }}{{ .AssignedTo }}{{ else }}—{{ end }}</td>
                 <td class="when">{{ .StageAgo }}</td>
               </tr>
             {{ end }}
@@ -770,7 +774,7 @@
                 <td class="id"><a href="{{ .URL }}">{{ .ID }}</a></td>
                 <td><a href="{{ .URL }}">{{ .Title }}</a></td>
                 <td>{{ if .Stage }}<span class="stage {{ .Stage }}">{{ .Stage }}</span>{{ end }}</td>
-                <td class="assignee{{ if and .AssignedTo (not .AssigneeActive) }} gone{{ end }}">{{ if .AssignedTo }}{{ .AssignedTo }}{{ else }}—{{ end }}</td>
+                <td class="assignee{{ if and .AssignedTo (not .AssigneeActive) }} gone{{ end }}{{ if .AssigneeDerived }} derived{{ end }}"{{ if .AssigneeDerived }} title="inferred from the latest evidence job"{{ end }}>{{ if .AssignedTo }}{{ .AssignedTo }}{{ else }}—{{ end }}</td>
                 <td class="when">{{ .StageAgo }}</td>
               </tr>
             {{ end }}
@@ -789,7 +793,7 @@
                 <td class="id"><a href="{{ .URL }}">{{ .ID }}</a></td>
                 <td><a href="{{ .URL }}">{{ .Title }}</a></td>
                 <td>{{ if .Stage }}<span class="stage {{ .Stage }}">{{ .Stage }}</span>{{ end }}</td>
-                <td class="assignee{{ if and .AssignedTo (not .AssigneeActive) }} gone{{ end }}">{{ if .AssignedTo }}{{ .AssignedTo }}{{ end }}</td>
+                <td class="assignee{{ if and .AssignedTo (not .AssigneeActive) }} gone{{ end }}{{ if .AssigneeDerived }} derived{{ end }}"{{ if .AssigneeDerived }} title="inferred from the latest evidence job"{{ end }}>{{ if .AssignedTo }}{{ .AssignedTo }}{{ end }}</td>
                 <td class="when">{{ .StageAgo }}</td>
               </tr>
             {{ end }}

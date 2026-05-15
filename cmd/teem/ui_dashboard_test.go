@@ -289,6 +289,113 @@ func TestDashboard_MarksOrphanedAssigneeStale(t *testing.T) {
 	}
 }
 
+// TestDashboard_AssigneeExplicit locks in the simplest case: a task
+// whose assigned_to is set renders that value as-is — no italic
+// "derived" class, no inferred-from-evidence note.
+func TestDashboard_AssigneeExplicit(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	owner := "worker-foo"
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Explicit owner"})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{AssignedTo: &owner, Stage: plan.StageCoding})
+	rt.registry.Add(mcpsrv.AgentEntry{ID: owner, Role: "worker", State: mcpsrv.StateBusy})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	row := extractTaskRow(t, w.Body.String(), task.ID)
+	if !strings.Contains(row, owner) {
+		t.Errorf("expected explicit assignee %q in row:\n%s", owner, row)
+	}
+	if strings.Contains(row, "assignee derived") || strings.Contains(row, " derived\"") {
+		t.Errorf("explicit assignee must not be rendered as derived:\n%s", row)
+	}
+}
+
+// TestDashboard_AssigneeDerivedFromEvidence covers the bug this task
+// was filed against: link_task_to_job only appends to evidence and
+// leaves assigned_to empty. The dashboard must infer the assignee
+// from the latest evidence job's agent_id and mark it derived.
+func TestDashboard_AssigneeDerivedFromEvidence(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Evidence-linked"})
+	// Two evidence entries; the dashboard walks newest-last, so the
+	// later one (j-new / worker-bar) is the assignee that wins.
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{
+		Stage:       plan.StageCoding,
+		AddEvidence: []string{"j-old", "j-new"},
+	})
+	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-bar", Role: "worker", State: mcpsrv.StateBusy})
+
+	now := time.Now()
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: now.Add(-10 * time.Minute),
+		AgentID:   "worker-old",
+		JobID:     "j-old",
+		Kind:      audit.KindJobReceived,
+	})
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: now.Add(-2 * time.Minute),
+		AgentID:   "worker-bar",
+		JobID:     "j-new",
+		Kind:      audit.KindJobReceived,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	row := extractTaskRow(t, w.Body.String(), task.ID)
+	if !strings.Contains(row, "worker-bar") {
+		t.Errorf("expected derived assignee 'worker-bar' (from latest evidence job):\n%s", row)
+	}
+	if !strings.Contains(row, "derived") {
+		t.Errorf("derived assignee must carry the 'derived' class:\n%s", row)
+	}
+}
+
+// TestDashboard_AssigneeBlankWhenNoneAvailable covers the fall-through
+// case: a task with neither an explicit assignee nor any resolvable
+// evidence renders the empty placeholder, not a stray value.
+func TestDashboard_AssigneeBlankWhenNoneAvailable(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Unowned"})
+	// Evidence references a job the audit log has no record of; the
+	// lookup must fail and the assignee column stay blank.
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{
+		Stage:       plan.StageCoding,
+		AddEvidence: []string{"j-missing"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	row := extractTaskRow(t, w.Body.String(), task.ID)
+	// Open-tasks template renders "—" when the assignee is empty.
+	if !strings.Contains(row, "—") {
+		t.Errorf("expected blank-assignee em-dash placeholder:\n%s", row)
+	}
+	if strings.Contains(row, "derived") {
+		t.Errorf("no resolvable evidence: row must not be marked derived:\n%s", row)
+	}
+}
+
 // extractTaskRow returns the HTML for the <tr>...</tr> row that
 // contains the given task id. Best-effort string slicing — good enough
 // for asserting per-row classes in the dashboard tests.

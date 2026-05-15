@@ -278,6 +278,11 @@ type dashboardTask struct {
 	// never seen). The template uses this to mute the cell so it's
 	// obvious nobody is currently driving the task.
 	AssigneeActive bool
+	// AssigneeDerived is true when AssignedTo was inferred from the
+	// task's latest evidence job (because the task had no explicit
+	// assigned_to). The template renders these italicised so the
+	// operator can tell explicit assignment from inference.
+	AssigneeDerived bool
 	// Stale is true when an active pipeline stage (planning/coding/
 	// reviewing/integrating) names an inactive assignee — i.e. the task thinks
 	// someone is working it but no one is. The template surfaces this
@@ -611,6 +616,11 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	// Plan: open tasks (sorted by stage so the pipeline reads
 	// proposed → verified) and the 5 most-recently-completed tasks.
 	if rt.plan != nil {
+		// jobLookup maps job_id → agent_id, scanned once per render from
+		// the last 72h of audit. Used by taskToDashboardTask to infer an
+		// assignee for tasks linked to a job via evidence but never given
+		// an explicit assigned_to (e.g. by link_task_to_job).
+		jobLookup := buildJobLookup(rt)
 		all := rt.plan.List(plan.Filter{})
 		var shelved []plan.Task
 		var awaiting []plan.Task
@@ -624,7 +634,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 				awaiting = append(awaiting, t)
 			case t.Status.IsOpen():
 				out.OpenTaskCount++
-				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.ID, t, liveAgents))
+				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.ID, t, liveAgents, jobLookup))
 			case t.Status.IsShelved():
 				shelved = append(shelved, t)
 			}
@@ -646,7 +656,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		// so the operator doesn't forget what they paused on.
 		sort.Slice(shelved, func(i, j int) bool { return shelved[i].UpdatedAt.After(shelved[j].UpdatedAt) })
 		for _, t := range shelved {
-			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.ID, t, liveAgents))
+			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.ID, t, liveAgents, jobLookup))
 		}
 		// Recent completed: tasks whose status moved to done, newest
 		// first by UpdatedAt; capped to 5.
@@ -661,7 +671,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 			done = done[:5]
 		}
 		for _, t := range done {
-			out.RecentDone = append(out.RecentDone, taskToDashboardTask(rt.team.ID, t, liveAgents))
+			out.RecentDone = append(out.RecentDone, taskToDashboardTask(rt.team.ID, t, liveAgents, jobLookup))
 		}
 	}
 
@@ -849,29 +859,82 @@ func buildTeamHero(rt *registeredTeam, team *dashboardTeam) teamHero {
 // AssignedTo is being actively worked or pointing at a worker that
 // has gone away — the latter is rendered muted and flagged STALE when
 // the stage is one where someone should be holding the task.
-func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool) dashboardTask {
+//
+// jobLookup resolves a job_id to its owning agent_id; it's used to
+// derive an assignee for tasks that were linked to a job via evidence
+// but never had assigned_to set explicitly (link_task_to_job is
+// evidence-only by design).
+func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool, jobLookup func(jobID string) (string, bool)) dashboardTask {
 	stageAgo := ""
 	if !t.StageEnteredAt.IsZero() {
 		stageAgo = agoShort(t.StageEnteredAt)
 	}
-	assigneeActive := t.AssignedTo == "" || liveAgents[t.AssignedTo]
+	assignee, derived := deriveAssignee(t, jobLookup)
+	assigneeActive := assignee == "" || liveAgents[assignee]
 	stale := false
-	if t.AssignedTo != "" && !assigneeActive {
+	if assignee != "" && !assigneeActive {
 		switch t.Stage {
 		case plan.StagePlanning, plan.StageCoding, plan.StageReviewing, plan.StageIntegrating:
 			stale = true
 		}
 	}
 	return dashboardTask{
-		ID:             t.ID,
-		Title:          t.Title,
-		Status:         string(t.Status),
-		Stage:          string(t.Stage),
-		StageAgo:       stageAgo,
-		AssignedTo:     t.AssignedTo,
-		AssigneeActive: assigneeActive,
-		Stale:          stale,
-		URL:            fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID),
+		ID:              t.ID,
+		Title:           t.Title,
+		Status:          string(t.Status),
+		Stage:           string(t.Stage),
+		StageAgo:        stageAgo,
+		AssignedTo:      assignee,
+		AssigneeActive:  assigneeActive,
+		AssigneeDerived: derived,
+		Stale:           stale,
+		URL:             fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID),
+	}
+}
+
+// deriveAssignee resolves the assignee for a task. Explicit
+// assigned_to wins; otherwise the task's evidence list is walked
+// newest-first and the first job whose agent_id can be looked up is
+// returned with derived=true so the renderer can mark it as inferred.
+// Returns ("", false) when nothing resolves.
+func deriveAssignee(t plan.Task, jobLookup func(jobID string) (string, bool)) (string, bool) {
+	if t.AssignedTo != "" {
+		return t.AssignedTo, false
+	}
+	if jobLookup == nil {
+		return "", false
+	}
+	for i := len(t.Evidence) - 1; i >= 0; i-- {
+		if a, ok := jobLookup(t.Evidence[i]); ok && a != "" {
+			return a, true
+		}
+	}
+	return "", false
+}
+
+// buildJobLookup scans the last 72h of audit events for the team and
+// returns a job_id → agent_id resolver. One scan per page render is
+// cheap enough at v1 scale and matches the window used by the per-agent
+// jobs page.
+func buildJobLookup(rt *registeredTeam) func(string) (string, bool) {
+	empty := func(string) (string, bool) { return "", false }
+	if rt.auditSink == nil {
+		return empty
+	}
+	events, err := rt.auditSink.Query("", time.Now().Add(-72*time.Hour), 5000)
+	if err != nil || len(events) == 0 {
+		return empty
+	}
+	jobs := audit.MaterializeJobs(events)
+	m := make(map[string]string, len(jobs))
+	for _, j := range jobs {
+		if j.AgentID != "" {
+			m[j.JobID] = j.AgentID
+		}
+	}
+	return func(jobID string) (string, bool) {
+		a, ok := m[jobID]
+		return a, ok
 	}
 }
 
