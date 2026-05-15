@@ -768,6 +768,15 @@ func (d *daemon) restoreTeams() {
 			_ = writeTeamRegistration(t.ID, reg)
 		}
 		_ = os.Remove(tmpFile)
+		// Append the synthesised project_manager archetype if the
+		// team is wired to a tracker. Best-effort: if the role
+		// already exists in the YAML (operator added it manually)
+		// AddArchetype returns ErrArchetypeExists and we skip.
+		if pm := team.MaybePMArchetype(t); pm != nil {
+			if err := t.AddArchetype(*pm); err != nil && !errors.Is(err, team.ErrArchetypeExists) {
+				fmt.Fprintf(os.Stderr, "[teemd] %s: append project_manager: %v\n", t.Name, err)
+			}
+		}
 		rt, err := d.buildTeamServices(t, reg.RepoRoot, reg.WorktreeBase)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[teemd] skip %s: build services: %v\n", e.Name(), err)
@@ -1106,6 +1115,15 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Append the synthesised project_manager archetype if the team
+	// is wired to a tracker. See restoreTeams for the symmetric
+	// call; both paths must wire it so registrations and daemon
+	// restarts present the same roster.
+	if pm := team.MaybePMArchetype(t); pm != nil {
+		if err := t.AddArchetype(*pm); err != nil && !errors.Is(err, team.ErrArchetypeExists) {
+			fmt.Fprintf(os.Stderr, "[teemd] %s: append project_manager: %v\n", t.Name, err)
+		}
+	}
 	rt, err := d.buildTeamServices(t, req.RepoRoot, req.WorktreeBase)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("build team services: %v", err), http.StatusInternalServerError)

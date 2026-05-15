@@ -71,3 +71,21 @@ team:
       description: "Merges reviewed worker branches into its own teem/integrator-<name> branch, resolves conflicts, runs final checks. The leader fast-forwards main from there. Never advances main directly. Run at most one at a time per merge train."
       placement: local
       max_concurrent: 1
+
+  # Optional: wire the team to an external bug tracker. When present,
+  # the daemon synthesises a project_manager archetype at runtime —
+  # the leader consults it for sequencing/priority and the daemon
+  # ticks it on a schedule to surface new tracker work as add_task
+  # entries in the plan. Absence (the default) skips PM entirely; no
+  # warning, no error.
+  #
+  # Auth: the PM subprocess inherits the operator's shell env, so
+  # export the value of auth_env (e.g. LINEAR_API_KEY) before
+  # starting the daemon. auth_file is a fallback path read at
+  # PM-spawn time if the env var is unset.
+  #
+  # tracker:
+  #   type: linear           # names the tracker backend (used as the PM's skill: /linear)
+  #   team_id: ENG           # tracker-side team identifier (e.g. Linear's team key)
+  #   auth_env: LINEAR_API_KEY
+  #   auth_file: ~/.config/teem/linear.token

@@ -646,3 +646,131 @@ func TestSetIDFile_AtomicWrite(t *testing.T) {
 		t.Errorf("overwrite left old id behind:\n%s", afterBody)
 	}
 }
+
+// TestLoad_TrackerRoundTrip confirms the optional tracker: block
+// parses into Team.Tracker with all four fields preserved. Absence
+// (the default for legacy YAMLs) leaves Tracker as a nil pointer so
+// MaybePMArchetype returns nil silently.
+func TestLoad_TrackerRoundTrip(t *testing.T) {
+	path := writeTemp(t, `
+team:
+  name: alpha
+  leader:
+    system_prompt: "Ship it."
+  archetypes:
+    - role: worker
+      placement: local
+      max_concurrent: 1
+  tracker:
+    type: linear
+    team_id: ENG
+    auth_env: LINEAR_API_KEY
+    auth_file: /etc/teem/linear.token
+`)
+	tm, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if tm.Tracker == nil {
+		t.Fatalf("Tracker is nil; want populated")
+	}
+	if tm.Tracker.Type != "linear" {
+		t.Errorf("Tracker.Type = %q, want linear", tm.Tracker.Type)
+	}
+	if tm.Tracker.TeamID != "ENG" {
+		t.Errorf("Tracker.TeamID = %q, want ENG", tm.Tracker.TeamID)
+	}
+	if tm.Tracker.AuthEnv != "LINEAR_API_KEY" {
+		t.Errorf("Tracker.AuthEnv = %q, want LINEAR_API_KEY", tm.Tracker.AuthEnv)
+	}
+	if tm.Tracker.AuthFile != "/etc/teem/linear.token" {
+		t.Errorf("Tracker.AuthFile = %q, want /etc/teem/linear.token", tm.Tracker.AuthFile)
+	}
+
+	// Sibling sanity-check: a tracker-less YAML must leave Tracker
+	// nil so the daemon's MaybePMArchetype short-circuits silently
+	// for operators who never opt in.
+	bare := writeTemp(t, `
+team:
+  name: bare
+  leader:
+    system_prompt: "Ship it."
+  archetypes:
+    - role: worker
+      placement: local
+      max_concurrent: 1
+`)
+	btm, err := Load(bare)
+	if err != nil {
+		t.Fatalf("Load bare: %v", err)
+	}
+	if btm.Tracker != nil {
+		t.Errorf("bare YAML left Tracker = %+v, want nil", btm.Tracker)
+	}
+}
+
+// TestMaybePMArchetype covers both branches: a tracker-configured
+// team gets the canonical project_manager spec back; a tracker-less
+// team gets nil. The skill field must match the tracker type so the
+// spawned worker loads the right Claude Code skill.
+func TestMaybePMArchetype(t *testing.T) {
+	// nil team is defensive and must not panic.
+	if got := MaybePMArchetype(nil); got != nil {
+		t.Errorf("MaybePMArchetype(nil) = %+v, want nil", got)
+	}
+
+	// No tracker → nil.
+	noTracker := &Team{Name: "alpha"}
+	if got := MaybePMArchetype(noTracker); got != nil {
+		t.Errorf("MaybePMArchetype(no tracker) = %+v, want nil", got)
+	}
+
+	// Tracker block present but no Type set (operator wrote
+	// `tracker: {}` or omitted the `type:` line) → nil, so a
+	// half-configured tracker can't spawn a PM with no skill.
+	emptyType := &Team{Name: "alpha", Tracker: &TrackerConfig{TeamID: "ENG"}}
+	if got := MaybePMArchetype(emptyType); got != nil {
+		t.Errorf("MaybePMArchetype(empty Tracker.Type) = %+v, want nil", got)
+	}
+
+	// With tracker → populated spec.
+	withTracker := &Team{
+		Name:    "alpha",
+		Tracker: &TrackerConfig{Type: "linear", TeamID: "ENG"},
+	}
+	pm := MaybePMArchetype(withTracker)
+	if pm == nil {
+		t.Fatalf("MaybePMArchetype(with tracker) = nil, want spec")
+	}
+	if pm.Role != "project_manager" {
+		t.Errorf("Role = %q, want project_manager", pm.Role)
+	}
+	if pm.Placement != "local" {
+		t.Errorf("Placement = %q, want local", pm.Placement)
+	}
+	if pm.MaxConcurrent != 1 {
+		t.Errorf("MaxConcurrent = %d, want 1", pm.MaxConcurrent)
+	}
+	if pm.LifecycleOrDefault() != "ephemeral" {
+		t.Errorf("LifecycleOrDefault = %q, want ephemeral", pm.LifecycleOrDefault())
+	}
+	if !pm.NoWorktree {
+		t.Errorf("NoWorktree = false, want true (PM never opens a worktree)")
+	}
+	if pm.Skill != "linear" {
+		t.Errorf("Skill = %q, want %q (derived from Tracker.Type)", pm.Skill, "linear")
+	}
+	if pm.Description == "" {
+		t.Errorf("Description is empty; want non-empty so it shows in the leader prompt")
+	}
+	if !strings.Contains(pm.Description, "linear") {
+		t.Errorf("Description = %q; want it to mention the tracker type", pm.Description)
+	}
+
+	// Skill must track Tracker.Type — swap to a different backend
+	// and confirm the helper rederives.
+	jiraTeam := &Team{Tracker: &TrackerConfig{Type: "jira"}}
+	if got := MaybePMArchetype(jiraTeam); got == nil || got.Skill != "jira" {
+		t.Errorf("Tracker.Type=jira → Skill=%q, want jira", got.Skill)
+	}
+}

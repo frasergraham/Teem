@@ -110,6 +110,36 @@ var DefaultArchetypes = []ArchetypeSpec{
 	},
 }
 
+// MaybePMArchetype returns a synthesised project_manager archetype
+// when the team is wired to an external tracker (Tracker != nil), and
+// nil otherwise. The daemon appends the returned spec to the runtime
+// archetype list during restoreTeams / register; it is never
+// persisted into the team YAML (the operator's only knob is the
+// `tracker:` block).
+//
+// The Skill field defaults to Tracker.Type so the spawned PM worker
+// loads the matching Claude Code skill (e.g. "linear" → /linear).
+// Placement is fixed at "local" (the PM needs the operator's shell
+// env to read the tracker API token) and MaxConcurrent at 1 (one PM
+// consultation in flight at a time is enough; spam protection).
+func MaybePMArchetype(t *Team) *ArchetypeSpec {
+	if t == nil || t.Tracker == nil {
+		return nil
+	}
+	if t.Tracker.Type == "" {
+		return nil
+	}
+	return &ArchetypeSpec{
+		Role:          "project_manager",
+		Description:   fmt.Sprintf("Partner/consultant for the leader. Owns the %s tracker, files new tasks into the Teem plan, never writes code.", t.Tracker.Type),
+		Placement:     "local",
+		MaxConcurrent: 1,
+		Lifecycle:     "ephemeral",
+		NoWorktree:    true,
+		Skill:         t.Tracker.Type,
+	}
+}
+
 // maxClaudeMDBytes caps how much of a discovered CLAUDE.md we paste into
 // the leader brief. Project briefs are read by the leader on every chat
 // turn — keeping this bounded keeps token cost predictable.

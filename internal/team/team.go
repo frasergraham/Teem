@@ -45,11 +45,42 @@ type Team struct {
 	Tailnet    TailnetSpec     `yaml:"tailnet,omitempty"`
 	Leader     LeaderSpec      `yaml:"leader"`
 	Archetypes []ArchetypeSpec `yaml:"archetypes"`
+	// Tracker, when non-nil, points the team at an external bug
+	// tracker. The daemon synthesises a project_manager archetype
+	// (see MaybePMArchetype) at runtime so the leader can consult
+	// the tracker without writing code.
+	Tracker *TrackerConfig `yaml:"tracker,omitempty"`
 
 	// mu guards concurrent mutation via Add/Remove/Update methods and
 	// makes the read-side helpers (FindArchetypeByRole etc.) safe to
 	// call from goroutines that may race with the daemon's MCP tools.
 	mu sync.RWMutex `yaml:"-"`
+}
+
+// TrackerConfig describes the external bug tracker a team is wired
+// against. Presence (Team.Tracker != nil) enables the
+// project_manager archetype at runtime; absence means no PM is
+// spawned and no tracker calls are made.
+//
+// Authentication: the operator's shell exports AuthEnv (e.g.
+// LINEAR_API_KEY); the spawned PM subprocess inherits it. AuthFile
+// is a fallback path read at PM-spawn time. Neither value flows
+// through the daemon's persisted state.
+type TrackerConfig struct {
+	// Type names the tracker backend (e.g. "linear"). The PM
+	// archetype's Skill field defaults to this value so the worker
+	// loads the matching Claude Code skill (/linear, /jira, ...).
+	Type string `yaml:"type"`
+	// TeamID is the tracker-side team identifier (e.g. Linear's
+	// "ENG"). Used by tracker tools to scope queries.
+	TeamID string `yaml:"team_id,omitempty"`
+	// AuthEnv is the environment variable the PM subprocess reads
+	// for its API token. Empty means the tracker tool falls back
+	// to its own default discovery (OAuth, ~/.config, ...).
+	AuthEnv string `yaml:"auth_env,omitempty"`
+	// AuthFile is a fallback path containing the API token, used
+	// when AuthEnv is unset or empty at PM-spawn time.
+	AuthFile string `yaml:"auth_file,omitempty"`
 }
 
 // ArchetypeSpec is a template for spawning worker instances of a given
@@ -187,6 +218,7 @@ type marshalShape struct {
 	Tailnet    TailnetSpec     `yaml:"tailnet,omitempty"`
 	Leader     LeaderSpec      `yaml:"leader"`
 	Archetypes []ArchetypeSpec `yaml:"archetypes"`
+	Tracker    *TrackerConfig  `yaml:"tracker,omitempty"`
 }
 
 // MarshalYAML serializes the team to YAML in the canonical fileWrapper
@@ -201,6 +233,7 @@ func (t *Team) MarshalYAML() ([]byte, error) {
 		Tailnet:    t.Tailnet,
 		Leader:     t.Leader,
 		Archetypes: append([]ArchetypeSpec(nil), t.Archetypes...),
+		Tracker:    t.Tracker,
 	}})
 }
 
