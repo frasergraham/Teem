@@ -57,6 +57,8 @@ func main() {
 		err = runPruneBranches(args)
 	case "usage":
 		err = runUsageCmd(args)
+	case "messaging":
+		err = runMessagingCmd(args)
 	case "version":
 		fmt.Println(versionString())
 	case "-h", "--help", "help":
@@ -86,6 +88,7 @@ Usage:
   teem agent   <list|show|update> [<archetype>] [--prompt|--memory] [--team t]
   teem prune-branches [--team t] [--yes] [--force] [--retired-age 7d]
   teem usage   [--config ~/.teem/usage.yaml] [--state ~/.teem/state/usage.json]
+  teem messaging telegram register-webhook [--public-url https://host]  point the bot at the daemon's inbound webhook
   teem version
 
 Run 'teem <subcommand> -h' for flags.

@@ -60,7 +60,7 @@ func TestConfig_RefusesStartWithoutEnv(t *testing.T) {
 			ChatID:      42,
 		},
 	}
-	_, err := Resolve(cfg, func(string) string { return "" })
+	_, _, err := Resolve(cfg, func(string) string { return "" })
 	if err == nil {
 		t.Fatal("expected error when env var is empty")
 	}
@@ -78,7 +78,7 @@ func TestConfig_RefusesStartWithoutChatID(t *testing.T) {
 			ChatID:      0,
 		},
 	}
-	_, err := Resolve(cfg, func(s string) string {
+	_, _, err := Resolve(cfg, func(s string) string {
 		if s == "X" {
 			return "tok"
 		}
@@ -93,7 +93,7 @@ func TestConfig_RefusesStartWithoutChatID(t *testing.T) {
 }
 
 func TestConfig_ResolveDisabledReturnsNil(t *testing.T) {
-	n, err := Resolve(Config{Enabled: false}, nil)
+	n, _, err := Resolve(Config{Enabled: false}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestConfig_ResolveDefaultsBotTokenEnv(t *testing.T) {
 			ChatID:  9,
 		},
 	}
-	n, err := Resolve(cfg, func(s string) string {
+	n, _, err := Resolve(cfg, func(s string) string {
 		if s == DefaultBotTokenEnv {
 			return "tok"
 		}

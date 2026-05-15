@@ -78,18 +78,24 @@ func (c TelegramConfig) DedupWindow() time.Duration {
 }
 
 // Resolve materialises a Notifier from cfg + the process env. Returns
-// (nil, nil) when messaging is disabled. Returns an error when a
+// (nil, nil, nil) when messaging is disabled. Returns an error when a
 // sub-channel is enabled but its credentials are missing — the daemon
-// refuses to start rather than ship pings to nowhere.
-func Resolve(cfg Config, env func(string) string) (Notifier, error) {
+// refuses to start rather than ship pings to nowhere. The second return
+// is the concrete *TelegramNotifier (when telegram is on) so callers
+// that need chat-id-aware SendText (the inbound webhook) can reach it
+// without unwrapping the Notifier interface.
+func Resolve(cfg Config, env func(string) string) (Notifier, *TelegramNotifier, error) {
 	if !cfg.Enabled {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if env == nil {
 		env = os.Getenv
 	}
 
-	var ns MultiNotifier
+	var (
+		ns MultiNotifier
+		tn *TelegramNotifier
+	)
 	if cfg.Telegram.Enabled {
 		tokenEnv := cfg.Telegram.BotTokenEnv
 		if tokenEnv == "" {
@@ -97,20 +103,21 @@ func Resolve(cfg Config, env func(string) string) (Notifier, error) {
 		}
 		token := env(tokenEnv)
 		if token == "" {
-			return nil, fmt.Errorf("messaging: telegram enabled but env var %s is empty (set %s=<bot-token> or disable telegram in %s)",
+			return nil, nil, fmt.Errorf("messaging: telegram enabled but env var %s is empty (set %s=<bot-token> or disable telegram in %s)",
 				tokenEnv, tokenEnv, "~/.teem/messaging.yaml")
 		}
 		if cfg.Telegram.ChatID == 0 {
-			return nil, fmt.Errorf("messaging: telegram enabled but chat_id is unset in ~/.teem/messaging.yaml")
+			return nil, nil, fmt.Errorf("messaging: telegram enabled but chat_id is unset in ~/.teem/messaging.yaml")
 		}
-		ns = append(ns, NewTelegramNotifier(token, cfg.Telegram.ChatID, nil))
+		tn = NewTelegramNotifier(token, cfg.Telegram.ChatID, nil)
+		ns = append(ns, tn)
 	}
 
 	if len(ns) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(ns) == 1 {
-		return ns[0], nil
+		return ns[0], tn, nil
 	}
-	return ns, nil
+	return ns, tn, nil
 }

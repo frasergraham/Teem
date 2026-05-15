@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -290,6 +292,30 @@ type daemon struct {
 	messagingNotifier messaging.Notifier
 	messagingCfg      messaging.TelegramConfig
 	messagingDedup    *messaging.Dedup
+	// messagingTelegram is the concrete Telegram notifier (when
+	// telegram is enabled) — kept around separately from the wrapped
+	// messagingNotifier so the inbound webhook handler can post to
+	// arbitrary chat_ids via SendText.
+	messagingTelegram *messaging.TelegramNotifier
+	// messagingReplierOverride is the test seam — when non-nil it
+	// replaces the production Telegram path so unit tests can record
+	// outbound posts without a real Telegram server.
+	messagingReplierOverride telegramReplier
+	// messagingReplyTokens correlates outbound Telegram pings with inbound
+	// /reply <token> messages. Issued at outbound emit, consumed by the
+	// inbound webhook handler. Nil when messaging is disabled.
+	messagingReplyTokens *messaging.ReplyTokenStore
+	// messagingWebhookToken is the daemon-issued random token that must
+	// appear as ?token=<value> on the inbound webhook URL. Rotates on
+	// daemon start so a leaked token expires when the operator bounces
+	// the daemon. Persisted to ~/.teem/state/messaging-webhook.json so
+	// `teem messaging telegram register-webhook` can read the current
+	// value out of band.
+	messagingWebhookToken string
+	// messagingChatSessions tracks in-flight Telegram reply subprocesses
+	// keyed by replyToken. Used to enforce the 10-minute idle kill and
+	// the /done early-exit.
+	messagingChatSessions *telegramChatSessions
 
 	// usageAgg is the daemon-global daily token-budget tracker.
 	// Spawners consult it before provisioning new workers; the audit
@@ -591,6 +617,12 @@ func (d *daemon) handler() http.Handler {
 			// /ping; spawns a one-shot leader `claude -p` and streams
 			// the response as SSE.
 			d.handleChatTeam(w, r)
+		case path == "/messaging/telegram/webhook":
+			// Inbound Telegram bot updates. Auth is the daemon-issued
+			// ?token=<random> URL parameter (weak); the tailnet
+			// boundary is the load-bearing layer. Token rotates on
+			// daemon restart so leaks expire on the next bounce.
+			d.handleTelegramWebhook(w, r)
 		case strings.HasPrefix(path, "/control/teams/"):
 			d.requireAuth(w, r, d.handleControlTeamsItem)
 		case strings.HasPrefix(path, "/teams/"):
@@ -1838,7 +1870,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 			DashboardBaseURL: d.messagingCfg.DashboardBaseURL,
 			TaskTitle:        messaging.FromPlan(planStore),
 		}
-		messagingHook = makeMessagingHook(d.messagingNotifier, fmtr, d.messagingDedup)
+		messagingHook = makeMessagingHook(d.messagingNotifier, fmtr, d.messagingDedup, d.messagingReplyTokens)
 	}
 
 	// Pulse audit-nudge hook: schedules a debounced pulse Tick on
@@ -1933,6 +1965,20 @@ func defaultMessagingDedupPath() string {
 	return filepath.Join(daemonHomeDir(), "state", "messaging.json")
 }
 
+// defaultMessagingReplyTokensPath is the on-disk store for outbound→
+// inbound reply tokens. Survives daemon restarts so a Telegram /reply
+// arriving after a bounce still finds its task context (subject to the
+// 24h TTL).
+func defaultMessagingReplyTokensPath() string {
+	return filepath.Join(daemonHomeDir(), "state", "messaging-reply-tokens.json")
+}
+
+// defaultMessagingWebhookTokenPath holds the daemon-issued random token
+// embedded in the inbound webhook URL. Re-written on every daemon start.
+func defaultMessagingWebhookTokenPath() string {
+	return filepath.Join(daemonHomeDir(), "state", "messaging-webhook.json")
+}
+
 // initMessaging loads ~/.teem/messaging.yaml, resolves credentials from
 // the environment, and stashes the resulting Notifier + Dedup on the
 // daemon for per-team wiring. Returns an error only when messaging is
@@ -1943,7 +1989,7 @@ func (d *daemon) initMessaging() error {
 	if err != nil {
 		return err
 	}
-	n, err := messaging.Resolve(cfg, os.Getenv)
+	n, tn, err := messaging.Resolve(cfg, os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -1956,11 +2002,72 @@ func (d *daemon) initMessaging() error {
 		// The fresh in-memory map still gates duplicates this run.
 		fmt.Fprintf(os.Stderr, "[messaging] dedup state warning: %v\n", err)
 	}
+	tokens, err := messaging.NewReplyTokenStore(defaultMessagingReplyTokensPath(), messaging.DefaultReplyTokenTTL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[messaging] reply-token state warning: %v\n", err)
+	}
+	webhookToken, err := mintWebhookToken(defaultMessagingWebhookTokenPath())
+	if err != nil {
+		return fmt.Errorf("messaging: mint webhook token: %w", err)
+	}
 	d.messagingNotifier = n
+	d.messagingTelegram = tn
 	d.messagingCfg = cfg.Telegram
 	d.messagingDedup = dedup
+	d.messagingReplyTokens = tokens
+	d.messagingWebhookToken = webhookToken
+	d.messagingChatSessions = newTelegramChatSessions()
 	fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram enabled (chat_id=%d)\n", cfg.Telegram.ChatID)
 	return nil
+}
+
+// mintWebhookToken generates 32 hex chars of entropy, writes it to path
+// (replacing any prior value), and returns the new token. Daemon start
+// rotates the token so a leaked URL stops working after a bounce.
+func mintWebhookToken(path string) (string, error) {
+	var buf [16]byte
+	if _, err := cryptorand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(buf[:])
+	if path == "" {
+		return tok, nil
+	}
+	body, err := json.Marshal(map[string]string{"token": tok})
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", err
+	}
+	return tok, nil
+}
+
+// readWebhookToken reads the daemon-issued inbound-webhook token from
+// disk. The `teem messaging telegram register-webhook` CLI uses this to
+// learn the current token out-of-band from a running daemon.
+func readWebhookToken(path string) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var stored struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &stored); err != nil {
+		return "", err
+	}
+	if stored.Token == "" {
+		return "", fmt.Errorf("messaging: webhook token missing in %s", path)
+	}
+	return stored.Token, nil
 }
 
 // lookupRole returns the role for agentID from the registry, or ""

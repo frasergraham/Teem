@@ -89,6 +89,68 @@ func (n *TelegramNotifier) Notify(ctx context.Context, msg Message) error {
 	return nil
 }
 
+// SendText posts a plain-text sendMessage to the supplied chat_id.
+// Used by the inbound webhook handler to ferry leader chat output back
+// to the operator's Telegram thread. parse_mode is left blank so the
+// text is delivered as-is (no HTML rendering, no escaping required).
+func (n *TelegramNotifier) SendText(ctx context.Context, chatID int64, text string) error {
+	if text == "" {
+		return nil
+	}
+	endpoint := fmt.Sprintf("%s/bot%s/sendMessage", n.baseURL, n.token)
+	body, err := json.Marshal(sendMessagePayload{
+		ChatID:                chatID,
+		Text:                  text,
+		DisableWebPagePreview: true,
+	})
+	if err != nil {
+		return fmt.Errorf("telegram: marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("telegram: new request: %s", sanitizeURLError(err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram: post: %s", sanitizeURLError(err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("telegram: status %d: %s", resp.StatusCode, strings.TrimSpace(string(buf)))
+	}
+	return nil
+}
+
+// SetWebhook calls Telegram's setWebhook endpoint pointing the bot at
+// url. Used by the `teem messaging telegram register-webhook` CLI.
+func (n *TelegramNotifier) SetWebhook(ctx context.Context, url string) error {
+	endpoint := fmt.Sprintf("%s/bot%s/setWebhook", n.baseURL, n.token)
+	body, err := json.Marshal(map[string]any{
+		"url":             url,
+		"allowed_updates": []string{"message"},
+	})
+	if err != nil {
+		return fmt.Errorf("telegram: marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("telegram: new request: %s", sanitizeURLError(err))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram: post: %s", sanitizeURLError(err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("telegram: setWebhook status %d: %s", resp.StatusCode, strings.TrimSpace(string(buf)))
+	}
+	return nil
+}
+
 // sanitizeURLError formats an error from net/http without leaking the
 // request URL — for Telegram the URL embeds the bot token in its path
 // (/bot<TOKEN>/sendMessage), so the default (*url.Error).Error() would
@@ -122,6 +184,14 @@ func renderHTMLBody(msg Message) string {
 		b.WriteString(`<a href="`)
 		b.WriteString(html.EscapeString(msg.Link))
 		b.WriteString(`">Open task</a>`)
+	}
+	if msg.ReplyToken != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("Reply <code>/reply ")
+		b.WriteString(html.EscapeString(msg.ReplyToken))
+		b.WriteString(" your message</code> to chat with the leader.")
 	}
 	return b.String()
 }

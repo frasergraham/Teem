@@ -44,7 +44,7 @@ func newTestDedup(t *testing.T) *messaging.Dedup {
 func TestMessagingHook_FiltersOperatorMustSeeSubset(t *testing.T) {
 	n := &recNotifier{}
 	fmtr := messaging.MessageFormatter{TeamID: "foo", DashboardBaseURL: "https://d"}
-	hook := makeMessagingHook(n, fmtr, newTestDedup(t))
+	hook := makeMessagingHook(n, fmtr, newTestDedup(t), nil)
 	hook([]audit.Event{
 		// fires
 		{Kind: audit.KindBlockerNote, AgentID: "reviewer-blake", Message: "creds missing", Meta: map[string]any{"task_id": "t-1"}},
@@ -76,7 +76,7 @@ func TestMessagingHook_FiltersOperatorMustSeeSubset(t *testing.T) {
 }
 
 func TestMessagingHook_NilNotifierReturnsNil(t *testing.T) {
-	if h := makeMessagingHook(nil, messaging.MessageFormatter{}, newTestDedup(t)); h != nil {
+	if h := makeMessagingHook(nil, messaging.MessageFormatter{}, newTestDedup(t), nil); h != nil {
 		t.Fatal("nil notifier should yield nil hook")
 	}
 }
@@ -84,7 +84,7 @@ func TestMessagingHook_NilNotifierReturnsNil(t *testing.T) {
 func TestMessagingHook_DedupBlocksRepeats(t *testing.T) {
 	n := &recNotifier{}
 	fmtr := messaging.MessageFormatter{TeamID: "foo"}
-	hook := makeMessagingHook(n, fmtr, newTestDedup(t))
+	hook := makeMessagingHook(n, fmtr, newTestDedup(t), nil)
 	ev := audit.Event{Kind: audit.KindBlockerNote, AgentID: "leader", Meta: map[string]any{"task_id": "t-1"}}
 	hook([]audit.Event{ev, ev, ev})
 	if got := len(n.snapshot()); got != 1 {
