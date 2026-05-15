@@ -22,7 +22,15 @@ import (
 	"github.com/frasergraham/teem/internal/roster"
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/team"
+	"github.com/frasergraham/teem/internal/usage"
 )
+
+// QuotaChecker is the narrow surface Spawner consults before each
+// Provision call. Implemented by *usage.Aggregator; tests inject a
+// trivial stub. Empty (nil) disables the check.
+type QuotaChecker interface {
+	AvailableQuota(now time.Time) (used, capLimit int64, throttle bool, reason string)
+}
 
 // jobRecord tracks an outstanding job for the get_results MCP tool.
 type jobRecord struct {
@@ -110,6 +118,11 @@ type Config struct {
 	// Snapshot once onto Worker.ArchetypePrompt so it rides along
 	// with every job. Errors are logged and treated as empty.
 	LoadArchetypePrompt func(role string) string
+	// UsageQuota, when non-nil, gates Spawn against the daemon-global
+	// daily token budget. Spawn returns usage.ErrUsageThrottle when
+	// the quota is exhausted — the MCP spawn_agent handler surfaces
+	// the message back to the leader.
+	UsageQuota QuotaChecker
 }
 
 // GitConfig is the source-control configuration the leader hands to
@@ -526,7 +539,19 @@ func (s *Spawner) Spawn(ctx context.Context, role, name string) (string, error) 
 		return "", err
 	}
 	if aliveID != "" {
+		// Reincarnations and idempotent re-asks skip the quota check —
+		// no fresh subprocess is about to spawn, so we shouldn't refuse
+		// the leader's request to look one up by name.
 		return aliveID, nil
+	}
+	// Usage-throttle gate. Consulted only for fresh provisions so an
+	// already-running agent's lookup path stays unaffected. Returns the
+	// sentinel error so callers (MCP spawn_agent handler) can render a
+	// distinct message.
+	if s.cfg.UsageQuota != nil {
+		if _, _, throttle, reason := s.cfg.UsageQuota.AvailableQuota(time.Now()); throttle {
+			return "", fmt.Errorf("%w: %s", usage.ErrUsageThrottle, reason)
+		}
 	}
 	if err := EnsureDir(spec.WorkingDir); err != nil {
 		return "", err

@@ -73,6 +73,12 @@ type Config struct {
 	// IdleBackoffAfter is how many no-tool-call ticks in a row before
 	// the effective interval doubles. Default 3.
 	IdleBackoffAfter int
+	// OnUsage, when non-nil, is invoked with the per-tick usage rollup
+	// after pulse has written the KindUsageEvent audit event. The
+	// daemon wires this to the global usage Aggregator so pulse ticks
+	// contribute to the daily budget (HTTP audit hooks don't fire for
+	// pulse — it writes the sink directly).
+	OnUsage func(usage.UsageSummary)
 }
 
 // Pulse runs the autonomous leader loop for a single team.
@@ -554,6 +560,9 @@ func (p *Pulse) Tick(ctx context.Context, trigger string) error {
 		Kind:      audit.KindUsageEvent,
 		Meta:      usageMeta,
 	})
+	if p.cfg.OnUsage != nil {
+		p.cfg.OnUsage(result.usage)
+	}
 
 	// Idle streak: only count toward backoff on successful ticks
 	// (errors might be transient). Tool calls reset the streak;

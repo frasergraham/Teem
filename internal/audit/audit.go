@@ -95,6 +95,11 @@ const (
 	// be an infinite loop (pulse spawns claude → usage emit → wake →
 	// pulse spawns claude). See docs/usage-capture.md.
 	KindUsageEvent Kind = "usage_event"
+	// KindUsageThrottle is emitted by the daemon on every transition
+	// of the usage-monitor throttle (active↔throttled). Meta carries
+	// {state: "active"|"throttled", used, cap, reason}. One event per
+	// flip, not per check.
+	KindUsageThrottle Kind = "usage_throttle"
 )
 
 // PMOutcomeXxx are the values the project-manager loop writes into

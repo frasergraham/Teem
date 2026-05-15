@@ -30,7 +30,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, usage())
+		fmt.Fprintln(os.Stderr, usageString())
 		os.Exit(2)
 	}
 	sub := os.Args[1]
@@ -55,12 +55,14 @@ func main() {
 		err = runAgent(args)
 	case "prune-branches":
 		err = runPruneBranches(args)
+	case "usage":
+		err = runUsageCmd(args)
 	case "version":
 		fmt.Println(versionString())
 	case "-h", "--help", "help":
-		fmt.Println(usage())
+		fmt.Println(usageString())
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s\n", sub, usage())
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n\n%s\n", sub, usageString())
 		os.Exit(2)
 	}
 	if err != nil {
@@ -69,7 +71,7 @@ func main() {
 	}
 }
 
-func usage() string {
+func usageString() string {
 	return strings.TrimSpace(`
 teem — orchestrate Claude Code agents as a team
 
@@ -83,6 +85,7 @@ Usage:
   teem pulse   <start|stop|pause|resume|tick|status> [--team t] [--interval 5m]
   teem agent   <list|show|update> [<archetype>] [--prompt|--memory] [--team t]
   teem prune-branches [--team t] [--yes] [--force] [--retired-age 7d]
+  teem usage   [--config ~/.teem/usage.yaml] [--state ~/.teem/state/usage.json]
   teem version
 
 Run 'teem <subcommand> -h' for flags.

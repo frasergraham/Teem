@@ -39,6 +39,7 @@ import (
 	"github.com/frasergraham/teem/internal/state"
 	"github.com/frasergraham/teem/internal/tailnet"
 	"github.com/frasergraham/teem/internal/team"
+	"github.com/frasergraham/teem/internal/usage"
 )
 
 // leaderAwareRoles returns a RolesFunc whose result is the team's
@@ -290,6 +291,12 @@ type daemon struct {
 	messagingCfg      messaging.TelegramConfig
 	messagingDedup    *messaging.Dedup
 
+	// usageAgg is the daemon-global daily token-budget tracker.
+	// Spawners consult it before provisioning new workers; the audit
+	// hook chain feeds it KindUsageEvent rows so it stays current.
+	// Nil-OK in tests that don't wire usage.
+	usageAgg *usage.Aggregator
+
 	mu    sync.Mutex
 	teams map[string]*registeredTeam
 }
@@ -350,6 +357,26 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 	// instead of discovering pings never arrive.
 	if err := d.initMessaging(); err != nil {
 		return err
+	}
+
+	// Usage-monitor wiring. Aggregator is daemon-global so the daily
+	// budget applies across teams; KindUsageThrottle audit events are
+	// fanned out to every team's audit sink so each leader sees its
+	// local view of the throttle state.
+	usageCfg, err := usage.LoadConfig(usage.DefaultConfigPath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[teemd] usage: bad config: %v (throttle disabled)\n", err)
+		usageCfg = usage.Config{}
+	}
+	usageStore, err := usage.OpenStore(usage.DefaultStatePath())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[teemd] usage: state open failed: %v (throttle disabled)\n", err)
+	} else {
+		d.usageAgg = usage.NewAggregator(usageCfg, usageStore, d.onUsageThrottle)
+		if usageCfg.DailyTokenBudget > 0 {
+			fmt.Fprintf(os.Stderr, "[teemd] usage: cap=%d threshold=%.2f anchor=%q\n",
+				usageCfg.DailyTokenBudget, usageCfg.EffectiveThreshold(), usageCfg.EffectiveAnchor())
+		}
 	}
 
 	var listener net.Listener
@@ -1512,6 +1539,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 			s, _ := promptBuilder.Archetype(role)
 			return s
 		},
+		UsageQuota: d.spawnerQuota(),
 	})
 
 	srv, err := mcpsrv.New(mcpsrv.Config{
@@ -1565,6 +1593,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		Plan:        planStore,
 		Audit:       auditSink,
 		Registry:    reg,
+		OnUsage:     d.usageRecorder(),
 	})
 	// Auto-resume Pulse if it was running before the daemon
 	// restarted. Operator opt-out is `teem pulse stop` (which clears
@@ -1737,7 +1766,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		// leader chat, and nudge pulse's debounced audit-nudge tick
 		// (suppressed by pulse when channels are live; active when
 		// chat is disconnected — see docs/wake-strategy.md §3 L2).
-		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook)),
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, d.makeUsageHook())),
 		plan:           planStore,
 		notes:          notesInbox,
 		pulse:          pulseInst,
@@ -1942,6 +1971,128 @@ func formatChannelBody(e audit.Event) string {
 		}
 	}
 	return fmt.Sprintf("%s: %s", e.Kind, shortSummary(e.Message))
+}
+
+// usageRecorder returns a pulse.OnUsage callback that forwards every
+// pulse-tick usage rollup into the daemon-global Aggregator. Returns
+// nil when usage isn't wired so pulse's nil-check disables the path.
+func (d *daemon) usageRecorder() func(usage.UsageSummary) {
+	if d.usageAgg == nil {
+		return nil
+	}
+	return func(s usage.UsageSummary) {
+		if err := d.usageAgg.Record(s); err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] usage: record pulse: %v\n", err)
+		}
+	}
+}
+
+// spawnerQuota returns the daemon's Aggregator as an agent.QuotaChecker
+// — or a nil interface when usage is unwired, so the spawner's
+// `cfg.UsageQuota != nil` check disables the gate cleanly. Returning
+// the typed nil directly would be a non-nil interface value and crash
+// the gate check.
+func (d *daemon) spawnerQuota() agent.QuotaChecker {
+	if d.usageAgg == nil {
+		return nil
+	}
+	return d.usageAgg
+}
+
+// makeUsageHook returns the auditHook that feeds the daemon-global
+// usage Aggregator. KindUsageEvent events are decoded back into a
+// UsageSummary and recorded; everything else passes through.
+func (d *daemon) makeUsageHook() auditHook {
+	if d.usageAgg == nil {
+		return nil
+	}
+	return func(events []audit.Event) {
+		for _, e := range events {
+			if e.Kind != audit.KindUsageEvent {
+				continue
+			}
+			d.usageAgg.Record(usageSummaryFromMeta(e))
+		}
+	}
+}
+
+// usageSummaryFromMeta reconstructs a usage.UsageSummary from a
+// KindUsageEvent's Meta bag. The Meta wire shape comes from
+// usage.AuditMeta; missing/typed-incorrectly fields fall back to
+// zero so a malformed event is just under-counted, not fatal.
+func usageSummaryFromMeta(e audit.Event) usage.UsageSummary {
+	m := e.Meta
+	s := usage.UsageSummary{
+		Model:             metaString(m, "model"),
+		InputTokens:       metaInt64(m, "input_tokens"),
+		OutputTokens:      metaInt64(m, "output_tokens"),
+		CacheCreateTokens: metaInt64(m, "cache_create_tokens"),
+		CacheReadTokens:   metaInt64(m, "cache_read_tokens"),
+	}
+	if t, err := time.Parse(time.RFC3339, metaString(m, "started_at")); err == nil {
+		s.StartedAt = t
+	}
+	if t, err := time.Parse(time.RFC3339, metaString(m, "ended_at")); err == nil {
+		s.EndedAt = t
+	}
+	if s.EndedAt.IsZero() {
+		s.EndedAt = e.Timestamp
+	}
+	return s
+}
+
+func metaString(m map[string]any, k string) string {
+	v, _ := m[k].(string)
+	return v
+}
+
+// metaInt64 tolerates JSON's float64 round-trip plus the int64 type the
+// in-process emitter uses directly.
+func metaInt64(m map[string]any, k string) int64 {
+	switch v := m[k].(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return n
+	}
+	return 0
+}
+
+// onUsageThrottle is the Aggregator's transition callback. Each
+// active↔throttled flip is fanned out to every team's audit sink so
+// each leader can react locally. Best-effort: failures are logged but
+// don't propagate.
+func (d *daemon) onUsageThrottle(ev usage.ThrottleEvent) {
+	meta := map[string]any{
+		"state":  ev.State,
+		"used":   ev.Used,
+		"cap":    ev.Cap,
+		"reason": ev.Reason,
+	}
+	d.mu.Lock()
+	teams := make([]*registeredTeam, 0, len(d.teams))
+	for _, rt := range d.teams {
+		teams = append(teams, rt)
+	}
+	d.mu.Unlock()
+	for _, rt := range teams {
+		if rt.auditSink == nil {
+			continue
+		}
+		if err := rt.auditSink.Write(audit.Event{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "leader",
+			Kind:      audit.KindUsageThrottle,
+			Meta:      meta,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] usage: throttle audit write %s: %v\n", rt.team.Name, err)
+		}
+	}
 }
 
 // combineHooks chains any number of audit hooks left-to-right. nil
