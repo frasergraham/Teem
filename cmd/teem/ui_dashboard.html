@@ -734,6 +734,209 @@
 {{ end }}
 
 
+{{/* ============= BRIDGE-CONSOLE OVERRIDES (team_detail only) =============
+
+  Layered on top of ui_styles for the per-team detail page only. Adds:
+    - the dark "bridge" ground with a subtle dotted-grid texture,
+    - typography (Fraunces / Bricolage Grotesque / JetBrains Mono),
+    - amber engineering-drawing corner ticks on .hero/.section,
+    - the status-panel headline + breathing lamp,
+    - the active-workers manifest grid + role-tag colour modifiers.
+
+  Scoped under `body.team-detail-page` so the summary index keeps its
+  light system-font look. Chunk 1 of the docs/dashboard-redesign.html
+  rollout — future chunks restyle the remaining sections on top of this
+  baseline.
+*/}}
+{{ define "bridge_console_styles" }}
+<style>
+  body.team-detail-page {
+    background: #0a0d12;
+    color: #e8e6df;
+    font-family: 'Bricolage Grotesque', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,0.018) 1px, transparent 0);
+    background-size: 16px 16px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body.team-detail-page header { border-bottom-color: #1f2632; }
+  body.team-detail-page header h1,
+  body.team-detail-page header h1 a { color: #e8e6df; font-family: 'Fraunces', Georgia, serif; }
+  body.team-detail-page header .endpoint,
+  body.team-detail-page header .clock,
+  body.team-detail-page header .crumbs,
+  body.team-detail-page header .crumbs a { color: #9aa1ad; font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+  body.team-detail-page section.team {
+    background: #11151c;
+    border-color: #1f2632;
+  }
+  body.team-detail-page section.team h2 { color: #e8e6df; font-family: 'Fraunces', Georgia, serif; }
+  body.team-detail-page .meta,
+  body.team-detail-page .muted,
+  body.team-detail-page .empty { color: #9aa1ad; }
+
+  /* Engineering-drawing corner ticks on the major panels — small amber
+     L-brackets at top-left and bottom-right. Pure decoration; the
+     section's heading and body do the work. */
+  body.team-detail-page .hero,
+  body.team-detail-page .workers-panel,
+  body.team-detail-page .section {
+    position: relative;
+  }
+  body.team-detail-page .hero::before,
+  body.team-detail-page .workers-panel::before,
+  body.team-detail-page .section::before,
+  body.team-detail-page .hero::after,
+  body.team-detail-page .workers-panel::after,
+  body.team-detail-page .section::after {
+    content: "";
+    position: absolute;
+    width: 8px; height: 8px;
+    pointer-events: none;
+    border-color: #ffb347;
+  }
+  body.team-detail-page .hero::before,
+  body.team-detail-page .workers-panel::before,
+  body.team-detail-page .section::before {
+    top: -1px; left: -1px;
+    border-left: 1px solid; border-top: 1px solid;
+  }
+  body.team-detail-page .hero::after,
+  body.team-detail-page .workers-panel::after,
+  body.team-detail-page .section::after {
+    bottom: -1px; right: -1px;
+    border-right: 1px solid; border-bottom: 1px solid;
+  }
+
+  /* --- Status panel (the hero gets a `status-panel` modifier) -------- */
+  body.team-detail-page .hero.status-panel {
+    background: linear-gradient(135deg, #11151c 0%, #161b24 100%);
+    border: 1px solid #1f2632;
+  }
+  .status-headline-row {
+    display: flex; align-items: flex-start; gap: 16px;
+    margin: 0 0 14px 0;
+  }
+  .status-lamp {
+    display: inline-block;
+    width: 12px; height: 12px;
+    margin-top: 12px;
+    border-radius: 50%;
+    background: #ffb347;
+    box-shadow:
+      0 0 0 4px rgba(255, 179, 71, 0.10),
+      0 0 18px rgba(255, 179, 71, 0.45);
+    flex: 0 0 auto;
+    animation: bridge-breathe 2.6s ease-in-out infinite;
+  }
+  @keyframes bridge-breathe {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+  }
+  .status-headline {
+    font-family: 'Fraunces', Georgia, serif;
+    font-style: italic;
+    font-weight: 500;
+    font-size: 26px;
+    line-height: 1.22;
+    letter-spacing: -0.012em;
+    margin: 0;
+    color: #e8e6df;
+  }
+  .status-headline.empty { color: #6a7280; font-style: italic; }
+  body.team-detail-page .hero-bar-label,
+  body.team-detail-page .hero-numbers .stat .lbl { color: #9aa1ad; }
+  body.team-detail-page .hero-numbers .stat .n { color: #e8e6df; }
+  body.team-detail-page .hero-chips .chip { background: rgba(255,255,255,0.04); border: 1px solid #1f2632; }
+  body.team-detail-page .hero-chips .chip .role { color: #9aa1ad; }
+  body.team-detail-page .hero-chips .chip .count { color: #e8e6df; }
+
+  /* --- Workers panel ------------------------------------------------- */
+  .workers-panel {
+    background: #11151c;
+    border: 1px solid #1f2632;
+    border-radius: 4px;
+    padding: 16px 20px 14px;
+    margin: 0 0 14px 0;
+  }
+  .workers-panel .panel-label {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #6a7280;
+    margin: 0 0 10px 0;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .workers-panel .panel-label::after {
+    content: "";
+    flex: 1; height: 1px;
+    background: linear-gradient(to right, #1f2632, transparent);
+  }
+  .workers-panel .panel-label .count { color: #ffb347; font-weight: 600; }
+  .workers { display: flex; flex-direction: column; gap: 0; }
+  .worker-row {
+    display: grid;
+    grid-template-columns: minmax(180px, auto) auto 1fr auto;
+    gap: 18px;
+    align-items: baseline;
+    padding: 10px 0;
+    border-top: 1px dashed #181d26;
+  }
+  .worker-row:first-child { border-top: none; padding-top: 4px; }
+  .worker-row:last-child  { padding-bottom: 2px; }
+  .worker-row .worker-name {
+    font-family: 'Fraunces', Georgia, serif;
+    font-weight: 500;
+    font-size: 17px;
+    color: #e8e6df;
+    letter-spacing: -0.003em;
+  }
+  .worker-row .role-tag {
+    display: inline-block;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.10em;
+    padding: 2px 7px;
+    border-radius: 2px;
+    border: 1px solid currentColor;
+    line-height: 1.4;
+    color: #9aa1ad;
+  }
+  .worker-row .role-tag.coder      { color: #ffb347; }
+  .worker-row .role-tag.reviewer   { color: #6cb6ff; }
+  .worker-row .role-tag.integrator { color: #7fc88f; }
+  .worker-row .role-tag.planner    { color: #d27ed2; }
+  .worker-row .worker-doing {
+    color: #9aa1ad;
+    font-size: 14px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .worker-row .worker-doing.empty { color: #6a7280; font-style: italic; }
+  .worker-row .worker-age {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: #6a7280;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .workers-empty { color: #6a7280; font-style: italic; font-size: 13px; padding: 6px 0 2px; }
+
+  @media (max-width: 720px) {
+    .worker-row {
+      grid-template-columns: 1fr auto;
+      gap: 6px 12px;
+    }
+    .worker-row .worker-doing { grid-column: 1 / -1; white-space: normal; }
+  }
+</style>
+{{ end }}
+
+
 {{/* ============= PER-TEAM DETAIL (/teams/<slug>) ============= */}}
 {{ define "team_detail" }}
 <!doctype html>
@@ -743,9 +946,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta http-equiv="refresh" content="10">
   <title>teem · {{ .Team.Name }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   {{ template "ui_styles" . }}
+  {{ template "bridge_console_styles" . }}
 </head>
-<body>
+<body class="team-detail-page">
   <header>
     <h1><a href="/">teem</a></h1>
     <span class="crumbs">/ {{ .Team.Name }}</span>
@@ -778,7 +985,11 @@
         {{ if .PulseRunning }}· tick every {{ .PulseInterval }} · last {{ .PulseLastTick }} · {{ .PulseTickCount }} ticks{{ end }}
       </div>
 
-      <section class="hero" aria-label="team summary">
+      <section class="hero status-panel" aria-label="team summary">
+        <div class="status-headline-row">
+          <span class="status-lamp" aria-hidden="true"></span>
+          <p class="status-headline{{ if not .LeaderStatus }} empty{{ end }}">{{ .StatusHeadline }}</p>
+        </div>
         <div class="hero-numbers">
           <div class="stat big">
             <span class="n">{{ .Hero.ActiveAgentsTotal }}</span>
@@ -805,6 +1016,24 @@
           </div>
         {{ else }}
           <div class="stage-bar-empty">no stage activity today</div>
+        {{ end }}
+      </section>
+
+      <section class="workers-panel" aria-label="active workers">
+        <h3 class="panel-label">Active workers <span class="count">{{ len .Workers }}</span></h3>
+        {{ if not .Workers }}
+          <div class="workers-empty">All idle — no agents running.</div>
+        {{ else }}
+        <div class="workers">
+          {{ range .Workers }}
+            <div class="worker-row">
+              <div class="worker-name">{{ .Persona }}</div>
+              <span class="role-tag {{ .RoleColourClass }}">{{ .RoleTag }}</span>
+              <div class="worker-doing{{ if not .Activity }} empty{{ end }}">{{ if .Activity }}{{ .Activity }}{{ else }}—{{ end }}</div>
+              <span class="worker-age">{{ if .Age }}{{ .Age }}{{ else }}—{{ end }}</span>
+            </div>
+          {{ end }}
+        </div>
         {{ end }}
       </section>
 

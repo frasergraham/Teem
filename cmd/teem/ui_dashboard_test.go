@@ -843,7 +843,7 @@ func TestTeamDetail_HeroSection(t *testing.T) {
 	body := w.Body.String()
 
 	// Hero numerals
-	if !strings.Contains(body, `class="hero"`) {
+	if !strings.Contains(body, `class="hero status-panel"`) && !strings.Contains(body, `class="hero"`) {
 		t.Fatalf("hero section not rendered:\n%s", body)
 	}
 	if !strings.Contains(body, `class="stat big"`) {
@@ -894,6 +894,146 @@ func TestTeamDetail_HeroSection(t *testing.T) {
 		t.Errorf("expected amber colour for awaiting_approval segment")
 	}
 	_ = t1
+}
+
+// TestTeamPage_StatusPanel_HasBridgeConsoleLook asserts the chunk-1
+// dashboard redesign baseline: the hero gets the `status-panel` modifier,
+// renders a breathing amber lamp (`.status-lamp`), and includes a serif
+// status-headline pulled from `LeaderStatus.Text`.
+func TestTeamPage_StatusPanel_HasBridgeConsoleLook(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	headline := "Cutting the T20 release; reviewing T17 diff"
+	_ = rt.leaderStatus.Set("leader", headline, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`class="hero status-panel"`,
+		`class="status-lamp"`,
+		`class="status-headline`,
+		headline,
+		`team-detail-page`, // body class scoping the new theme
+		`Fraunces`,         // font preload reference in <head>
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q in status-panel markup:\n%s", want, body)
+		}
+	}
+}
+
+// TestTeamPage_WorkersPanel_PositionedAfterStatus asserts DOM order:
+// the workers-panel section sits between the status-panel hero and the
+// awaiting-approval section, so the operator's eye lands on "who is
+// doing what" before "what needs approval".
+func TestTeamPage_WorkersPanel_PositionedAfterStatus(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-uma", Role: "worker", State: mcpsrv.StateBusy})
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Refactor flow"})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval, AddEvidence: []string{"j-1"}})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	statusIdx := strings.Index(body, `class="hero status-panel"`)
+	workersIdx := strings.Index(body, `class="workers-panel"`)
+	approvalIdx := strings.Index(body, `class="approval-section"`)
+	if statusIdx < 0 {
+		t.Fatalf("status-panel section missing")
+	}
+	if workersIdx < 0 {
+		t.Fatalf("workers-panel section missing")
+	}
+	if approvalIdx < 0 {
+		t.Fatalf("approval-section missing despite awaiting-approval task being seeded")
+	}
+	if workersIdx <= statusIdx {
+		t.Errorf("workers-panel at %d should come AFTER status-panel at %d", workersIdx, statusIdx)
+	}
+	if workersIdx >= approvalIdx {
+		t.Errorf("workers-panel at %d should come BEFORE approval-section at %d", workersIdx, approvalIdx)
+	}
+}
+
+// TestTeamPage_WorkersPanel_UsesPersonaNames asserts the manifest
+// renders agents via team.PersonaName ("worker-uma" → "Coder Uma") and
+// tags them with the matching role-colour modifier (.role-tag.coder).
+func TestTeamPage_WorkersPanel_UsesPersonaNames(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-uma", Role: "worker", State: mcpsrv.StateBusy})
+	rt.registry.Add(mcpsrv.AgentEntry{ID: "reviewer-bex", Role: "reviewer", State: mcpsrv.StateRunning})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// Slice the workers section so we don't pick up matches from the
+	// existing "Active agents" mini-chip strip lower on the page.
+	start := strings.Index(body, `class="workers-panel"`)
+	if start < 0 {
+		t.Fatalf("workers-panel missing")
+	}
+	end := strings.Index(body[start:], `</section>`)
+	if end < 0 {
+		t.Fatalf("workers-panel close tag missing")
+	}
+	panel := body[start : start+end]
+
+	for _, want := range []string{
+		"Coder Uma",
+		"Reviewer Bex",
+		`class="role-tag coder"`,
+		`class="role-tag reviewer"`,
+	} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("missing %q inside workers-panel:\n%s", want, panel)
+		}
+	}
+}
+
+// TestTeamPage_WorkersPanel_ZeroWorkersStillRenders asserts the panel
+// still renders without crashing when no agents are active. The "All
+// idle" placeholder shows so the operator sees the empty state.
+func TestTeamPage_WorkersPanel_ZeroWorkersStillRenders(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `class="workers-panel"`) {
+		t.Errorf("workers-panel missing on empty team:\n%s", body)
+	}
+	if !strings.Contains(body, "All idle") {
+		t.Errorf("expected 'All idle' placeholder for zero-workers team")
+	}
 }
 
 // TestTeamDetail_HeroEmptyDay confirms the hero's "no activity today"

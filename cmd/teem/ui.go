@@ -16,6 +16,7 @@ import (
 	"github.com/frasergraham/teem/internal/leaderstatus"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/plan"
+	"github.com/frasergraham/teem/internal/team"
 )
 
 //go:embed ui_dashboard.html
@@ -187,6 +188,32 @@ type dashboardTeam struct {
 	// Hero is the "page-header" summary: big bold counters, agent
 	// chips per archetype, and today's task pipeline as a stacked bar.
 	Hero teamHero
+	// Workers is the "bridge-console" active-workers manifest rendered
+	// directly under the hero/status panel. One row per non-stopped
+	// agent, ordered as Agents is (alphabetical by id). Activity is
+	// derived from the leader-status board first, falling back to the
+	// agent's assigned open tasks.
+	Workers []workerRow
+	// StatusHeadline is the short editorial line rendered in the
+	// status-panel hero: today's leader-status text, or a quiet-day
+	// placeholder when the leader hasn't posted one.
+	StatusHeadline string
+}
+
+// workerRow is one entry in the active-workers manifest. Persona is the
+// friendly display name from team.PersonaName ("worker-uma" → "Coder
+// Uma"); RoleTag is the matching display word ("Coder" / "Reviewer" /
+// "Integrator" / "PM"); RoleColourClass is the CSS modifier the
+// template appends to .role-tag ("coder" / "reviewer" / "integrator" /
+// "planner") so the colour signal stays in CSS, not Go.
+type workerRow struct {
+	AgentID         string
+	Persona         string
+	Role            string
+	RoleTag         string
+	RoleColourClass string
+	Activity        string
+	Age             string
 }
 
 // teamHero is the data behind the prominent at-a-glance hero band at
@@ -762,6 +789,8 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	// stage bar. Computed last so it can read the already-collected
 	// counters and the live agent set.
 	out.Hero = buildTeamHero(rt, &out)
+	out.Workers = buildWorkers(&out)
+	out.StatusHeadline = buildStatusHeadline(&out)
 
 	// Active teem/* branches in the team's working tree. One git
 	// invocation per render is fine at v1 scale; if branches counts
@@ -911,6 +940,110 @@ func buildTeamHero(rt *registeredTeam, team *dashboardTeam) teamHero {
 		})
 	}
 	return h
+}
+
+// roleColourClasses maps the team's archetype roles to the CSS modifier
+// the .role-tag span gets in the workers-panel. Kept in sync with the
+// palette the bridge-console mockup (docs/dashboard-redesign.html) uses:
+// coder=amber, reviewer=azure, integrator=moss, planner=plum.
+var roleColourClasses = map[string]string{
+	"worker":          "coder",
+	"reviewer":        "reviewer",
+	"integrator":      "integrator",
+	"project_manager": "planner",
+}
+
+// roleDisplayTags maps the team's archetype roles to the short uppercase
+// display word the .role-tag span renders. Mirrors the persona logic in
+// internal/team.PersonaName so the worker line reads "Coder Uma — CODER"
+// rather than "Coder Uma — worker".
+var roleDisplayTags = map[string]string{
+	"worker":          "CODER",
+	"reviewer":        "REVIEWER",
+	"integrator":      "INTEGRATOR",
+	"project_manager": "PM",
+}
+
+// buildWorkers shapes the active-agent list into the bridge-console
+// "Active workers" manifest. One row per agent already collected onto
+// team.Agents (so the filtering rules — hide stopped — match the rest
+// of the page). Activity prefers the agent's leader-status entry when
+// one exists (operator-visible signal), then falls back to the first
+// open task assigned to that agent. Empty otherwise.
+func buildWorkers(team *dashboardTeam) []workerRow {
+	if len(team.Agents) == 0 {
+		return nil
+	}
+	statusByAgent := map[string]string{}
+	for _, s := range team.OtherStatuses {
+		if s.AgentID != "" && s.Text != "" {
+			statusByAgent[s.AgentID] = s.Text
+		}
+	}
+	taskByAgent := map[string]string{}
+	for _, t := range team.OpenTasks {
+		if t.AssignedTo == "" {
+			continue
+		}
+		if _, seen := taskByAgent[t.AssignedTo]; seen {
+			continue
+		}
+		title := t.Title
+		if title == "" {
+			title = t.ID
+		}
+		taskByAgent[t.AssignedTo] = title
+	}
+	rows := make([]workerRow, 0, len(team.Agents))
+	for _, a := range team.Agents {
+		tag, ok := roleDisplayTags[a.Role]
+		if !ok {
+			tag = strings.ToUpper(a.Role)
+		}
+		colour, ok := roleColourClasses[a.Role]
+		if !ok {
+			colour = "coder" // unknown roles still get a tag — fall back to amber
+		}
+		row := workerRow{
+			AgentID:         a.ID,
+			Persona:         personaOrFallback(a.ID),
+			Role:            a.Role,
+			RoleTag:         tag,
+			RoleColourClass: colour,
+			Age:             a.LastSeen,
+		}
+		switch {
+		case statusByAgent[a.ID] != "":
+			row.Activity = statusByAgent[a.ID]
+		case taskByAgent[a.ID] != "":
+			row.Activity = taskByAgent[a.ID]
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// personaOrFallback runs team.PersonaName and falls back to the raw id
+// if the result is empty (defensive — PersonaName already returns the
+// input unchanged on miss). Centralised so future renderers don't
+// reach into the team package for this one transform.
+func personaOrFallback(id string) string {
+	if p := team.PersonaName(id); p != "" {
+		return p
+	}
+	return id
+}
+
+// buildStatusHeadline picks the editorial line shown in the bridge-
+// console status panel: today's leader-status text if posted, else a
+// quiet-day placeholder. Long lines are clamped to ~200 chars so the
+// hero stays one row tall; truncateForTile is reused (same rune-safe
+// trim).
+func buildStatusHeadline(team *dashboardTeam) string {
+	if team.LeaderStatus != nil && team.LeaderStatus.Text != "" {
+		return truncateForTile(team.LeaderStatus.Text, 200)
+	}
+	return "All quiet on the bridge — leader hasn't posted a status yet."
 }
 
 // taskToDashboardTask converts a plan.Task to the row shape rendered
