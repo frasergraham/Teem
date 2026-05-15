@@ -706,16 +706,19 @@ func (p *Pulse) invokeClaude(ctx context.Context, contextBody string) (tickResul
 // nothing changed since the last tick. Lazy "Idle." replies happen when the
 // prompt is generic; an active scan picks up operator approvals, stuck
 // workers, and decision queues that arrived between ticks.
-const defaultWakePrompt = `You're being woken on a pulse tick. Actively scan state before deciding what to do — do not assume the previous turn's "idle" still holds.
+const defaultWakePrompt = `You're being woken on a pulse tick. Two things are non-negotiable this turn:
 
-Check in order:
-1. list_tasks(open_only=true) — look for tasks that transitioned out of awaiting_approval (operator approvals get appended to notes with [APPROVED …] markers). Any new approvals need implementation work dispatched, or sub-tasks filed.
-2. list_agents — look for stuck workers (state=busy with stale last_seen) or unexpectedly-stopped agents.
-3. query_audit — recent operator decisions, blockers, or unusual events.
+1. ACTIVELY SCAN state. Do not assume the previous turn's "idle" still holds.
+2. CALL update_leader_status before ending your turn — every tick, even an idle one. The status line is the canonical "what's the leader doing"; a stale status erodes operator trust.
+
+Scan in this order:
+- list_tasks(open_only=true) — tasks that transitioned out of awaiting_approval (operator approvals append [APPROVED …] to notes) need implementation work dispatched or sub-tasks filed.
+- list_agents — stuck workers (state=busy with stale last_seen) or unexpectedly-stopped agents need reincarnation or escalation.
+- query_audit — recent operator decisions, blockers, unusual events.
 
 Then take the next action: dispatch waiting work, reincarnate stuck workers, escalate decisions you can't make alone, or fast-forward main if an integrator branch is ready. Only conclude "idle" AFTER an actual scan shows nothing actionable.
 
-Update update_leader_status with what you found, even if the result is idle — the operator reads it.`
+Required before ending your turn (no exceptions): call update_leader_status with one or two sentences in the human-readable style (Coder/Reviewer/Integrator/PM personas, natural prose, no bare task IDs in the prose). Cover what's in flight, what just landed, and what's next. If genuinely idle, say so explicitly and name what you scanned.`
 
 // buildClaudeArgs assembles the argv passed to `claude` for one tick.
 //
