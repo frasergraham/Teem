@@ -1,8 +1,11 @@
 // Package pulse is the autonomous-leader heartbeat. A Pulse owns a
 // goroutine that periodically (and, in later phases, in response to
-// audit events) invokes `claude -p --resume <session>` with a
-// freshly-composed context snapshot, so the leader can take turns
-// between human chats.
+// audit events) invokes `claude -p` with a freshly-composed context
+// snapshot, so the leader can take turns between human chats. Each
+// tick is ephemeral — pulse does not resume a saved Claude session;
+// the leader's system prompt + appended leader memory + MCP tool
+// access is the entire context. Status persistence flows through
+// audit events / update_leader_status, not chat history.
 //
 // Phase 3 scope: timer-only ticks. No event triggers, no guard rails
 // beyond a mutex (no overlapping ticks) and a pause file. Phase 4
@@ -32,9 +35,13 @@ import (
 	"github.com/frasergraham/teem/internal/plan"
 )
 
-// SessionLoader resolves the team's persistent Claude session id.
-// Implementation lives in cmd/teem (loadLeaderSession); we accept a
-// function value to avoid an import cycle.
+// SessionLoader reports whether the operator has run `teem chat` at
+// least once for this team. Pulse uses this as an opt-in gate — until
+// the operator engages, autonomous ticks stay quiet. The sessionID is
+// no longer passed to claude (ticks are ephemeral) but is recorded in
+// audit meta for traceability. Implementation lives in cmd/teem
+// (loadLeaderSession); we accept a function value to avoid an import
+// cycle.
 type SessionLoader func() (sessionID string, ok bool, err error)
 
 // Config bundles everything one team's Pulse needs.
@@ -505,7 +512,7 @@ func (p *Pulse) Tick(ctx context.Context, trigger string) error {
 	defer cancel()
 
 	start := time.Now()
-	result, err := p.invokeClaude(tickCtx, sessionID, contextBody)
+	result, err := p.invokeClaude(tickCtx, contextBody)
 	dur := time.Since(start)
 
 	ev := audit.Event{
@@ -513,9 +520,10 @@ func (p *Pulse) Tick(ctx context.Context, trigger string) error {
 		AgentID:   "leader",
 		Kind:      audit.Kind("pulse_tick"),
 		Meta: map[string]any{
-			"trigger":     trigger,
-			"duration_ms": int(dur.Milliseconds()),
-			"tool_calls":  result.toolCalls,
+			"trigger":         trigger,
+			"duration_ms":     int(dur.Milliseconds()),
+			"tool_calls":      result.toolCalls,
+			"chat_session_id": sessionID,
 		},
 	}
 	if err != nil {
@@ -655,11 +663,13 @@ func (p *Pulse) buildContextSnapshot(trigger string, priorLast time.Time) string
 	return b.String()
 }
 
-// invokeClaude runs `claude -p --resume <session>` with the supplied
-// context appended to the system prompt and a short user-side prompt.
-// Returns the final assistant text plus how many tool_use blocks the
-// model emitted (used by the idle-backoff logic).
-func (p *Pulse) invokeClaude(ctx context.Context, sessionID, contextBody string) (tickResult, error) {
+// invokeClaude runs `claude -p` with the supplied context appended to
+// the system prompt and a short user-side prompt. Each invocation is
+// ephemeral — no --resume; the leader's persona comes entirely from
+// the system prompt + leader memory + MCP tool access. Returns the
+// final assistant text plus how many tool_use blocks the model
+// emitted (used by the idle-backoff logic).
+func (p *Pulse) invokeClaude(ctx context.Context, contextBody string) (tickResult, error) {
 	claudePath := p.cfg.ClaudePath
 	if claudePath == "" {
 		path, err := exec.LookPath("claude")
@@ -668,7 +678,7 @@ func (p *Pulse) invokeClaude(ctx context.Context, sessionID, contextBody string)
 		}
 		claudePath = path
 	}
-	args := buildClaudeArgs(sessionID, p.cfg.MCPConfig, contextBody)
+	args := buildClaudeArgs(p.cfg.MCPConfig, contextBody)
 	cmd := exec.CommandContext(ctx, claudePath, args...)
 	cmd.Dir = p.cfg.RepoRoot
 	cmd.Stdin = nil
@@ -693,16 +703,18 @@ func (p *Pulse) invokeClaude(ctx context.Context, sessionID, contextBody string)
 
 // buildClaudeArgs assembles the argv passed to `claude` for one tick.
 //
+// Ticks are ephemeral: no --resume / --session-id. Each invocation
+// starts fresh; the leader's persona + memory ride in via
+// --append-system-prompt.
+//
 // Arg order matters: `--channels <channels...>` is variadic and will
 // swallow any positional argument that follows it (including the
 // trailing prompt). ChannelFlags are placed BEFORE another flag so the
 // next `--…` token terminates the variadic, leaving the prompt at the
-// end intact. Without a prompt, `claude -p --resume` errors with "No
-// deferred tool marker found in the resumed session."
-func buildClaudeArgs(sessionID, mcpConfig, contextBody string) []string {
+// end intact.
+func buildClaudeArgs(mcpConfig, contextBody string) []string {
 	args := []string{
 		"-p",
-		"--resume", sessionID,
 		"--output-format", "stream-json",
 		"--verbose",
 		"--mcp-config", mcpConfig,

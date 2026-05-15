@@ -445,20 +445,25 @@ func TestPulse_Stop_ClearsFlag(t *testing.T) {
 // TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels guards
 // against a regression where `--channels server:teem-channel` (variadic)
 // consumed the trailing prompt arg, leaving claude with no prompt.
-// claude -p --resume <id> then errored with "No deferred tool marker
-// found in the resumed session." Pulse failed every tick.
+// claude -p then errored on the missing prompt. Pulse failed every tick.
 //
 // Invariant: the trailing prompt must be preceded by a `--…` flag (or
 // its single-arg value), never by a value that belongs to a variadic
 // option like --channels.
 func TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels(t *testing.T) {
-	args := buildClaudeArgs("00000000-0000-0000-0000-000000000001", "/tmp/mcp.json", "ctx")
+	args := buildClaudeArgs("/tmp/mcp.json", "ctx")
 	if len(args) == 0 {
 		t.Fatal("empty args")
 	}
 	prompt := args[len(args)-1]
 	if prompt != "Take your next turn." {
 		t.Errorf("last arg should be the prompt, got %q", prompt)
+	}
+	// Each tick is ephemeral — no session resumption.
+	for i, a := range args {
+		if a == "--resume" || a == "--session-id" {
+			t.Errorf("buildClaudeArgs must not pass %q (each tick is ephemeral); args[%d:]=%v", a, i, args[i:])
+		}
 	}
 	// Walk the args; locate --channels (if present) and assert there's
 	// at least one non-channel-token --flag between it and the prompt.

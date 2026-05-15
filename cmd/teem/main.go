@@ -104,7 +104,7 @@ func runChat(args []string) error {
 	teamPath := fs.String("team", "", "team YAML (default: ./teem.yaml or ./config/team.example.yaml)")
 	useTailnet := fs.Bool("tailnet", true, "join the tailnet (used only when auto-starting the daemon)")
 	listenAddr := fs.String("listen", ":7777", "daemon listen address (used only when auto-starting)")
-	newSession := fs.Bool("new-session", false, "discard the saved leader session and start a fresh one")
+	noRemoteControl := fs.Bool("no-remote-control", false, "do not pass --remote-control to claude (opt out of Remote Control for this chat)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -176,19 +176,14 @@ func runChat(args []string) error {
 	quietEnsurePlugin()
 	showUnreadNotes(t.ID)
 
-	// 6. Resolve or create the leader's persistent Claude Code session.
-	//    First chat for a team creates the session id (--session-id);
-	//    every subsequent chat resumes the same conversation
-	//    (--resume <uuid>). Pulse will use the same id in phase 3.
-	if *newSession {
-		if err := os.Remove(leaderSessionPath(t.ID)); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("clear leader session: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "[teem] --new-session: cleared saved leader session for %q\n", t.Name)
-	}
-	sessFlags, err := claudeSessionFlags(t.ID)
-	if err != nil {
-		return fmt.Errorf("leader session: %w", err)
+	// 6. Mark that the operator has engaged with this team. Each
+	//    `teem chat` is ephemeral (no --resume / --session-id) — the
+	//    leader's persona rides entirely in the system prompt + leader
+	//    memory + MCP tools. The on-disk leader-session record is kept
+	//    purely as pulse's "operator has opted in" gate; the UUID is
+	//    reused only for audit attribution, never for chat resumption.
+	if err := ensureLeaderSessionMarker(t.ID); err != nil {
+		return fmt.Errorf("leader session marker: %w", err)
 	}
 
 	// 7. Hand off to Claude Code.
@@ -196,11 +191,15 @@ func runChat(args []string) error {
 	if err != nil {
 		return fmt.Errorf("claude CLI not found on PATH: %w (install Claude Code: https://docs.claude.com/en/docs/claude-code)", err)
 	}
-	argv := append([]string{"claude"}, sessFlags...)
-	argv = append(argv,
+	argv := []string{"claude",
 		"--mcp-config", mcpCfgPath,
 		"--append-system-prompt", brief,
-	)
+	}
+	if !*noRemoteControl {
+		// --remote-control [name]: optional name. Following token is
+		// another --flag, so claude won't interpret it as the name.
+		argv = append(argv, "--remote-control")
+	}
 	argv = append(argv, claudeflags.ChannelFlags()...)
 	fmt.Fprintf(os.Stderr, "[teem] team %q → %s — launching claude\n", t.Name, regResp.MCPURL)
 	return syscall.Exec(claudePath, argv, os.Environ())
@@ -235,66 +234,30 @@ func assembleLeaderBrief(base, memDir string) string {
 	return b.String()
 }
 
-// claudeSessionFlags returns the claude CLI args needed to resume the
-// team's persistent session, creating it on first invocation. Returns
-// either [--resume <uuid>] or [--session-id <uuid>] depending on
-// whether a session record already exists. The state file is written
-// before the flag is returned so a successful first chat persists the
-// id even if the user Ctrl-Cs out before claude finishes.
-//
-// Edge case: we may have saved a UUID but claude never actually
-// materialised the conversation (first chat exited before claude
-// flushed its session JSONL). In that case --resume fails with
-// "No conversation found with session ID". Detect that by probing
-// claude's session storage and fall back to --session-id with the same
-// UUID so the next chat realises it for real.
-func claudeSessionFlags(teamID string) ([]string, error) {
-	sess, ok, err := loadLeaderSession(teamID)
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		if claudeSessionExists(sess.SessionID) {
-			return []string{"--resume", sess.SessionID}, nil
-		}
-		fmt.Fprintf(os.Stderr, "[teem] saved leader session %s not present in ~/.claude — recreating it under the same id\n", sess.SessionID)
-		return []string{"--session-id", sess.SessionID}, nil
+// ensureLeaderSessionMarker creates the per-team leader-session record
+// if missing. The record's only remaining purpose is to gate Pulse:
+// pulse stays quiet until the operator has run `teem chat` at least
+// once. Each chat (and each pulse tick) is ephemeral — neither
+// --resume nor --session-id is passed to claude — so the saved UUID
+// is used only as an attribution token in audit events.
+func ensureLeaderSessionMarker(teamID string) error {
+	if _, ok, err := loadLeaderSession(teamID); err != nil {
+		return err
+	} else if ok {
+		return nil
 	}
 	uuid, err := newSessionUUID()
 	if err != nil {
-		return nil, fmt.Errorf("generate session uuid: %w", err)
+		return fmt.Errorf("generate session uuid: %w", err)
 	}
 	if err := saveLeaderSession(teamID, leaderSession{
 		SessionID: uuid,
 		CreatedAt: time.Now().UTC(),
 	}); err != nil {
-		return nil, err
+		return err
 	}
-	fmt.Fprintf(os.Stderr, "[teem] new leader session %s for team %q (id %s)\n", uuid, teamID, teamID)
-	return []string{"--session-id", uuid}, nil
-}
-
-// claudeSessionExists checks whether Claude Code has a JSONL on disk
-// for the given session id, scoped to the current working directory's
-// project folder. Claude stores transcripts at
-// ~/.claude/projects/<cwd-with-slashes-as-dashes>/<uuid>.jsonl.
-// A missing file means --resume will fail; the caller should downgrade
-// to --session-id with the same uuid so claude creates the conversation.
-func claudeSessionExists(uuid string) bool {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return false
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return false
-	}
-	// Claude's path encoding: replace every `/` with `-`. Leading slash
-	// becomes a leading dash. No other transformations.
-	encoded := strings.ReplaceAll(cwd, "/", "-")
-	path := filepath.Join(home, ".claude", "projects", encoded, uuid+".jsonl")
-	_, err = os.Stat(path)
-	return err == nil
+	fmt.Fprintf(os.Stderr, "[teem] new leader-session marker %s for team %q\n", uuid, teamID)
+	return nil
 }
 
 // ensureDaemon starts the daemon detached if missing and waits for
