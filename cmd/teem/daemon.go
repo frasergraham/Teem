@@ -682,6 +682,8 @@ func (d *daemon) handler() http.Handler {
 			d.handleTelegramWebhook(w, r)
 		case strings.HasPrefix(path, "/control/teams/"):
 			d.requireAuth(w, r, d.handleControlTeamsItem)
+		case strings.HasPrefix(path, "/api/teams/"):
+			d.handleAPITeamRoute(w, r)
 		case strings.HasPrefix(path, "/teams/"):
 			d.handleTeamRoute(w, r)
 		case path == "/" || path == "/ui" || path == "/ui/":
@@ -2549,6 +2551,12 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		d.handleTranscripts(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
 	case suffix == "/channel-events" || strings.HasPrefix(suffix, "/channel-events?"):
 		d.handleChannelEvents(w, r, rt)
+	case suffix == "/v2" || suffix == "/v2/" || strings.HasPrefix(suffix, "/v2/"):
+		// Phase-1 SPA mount. The SSR page at /teams/<id> is unchanged;
+		// /v2 serves the React bundle off the embedded ui/dist FS with a
+		// history fallback so deep links resolve to index.html.
+		rest := strings.TrimPrefix(suffix, "/v2")
+		serveSPA(w, r, rest)
 	default:
 		// SSR jobs pages — unauth like the dashboard (tailnet boundary).
 		if agentID, ok := resolveAgentJobsRoute(suffix); ok {

@@ -22,6 +22,12 @@ archetype builder, or edit the resulting `teem.yaml` directly afterwards.
 
 ## Quickstart
 
+> **Building from source.** The team-detail SPA at `/teams/<id>/v2` is
+> embedded via `//go:embed` from `cmd/teem/ui/dist`, so a clean checkout
+> needs the Vite bundle built before `go build` will compile. Run
+> `make ui` once (requires Node 20+ and npm). `make build` does both.
+> See `cmd/teem/ui/README.md` for the SPA dev workflow.
+
 ```sh
 export ANTHROPIC_API_KEY=...           # optional; enables archmem role digests
 export TS_AUTHKEY=tskey-...            # tailnet auth key (or skip; tsnet prints a login URL)
