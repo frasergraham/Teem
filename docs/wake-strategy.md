@@ -22,7 +22,7 @@ This document specifies the wake-path layers, how the daemon detects whether cha
 | Layer | Path | Latency | Needs operator? | Needs channels? |
 |-------|------|---------|-----------------|-----------------|
 | Channels | `channelbus.Publish` → `teem-channel` shim → Claude Code `<channel>` block → leader session | ~hundreds of ms | Yes (chat TUI connected) | Yes |
-| Pulse audit-nudge | Audit event → `Pulse.NudgeFromAudit` → `DebounceWindow` (default 500ms) → `Pulse.Tick(ctx, "event:<kind>@<agent>")` → `claude -p --resume` subprocess | ~500ms + claude cold start | No | No |
+| Pulse audit-nudge | Audit event → `Pulse.NudgeFromAudit` → `DebounceWindow` (default 500ms) → `Pulse.Tick(ctx, "event:<kind>@<agent>")` → `claude -p` subprocess | ~500ms + claude cold start | No | No |
 | Pulse timer | `Pulse.run` → `effectiveInterval` (default 5m, idle backoff doubles it) → `Pulse.Tick(ctx, "timer")` | up to `Interval` | No | No |
 | Manual ping | Operator clicks dashboard button / runs CLI → POST to daemon → `Pulse.Tick(ctx, "manual:<who>")` | sub-second | Yes (the operator) | No |
 

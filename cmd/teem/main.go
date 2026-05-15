@@ -78,7 +78,7 @@ Usage:
   teem start   [--foreground] [--listen :7777]         start the orchestrator daemon (headless by default)
   teem stop                                            stop the daemon
   teem status                                          report daemon state + registered teams
-  teem chat    [--team teem.yaml] [--new-session]      register the current team with the daemon, launch Claude
+  teem chat    [--team teem.yaml] [--no-remote-control] register the current team with the daemon, launch Claude
   teem audit   [--agent ID] [--since RFC3339] [--limit 50] [--follow]
   teem pulse   <start|stop|pause|resume|tick|status> [--team t] [--interval 5m]
   teem agent   <list|show|update> [<archetype>] [--prompt|--memory] [--team t]

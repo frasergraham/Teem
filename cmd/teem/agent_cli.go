@@ -285,7 +285,7 @@ func editPromptOverride(b *prompts.Builder, role string) error {
 		return fmt.Errorf("write override: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "[teem] wrote prompt override for %s (%s)\n", role, path)
-	fmt.Fprintln(os.Stderr, "[teem] note: takes effect on next 'teem chat --new-session' for the leader, or next spawn for workers")
+	fmt.Fprintln(os.Stderr, "[teem] note: takes effect on next 'teem chat' for the leader, or next spawn for workers")
 	return nil
 }
 

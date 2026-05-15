@@ -84,8 +84,7 @@ That's it. Under the hood `teem chat`:
 
 1. Ensures the daemon is running (auto-starts if missing).
 2. Registers your team with the daemon if it isn't already.
-3. Looks up the team's persistent Claude session id.
-4. Execs `claude --resume <session-id> --mcp-config ... --append-system-prompt "<team brief>"`.
+3. Execs `claude --mcp-config ... --append-system-prompt "<team brief>"`.
 
 You're now in Claude Code's TUI, talking to the leader. The orchestration
 skill is loaded; the leader has these MCP tools available:
@@ -140,8 +139,8 @@ a turn. Each tick:
 
 1. Builds a context snapshot — recent audit events, open tasks,
    running agents.
-2. Invokes `claude -p --resume <same session>` with that snapshot
-   in `--append-system-prompt` and "Take your next turn." as input.
+2. Invokes `claude -p` with that snapshot in `--append-system-prompt`
+   and "Take your next turn." as input.
 3. Captures the assistant turn and any tool calls in the audit log
    as a `pulse_tick` event.
 
@@ -294,13 +293,11 @@ restarting the daemon. Same data is available to the leader at runtime
 via the `read_prompt` / `append_prompt` MCP tools.
 
 Operator prompt overrides assemble into the leader's brief at
-chat-start. A running leader session retains its existing prompt until
-you exit and re-launch with `teem chat --new-session`; subsequent
-Pulse ticks and plain `teem chat` invocations resume the prior session
-and reuse the prompt that was active when that session was first
-created. Worker prompts behave the same way per-spawn — an in-flight
-worker keeps the prompt it was given at spawn; the next spawn picks up
-the new override.
+chat-start. Every `teem chat` and every Pulse tick is ephemeral and
+picks up the latest prompt and memory, so any change takes effect on
+the next pulse tick or the next `teem chat`. Worker prompts behave
+the same way per-spawn — an in-flight worker keeps the prompt it was
+given at spawn; the next spawn picks up the new override.
 
 ## Troubleshooting
 
