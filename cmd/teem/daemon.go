@@ -2257,6 +2257,10 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 			d.handleTaskActionForm(w, r, rt, taskID, action)
 			return
 		}
+		if taskID, action, ok := resolveDecisionActionRoute(suffix); ok {
+			d.handleDecisionActionForm(w, r, rt, taskID, action)
+			return
+		}
 		if taskID, ok := resolveTaskFlowRoute(suffix); ok {
 			d.renderTaskFlow(w, r, rt, taskID)
 			return

@@ -198,6 +198,42 @@ type dashboardTeam struct {
 	// status-panel hero: today's leader-status text, or a quiet-day
 	// placeholder when the leader hasn't posted one.
 	StatusHeadline string
+	// Decisions is the unified "operator action needed" panel mixing
+	// awaiting-approval tasks, agent questions (record_decision with
+	// severity=question), and open blockers (record_blocker against a
+	// task still at stage=blocked). Sorted newest-first by timestamp.
+	Decisions []decisionRow
+}
+
+// decisionRow is one row in the unified Decisions panel. TypeClass is
+// the CSS modifier the template appends to .decision-stripe and
+// .decision-row ("approval" / "question" / "blocker"); Stripe is the
+// hex colour the inline style="background:..." uses. Approval is only
+// set for Type==APPROVAL — it carries the rich evidence/plan-artifact
+// payload so the approval card preserves its existing rendering.
+type decisionRow struct {
+	Type      string
+	TypeClass string
+	TaskID    string
+	Title     string
+	Summary   string
+	Age       string
+	URL       string
+	Stripe    string
+	Timestamp time.Time
+	Actions   []decisionAction
+	Approval  *awaitingApprovalTask
+}
+
+// decisionAction is one button rendered in a decision row's action bar.
+// Primary marks the row's headline action (rendered with the row's
+// stripe colour). Method is "POST" or "GET" — GET is used for the
+// "view task" pill which links to the deep page.
+type decisionAction struct {
+	Label   string
+	Method  string
+	URL     string
+	Primary bool
 }
 
 // workerRow is one entry in the active-workers manifest. Persona is the
@@ -791,6 +827,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	out.Hero = buildTeamHero(rt, &out)
 	out.Workers = buildWorkers(&out)
 	out.StatusHeadline = buildStatusHeadline(&out)
+	out.Decisions = buildDecisions(rt, &out)
 
 	// Active teem/* branches in the team's working tree. One git
 	// invocation per render is fine at v1 scale; if branches counts
@@ -853,6 +890,182 @@ var stageBarColors = map[plan.Stage]string{
 	plan.StageVerified:         "#22c55e",
 	plan.StageBlocked:          "#ef4444",
 	plan.StageShelved:          "#cbd5e1",
+}
+
+// decisionStripeColors maps each decision type to its inline-style
+// stripe colour, matching the bridge-console palette
+// (docs/dashboard-redesign.html): APPROVAL=amber, QUESTION=azure,
+// BLOCKER=plum. Kept here so the template can use a single
+// style="background:..." attribute per row.
+var decisionStripeColors = map[string]string{
+	"approval": "#ffb347",
+	"question": "#7dd3fc",
+	"blocker":  "#a78bfa",
+}
+
+// decisionWindowQuestion is how far back the dashboard looks for
+// agent-recorded questions (decision_note with severity=question). 24h
+// matches the spec — long enough that a question raised overnight
+// doesn't fall off before the operator wakes up, short enough that
+// week-old conversations don't clutter the panel.
+const decisionWindowQuestion = 24 * time.Hour
+
+// decisionWindowBlocker is the lookback for blocker_note events. Wider
+// than the question window because an unresolved blocker can sit for
+// days; the panel filters out blockers whose task has already left
+// stage=blocked, so the longer window is safe.
+const decisionWindowBlocker = 7 * 24 * time.Hour
+
+// buildDecisions aggregates the three decision sources into a single
+// newest-first slice for the unified Decisions panel:
+//
+//   - APPROVAL: tasks currently at stage=awaiting_approval (carries the
+//     rich evidence/plan-artifact card so the existing operator flow
+//     keeps working). Timestamp = task.StageEnteredAt.
+//   - QUESTION: most-recent decision_note with severity=question per
+//     task in the last 24h. Timestamp = event.Timestamp.
+//   - BLOCKER: most-recent blocker_note per task whose task is still
+//     at stage=blocked. Timestamp = event.Timestamp.
+//
+// Returns nil when no decisions are surfaced; the template renders
+// "All clear." in that case.
+func buildDecisions(rt *registeredTeam, team *dashboardTeam) []decisionRow {
+	out := make([]decisionRow, 0, len(team.AwaitingApproval))
+	for i := range team.AwaitingApproval {
+		a := &team.AwaitingApproval[i]
+		row := decisionRow{
+			Type:      "APPROVAL",
+			TypeClass: "approval",
+			TaskID:    a.ID,
+			Title:     a.Title,
+			Age:       a.StageAgo,
+			URL:       a.URL,
+			Stripe:    decisionStripeColors["approval"],
+			Approval:  a,
+			Actions: []decisionAction{
+				{Label: "APPROVE", Method: "POST", URL: a.ApproveURL, Primary: true},
+				{Label: "REJECT", Method: "POST", URL: a.RejectURL},
+				{Label: "COMMENT", Method: "POST", URL: a.CommentURL},
+			},
+		}
+		// StageEnteredAt drives sort order across types; pull it back
+		// from the task to keep the ordering correct.
+		if rt.plan != nil {
+			if t, ok := rt.plan.Get(a.ID); ok {
+				row.Timestamp = t.StageEnteredAt
+			}
+		}
+		out = append(out, row)
+	}
+	if rt.auditSink == nil || rt.plan == nil {
+		sortDecisions(out)
+		return out
+	}
+	// One audit scan covers both question + blocker windows; the wider
+	// window is the blocker one.
+	events, err := rt.auditSink.Query("", time.Now().Add(-decisionWindowBlocker), 5000)
+	if err != nil {
+		sortDecisions(out)
+		return out
+	}
+	questionCutoff := time.Now().Add(-decisionWindowQuestion)
+	seenQuestion := map[string]bool{}
+	seenBlocker := map[string]bool{}
+	// Iterate newest-first so the seen-map keeps the latest per task.
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		switch e.Kind {
+		case audit.KindDecisionNote:
+			if e.Timestamp.Before(questionCutoff) {
+				continue
+			}
+			sev, _ := e.Meta["severity"].(string)
+			if sev != "question" {
+				continue
+			}
+			taskID, _ := e.Meta["task_id"].(string)
+			if taskID == "" || seenQuestion[taskID] {
+				continue
+			}
+			seenQuestion[taskID] = true
+			out = append(out, buildQuestionRow(rt.team.ID, taskID, e, rt.plan))
+		case audit.KindBlockerNote:
+			taskID, _ := e.Meta["task_id"].(string)
+			if taskID == "" || seenBlocker[taskID] {
+				continue
+			}
+			// Skip blockers the operator has already cleared.
+			if t, ok := rt.plan.Get(taskID); ok {
+				if t.Stage != plan.StageBlocked {
+					seenBlocker[taskID] = true
+					continue
+				}
+			} else {
+				continue
+			}
+			seenBlocker[taskID] = true
+			out = append(out, buildBlockerRow(rt.team.ID, taskID, e, rt.plan))
+		}
+	}
+	sortDecisions(out)
+	return out
+}
+
+func sortDecisions(rows []decisionRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return rows[i].Timestamp.After(rows[j].Timestamp)
+	})
+}
+
+func buildQuestionRow(teamID, taskID string, e audit.Event, p *plan.Plan) decisionRow {
+	title := taskID
+	if p != nil {
+		if t, ok := p.Get(taskID); ok && t.Title != "" {
+			title = t.Title
+		}
+	}
+	base := fmt.Sprintf("/teams/%s/tasks/%s", teamID, taskID)
+	row := decisionRow{
+		Type:      "QUESTION",
+		TypeClass: "question",
+		TaskID:    taskID,
+		Title:     title,
+		Summary:   e.Message,
+		Age:       agoShort(e.Timestamp),
+		URL:       base,
+		Stripe:    decisionStripeColors["question"],
+		Timestamp: e.Timestamp,
+		Actions: []decisionAction{
+			{Label: "REPLY", Method: "POST", URL: fmt.Sprintf("/teams/%s/decisions/%s/reply", teamID, taskID), Primary: true},
+		},
+	}
+	return row
+}
+
+func buildBlockerRow(teamID, taskID string, e audit.Event, p *plan.Plan) decisionRow {
+	title := taskID
+	if p != nil {
+		if t, ok := p.Get(taskID); ok && t.Title != "" {
+			title = t.Title
+		}
+	}
+	base := fmt.Sprintf("/teams/%s/tasks/%s", teamID, taskID)
+	row := decisionRow{
+		Type:      "BLOCKER",
+		TypeClass: "blocker",
+		TaskID:    taskID,
+		Title:     title,
+		Summary:   e.Message,
+		Age:       agoShort(e.Timestamp),
+		URL:       base,
+		Stripe:    decisionStripeColors["blocker"],
+		Timestamp: e.Timestamp,
+		Actions: []decisionAction{
+			{Label: "UNBLOCK", Method: "POST", URL: fmt.Sprintf("/teams/%s/decisions/%s/unblock", teamID, taskID), Primary: true},
+			{Label: "COMMENT", Method: "POST", URL: fmt.Sprintf("/teams/%s/decisions/%s/comment", teamID, taskID)},
+		},
+	}
+	return row
 }
 
 // buildTeamHero computes the hero band shown at the top of the

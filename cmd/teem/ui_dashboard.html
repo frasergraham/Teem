@@ -933,6 +933,166 @@
     }
     .worker-row .worker-doing { grid-column: 1 / -1; white-space: normal; }
   }
+
+  /* --- Decisions panel ---------------------------------------------
+     Unified "operator action needed" surface: approval cards, agent
+     questions, open blockers. Sorted newest-first. 4px coloured stripe
+     down the left edge cues the type (amber/azure/plum). Empty state
+     is a centered "All clear." placeholder. */
+  body.team-detail-page .decisions-section {
+    background: #11151c;
+    border: 1px solid #1f2632;
+    border-radius: 4px;
+    padding: 16px 20px 14px;
+    margin: 0 0 14px 0;
+    position: relative;
+  }
+  body.team-detail-page .decisions-section::before,
+  body.team-detail-page .decisions-section::after {
+    content: "";
+    position: absolute;
+    width: 8px; height: 8px;
+    pointer-events: none;
+    border-color: #ffb347;
+  }
+  body.team-detail-page .decisions-section::before {
+    top: -1px; left: -1px;
+    border-left: 1px solid; border-top: 1px solid;
+  }
+  body.team-detail-page .decisions-section::after {
+    bottom: -1px; right: -1px;
+    border-right: 1px solid; border-bottom: 1px solid;
+  }
+  body.team-detail-page .decisions-section h3.panel-label {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #6a7280;
+    margin: 0 0 10px 0;
+    display: flex; align-items: center; gap: 10px;
+  }
+  body.team-detail-page .decisions-section h3.panel-label::after {
+    content: "";
+    flex: 1; height: 1px;
+    background: linear-gradient(to right, #1f2632, transparent);
+  }
+  body.team-detail-page .decisions-section h3.panel-label .count { color: #ffb347; font-weight: 600; }
+  .decisions-empty {
+    color: #6a7280; font-style: italic;
+    font-size: 14px; padding: 14px 4px;
+    text-align: center;
+  }
+  .decision-row {
+    display: flex;
+    gap: 14px;
+    align-items: stretch;
+    padding: 12px 0 12px 0;
+    border-top: 1px dashed #181d26;
+  }
+  .decision-row:first-of-type { border-top: none; padding-top: 4px; }
+  .decision-stripe {
+    flex: 0 0 4px;
+    border-radius: 2px;
+    align-self: stretch;
+  }
+  .decision-body { flex: 1; min-width: 0; }
+  .decision-head {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .decision-type {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    padding: 2px 7px;
+    border-radius: 2px;
+    border: 1px solid currentColor;
+    line-height: 1.4;
+    color: #9aa1ad;
+  }
+  .decision-type.approval { color: #ffb347; }
+  .decision-type.question { color: #7dd3fc; }
+  .decision-type.blocker  { color: #a78bfa; }
+  .decision-title {
+    font-family: 'Fraunces', Georgia, serif;
+    font-weight: 500;
+    font-size: 17px;
+    color: #e8e6df;
+    letter-spacing: -0.003em;
+  }
+  .decision-title a { color: inherit; text-decoration: none; }
+  .decision-title a:hover { text-decoration: underline; }
+  .decision-id {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    padding: 1px 6px;
+    border: 1px solid #1f2632;
+    border-radius: 2px;
+    color: #9aa1ad;
+    text-decoration: none;
+  }
+  .decision-id:hover { color: #e8e6df; border-color: #2a3140; }
+  .decision-age {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    color: #6a7280;
+    margin-left: auto;
+    white-space: nowrap;
+  }
+  .decision-summary {
+    color: #9aa1ad;
+    font-size: 13px;
+    margin: 6px 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .decision-actions {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    align-items: stretch; margin-top: 8px;
+    border-top: 1px dashed #181d26;
+    padding-top: 8px;
+  }
+  .decision-actions input[type=text] {
+    flex: 1; min-width: 200px;
+    padding: 6px 10px;
+    border: 1px solid #1f2632;
+    border-radius: 4px;
+    background: #0a0d12;
+    color: #e8e6df;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 12px;
+  }
+  .decision-actions input[type=text]::placeholder { color: #6a7280; }
+  button.decision-action {
+    padding: 6px 14px;
+    border-radius: 4px;
+    border: 1px solid #2a3140;
+    background: transparent;
+    color: #e8e6df;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+  }
+  button.decision-action:hover { border-color: #4a5160; }
+  button.decision-action.primary.action-approval { background: #ffb347; color: #0a0d12; border-color: #ffb347; }
+  button.decision-action.primary.action-question { background: #7dd3fc; color: #0a0d12; border-color: #7dd3fc; }
+  button.decision-action.primary.action-blocker  { background: #a78bfa; color: #0a0d12; border-color: #a78bfa; }
+  /* Approval-specific colour shorthand for REJECT (red) so the
+     destructive action stands out. */
+  button.decision-action.action-approval[formaction$="/reject"] {
+    border-color: #ef4444; color: #ef4444;
+  }
+  button.decision-action.action-approval[formaction$="/reject"]:hover {
+    background: #ef4444; color: #0a0d12;
+  }
+
+  @media (max-width: 720px) {
+    .decision-actions { flex-direction: column; }
+    .decision-actions input[type=text] { width: 100%; }
+  }
 </style>
 {{ end }}
 
@@ -1043,61 +1203,73 @@
 
       {{ if .Flash }}<div class="flash">{{ .Flash }}</div>{{ end }}
 
-      {{ if .AwaitingApproval }}
-      <div class="approval-section">
-        <h3>Awaiting approval — operator action needed</h3>
-        {{ range .AwaitingApproval }}
-          <div class="approval-card">
-            <div class="head">
-              <span class="title"><a href="{{ .URL }}">{{ .Title }}</a></span>
-              <span class="id">{{ .ID }}</span>
-              {{ if .StageAgo }}<span class="when">awaiting {{ .StageAgo }}</span>{{ end }}
-            </div>
-            {{ if .EvidenceRows }}
-              <div class="plan-artifact">
-                {{ if .HasPlanArtifact }}<div class="header">Plan artifact</div>{{ end }}
-                {{ $taskID := .ID }}
-                {{ range .EvidenceRows }}
-                  {{ if .PlanShaped }}
-                    {{ range .PlanFiles }}
-                      {{ if .IsMarkdown }}
-                        <details class="plan-artifact-doc" id="details-task-{{ $taskID }}-plan-{{ .PathSlug }}">
-                          <summary>{{ .Path }}{{ if .Truncated }} <span class="muted">(truncated)</span>{{ end }}</summary>
-                          {{ if .Rendered }}
-                            <div class="plan-artifact-rendered markdown-body">{{ .Rendered }}</div>
-                          {{ else }}
-                            <div class="plan-artifact-rendered markdown-body"><em class="muted">(could not render this file)</em></div>
+      <section class="decisions-section" aria-label="decisions awaiting operator">
+        <h3 class="panel-label">Decisions <span class="count">{{ len .Decisions }}</span></h3>
+        {{ if not .Decisions }}
+          <div class="decisions-empty">All clear.</div>
+        {{ else }}
+          {{ range .Decisions }}
+            <div class="decision-row decision-row-{{ .TypeClass }}">
+              <div class="decision-stripe {{ .TypeClass }}" style="background:{{ .Stripe }}" aria-hidden="true"></div>
+              <div class="decision-body">
+                <div class="decision-head">
+                  <span class="decision-type {{ .TypeClass }}">{{ .Type }}</span>
+                  <span class="decision-title">
+                    {{ if .URL }}<a href="{{ .URL }}">{{ .Title }}</a>{{ else }}{{ .Title }}{{ end }}
+                  </span>
+                  <a class="decision-id" href="{{ .URL }}">{{ .TaskID }}</a>
+                  {{ if .Age }}<span class="decision-age">{{ .Age }}</span>{{ end }}
+                </div>
+                {{ with .Approval }}
+                  {{ if .EvidenceRows }}
+                    <div class="plan-artifact">
+                      {{ if .HasPlanArtifact }}<div class="header">Plan artifact</div>{{ end }}
+                      {{ $taskID := .ID }}
+                      {{ range .EvidenceRows }}
+                        {{ if .PlanShaped }}
+                          {{ range .PlanFiles }}
+                            {{ if .IsMarkdown }}
+                              <details class="plan-artifact-doc" id="details-task-{{ $taskID }}-plan-{{ .PathSlug }}">
+                                <summary>{{ .Path }}{{ if .Truncated }} <span class="muted">(truncated)</span>{{ end }}</summary>
+                                {{ if .Rendered }}
+                                  <div class="plan-artifact-rendered markdown-body">{{ .Rendered }}</div>
+                                {{ else }}
+                                  <div class="plan-artifact-rendered markdown-body"><em class="muted">(could not render this file)</em></div>
+                                {{ end }}
+                              </details>
+                            {{ else }}
+                              <ul class="files"><li>{{ .Path }}</li></ul>
+                            {{ end }}
                           {{ end }}
-                        </details>
-                      {{ else }}
-                        <ul class="files"><li>{{ .Path }}</li></ul>
+                        {{ end }}
+                        <div class="evidence-row">
+                          {{ if .AgentID }}Worker: {{ .AgentID }} · {{ end }}
+                          {{ if .BranchURL }}branch: <a href="{{ .BranchURL }}">{{ .BranchRef }}</a> · {{ else if .BranchRef }}branch: {{ .BranchRef }} · {{ end }}
+                          job: <a href="{{ .JobURL }}">{{ .JobID }}</a>
+                        </div>
                       {{ end }}
-                    {{ end }}
+                    </div>
                   {{ end }}
-                  <div class="evidence-row">
-                    {{ if .AgentID }}Worker: {{ .AgentID }} · {{ end }}
-                    {{ if .BranchURL }}branch: <a href="{{ .BranchURL }}">{{ .BranchRef }}</a> · {{ else if .BranchRef }}branch: {{ .BranchRef }} · {{ end }}
-                    job: <a href="{{ .JobURL }}">{{ .JobID }}</a>
-                  </div>
+                  {{ if .Notes }}
+                    <details class="brief-deemph" id="details-task-{{ .ID }}-notes">
+                      <summary>Brief from leader (details collapsed)</summary>
+                      <div class="brief-body">{{ .Notes }}</div>
+                    </details>
+                  {{ end }}
                 {{ end }}
+                {{ if .Summary }}<div class="decision-summary">{{ .Summary }}</div>{{ end }}
+                {{ $typeClass := .TypeClass }}
+                <form class="decision-actions" method="post" action="{{ (index .Actions 0).URL }}">
+                  <input type="text" name="comment" placeholder="optional comment">
+                  {{ range .Actions }}
+                    <button type="submit" formaction="{{ .URL }}" class="decision-action{{ if .Primary }} primary{{ end }} action-{{ $typeClass }}">{{ .Label }}</button>
+                  {{ end }}
+                </form>
               </div>
-            {{ end }}
-            {{ if .Notes }}
-              <details class="brief-deemph" id="details-task-{{ .ID }}-notes">
-                <summary>Brief from leader (details collapsed)</summary>
-                <div class="brief-body">{{ .Notes }}</div>
-              </details>
-            {{ end }}
-            <form class="actions" method="post" action="{{ .ApproveURL }}">
-              <input type="text" name="comment" placeholder="optional comment / required reason for reject">
-              <button class="approve" type="submit" formaction="{{ .ApproveURL }}">APPROVE</button>
-              <button class="reject"  type="submit" formaction="{{ .RejectURL }}">REJECT</button>
-              <button class="comment" type="submit" formaction="{{ .CommentURL }}">COMMENT</button>
-            </form>
-          </div>
+            </div>
+          {{ end }}
         {{ end }}
-      </div>
-      {{ end }}
+      </section>
 
       <div class="leader-card">
         <h3>Status board</h3>

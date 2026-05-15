@@ -262,7 +262,8 @@ func TestDashboard_RendersAwaitingApprovalSection(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, want := range []string{
-		"Awaiting approval",
+		"Decisions",
+		"APPROVAL",
 		"Review the PM doc",
 		"APPROVE",
 		"REJECT",

@@ -952,7 +952,7 @@ func TestTeamPage_WorkersPanel_PositionedAfterStatus(t *testing.T) {
 
 	statusIdx := strings.Index(body, `class="hero status-panel"`)
 	workersIdx := strings.Index(body, `class="workers-panel"`)
-	approvalIdx := strings.Index(body, `class="approval-section"`)
+	approvalIdx := strings.Index(body, `class="decisions-section"`)
 	if statusIdx < 0 {
 		t.Fatalf("status-panel section missing")
 	}
@@ -960,13 +960,13 @@ func TestTeamPage_WorkersPanel_PositionedAfterStatus(t *testing.T) {
 		t.Fatalf("workers-panel section missing")
 	}
 	if approvalIdx < 0 {
-		t.Fatalf("approval-section missing despite awaiting-approval task being seeded")
+		t.Fatalf("decisions-section missing despite awaiting-approval task being seeded")
 	}
 	if workersIdx <= statusIdx {
 		t.Errorf("workers-panel at %d should come AFTER status-panel at %d", workersIdx, statusIdx)
 	}
 	if workersIdx >= approvalIdx {
-		t.Errorf("workers-panel at %d should come BEFORE approval-section at %d", workersIdx, approvalIdx)
+		t.Errorf("workers-panel at %d should come BEFORE decisions-section at %d", workersIdx, approvalIdx)
 	}
 }
 
@@ -1060,6 +1060,263 @@ func TestTeamDetail_HeroEmptyDay(t *testing.T) {
 	for _, role := range []string{"worker", "reviewer"} {
 		if !strings.Contains(body, role) {
 			t.Errorf("chip for archetype %q missing from empty-day hero", role)
+		}
+	}
+}
+
+// --- Decisions panel tests (t-40aae1ad) ---
+
+// putTaskInBlocked moves a fresh task into stage=blocked via the
+// plan store so blocker-row tests can render against a real task.
+func putTaskInBlocked(t *testing.T, rt *registeredTeam, title string) plan.Task {
+	t.Helper()
+	task, err := rt.plan.AddTask(plan.NewTaskInput{Title: title})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := rt.plan.UpdateTask(task.ID, plan.UpdateInput{
+		Stage:  plan.StageBlocked,
+		Status: plan.StatusBlocked,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated
+}
+
+func TestDecisionsList_AwaitingApproval(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Sign off on plan"})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`class="decisions-section"`,
+		`class="decision-stripe approval"`,
+		`background:#ffb347`,
+		`class="decision-type approval">APPROVAL`,
+		`APPROVE`,
+		`REJECT`,
+		`COMMENT`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
+func TestDecisionsList_DecisionWithQuestionSeverity(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "What pattern should we use?"})
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "worker-uma",
+		Kind:      audit.KindDecisionNote,
+		Message:   "Should we use sync.Map or a regular map+mutex here?",
+		Meta:      map[string]any{"task_id": task.ID, "severity": "question"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`class="decision-stripe question"`,
+		`background:#7dd3fc`,
+		`class="decision-type question">QUESTION`,
+		`Should we use sync.Map`,
+		`REPLY`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+	// Info-severity decision notes must NOT show up as a QUESTION row.
+	infoTask, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Recorded decision"})
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "worker-uma",
+		Kind:      audit.KindDecisionNote,
+		Message:   "Went with sync.Map after benchmarking.",
+		Meta:      map[string]any{"task_id": infoTask.ID, "severity": "info"},
+	})
+	w2 := httptest.NewRecorder()
+	d.handler().ServeHTTP(w2, req)
+	if strings.Contains(decisionsSection(t, w2.Body.String()), "Went with sync.Map after benchmarking") {
+		t.Errorf("info-severity decision should not appear in decisions panel")
+	}
+}
+
+// decisionsSection slices the rendered HTML down to the
+// .decisions-section block so panel-only assertions (e.g. "this text
+// must NOT appear here") aren't fooled by matches in the recent-
+// activity audit stream lower on the page.
+func decisionsSection(t *testing.T, body string) string {
+	t.Helper()
+	start := strings.Index(body, `class="decisions-section"`)
+	if start < 0 {
+		return ""
+	}
+	rest := body[start:]
+	end := strings.Index(rest, `</section>`)
+	if end < 0 {
+		return rest
+	}
+	return rest[:end]
+}
+
+func TestDecisionsList_OpenBlocker(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	task := putTaskInBlocked(t, rt, "Migration is stuck")
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "worker-uma",
+		Kind:      audit.KindBlockerNote,
+		Message:   "Waiting on schema confirmation from product",
+		Meta:      map[string]any{"task_id": task.ID},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`class="decision-stripe blocker"`,
+		`background:#a78bfa`,
+		`class="decision-type blocker">BLOCKER`,
+		`Waiting on schema confirmation`,
+		`UNBLOCK`,
+		`/teams/alpha/decisions/` + task.ID + `/unblock`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+
+	// Once the operator unblocks (stage leaves blocked), the row drops.
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageProposed})
+	w2 := httptest.NewRecorder()
+	d.handler().ServeHTTP(w2, req)
+	if strings.Contains(decisionsSection(t, w2.Body.String()), "Waiting on schema confirmation") {
+		t.Errorf("blocker row should drop once task leaves stage=blocked")
+	}
+}
+
+func TestDecisionsList_SortedNewestFirst(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	now := time.Now().UTC()
+	// Oldest: an approval (StageEnteredAt now-10m).
+	apprTask, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Older approval"})
+	_, _ = rt.plan.UpdateTask(apprTask.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(apprTask.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
+	// Override the stage-entered timestamp by writing a backdated event
+	// for sort comparison via timestamp-only signal. Approval rows use
+	// the task's StageEnteredAt which we cannot easily override, so the
+	// approval row's age will be ~"just now". Question + blocker we can
+	// time-stamp explicitly to verify the mixed sort.
+	qTask, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Middle question"})
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: now.Add(-5 * time.Minute),
+		AgentID:   "worker-uma",
+		Kind:      audit.KindDecisionNote,
+		Message:   "MIDDLE_QUESTION_MARKER",
+		Meta:      map[string]any{"task_id": qTask.ID, "severity": "question"},
+	})
+	bTask := putTaskInBlocked(t, rt, "Newest blocker")
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: now.Add(-1 * time.Minute),
+		AgentID:   "worker-uma",
+		Kind:      audit.KindBlockerNote,
+		Message:   "NEWEST_BLOCKER_MARKER",
+		Meta:      map[string]any{"task_id": bTask.ID},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	body := w.Body.String()
+
+	// All three should appear; order: BLOCKER (1m), APPROVAL (now-ish),
+	// QUESTION (5m). The APPROVAL StageEnteredAt is set by UpdateTask
+	// just above, so it's the most recent of all three. Therefore the
+	// expected order is APPROVAL > BLOCKER > QUESTION (newest first).
+	apprIdx := strings.Index(body, "Older approval")
+	blockerIdx := strings.Index(body, "NEWEST_BLOCKER_MARKER")
+	questionIdx := strings.Index(body, "MIDDLE_QUESTION_MARKER")
+	if apprIdx < 0 || blockerIdx < 0 || questionIdx < 0 {
+		t.Fatalf("missing one of the three decisions: appr=%d blocker=%d question=%d", apprIdx, blockerIdx, questionIdx)
+	}
+	if !(apprIdx < blockerIdx && blockerIdx < questionIdx) {
+		t.Errorf("expected APPROVAL < BLOCKER < QUESTION (by position); got appr=%d blocker=%d question=%d",
+			apprIdx, blockerIdx, questionIdx)
+	}
+}
+
+func TestDecisionsList_EmptyState(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `class="decisions-section"`) {
+		t.Fatalf("decisions-section missing on empty state")
+	}
+	if !strings.Contains(body, "All clear.") {
+		t.Errorf("empty-state placeholder 'All clear.' missing")
+	}
+}
+
+func TestDecisionsList_PreservesApprovalActions(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Preserve approve route"})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	body := w.Body.String()
+	for _, want := range []string{
+		`/teams/alpha/tasks/` + task.ID + `/approve`,
+		`/teams/alpha/tasks/` + task.ID + `/reject`,
+		`/teams/alpha/tasks/` + task.ID + `/comment`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("approval form URL %q missing — preservation regression for t-dfb9554b", want)
 		}
 	}
 }
