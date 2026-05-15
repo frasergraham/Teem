@@ -29,6 +29,7 @@ import (
 	"github.com/frasergraham/teem/internal/inflight"
 	"github.com/frasergraham/teem/internal/leaderstatus"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
+	"github.com/frasergraham/teem/internal/messaging"
 	"github.com/frasergraham/teem/internal/notes"
 	"github.com/frasergraham/teem/internal/plan"
 	"github.com/frasergraham/teem/internal/prompts"
@@ -282,6 +283,13 @@ type daemon struct {
 	token      string          // shared bearer for /audit and /control
 	baseCtx    context.Context // daemon lifetime — passed to per-team spawners
 
+	// messagingNotifier is the daemon-global outbound push channel
+	// (Telegram in v1) loaded from ~/.teem/messaging.yaml. nil when
+	// messaging is disabled — combineHooks drops the nil hook silently.
+	messagingNotifier messaging.Notifier
+	messagingCfg      messaging.TelegramConfig
+	messagingDedup    *messaging.Dedup
+
 	mu    sync.Mutex
 	teams map[string]*registeredTeam
 }
@@ -334,6 +342,15 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 	}
 
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: ctx}
+
+	// Daemon-global messaging: optional ~/.teem/messaging.yaml drives the
+	// outbound notifier wired into every team's audit hook chain. Missing
+	// file = off (zero-config default). enabled=true + missing env var =
+	// fail-fast so a misconfigured operator sees the error at startup
+	// instead of discovering pings never arrive.
+	if err := d.initMessaging(); err != nil {
+		return err
+	}
 
 	var listener net.Listener
 	var mcpHost string
@@ -1641,6 +1658,22 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// high-volume kinds like heartbeats and pulse_tick echoes.
 	channelHook := makeChannelHook(srv.PushChannel)
 
+	// Messaging hook: out-of-band push to the operator's phone (Telegram
+	// in v1) for the narrow operator-must-see set — awaiting_approval,
+	// blockers, severity=question decisions, leader errors. Daemon-global
+	// notifier, per-team formatter (needs plan for task titles). nil when
+	// messaging.yaml is absent / disabled / missing token; combineHooks
+	// drops the nil hook silently.
+	var messagingHook auditHook
+	if d.messagingNotifier != nil && d.messagingDedup != nil {
+		fmtr := messaging.MessageFormatter{
+			TeamID:           t.ID,
+			DashboardBaseURL: d.messagingCfg.DashboardBaseURL,
+			TaskTitle:        messaging.FromPlan(planStore),
+		}
+		messagingHook = makeMessagingHook(d.messagingNotifier, fmtr, d.messagingDedup)
+	}
+
 	// Pulse audit-nudge hook: schedules a debounced pulse Tick on
 	// interesting worker events when channels are NOT live (the L2
 	// fallback path in docs/wake-strategy.md). Pulse internally gates
@@ -1704,7 +1737,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		// leader chat, and nudge pulse's debounced audit-nudge tick
 		// (suppressed by pulse when channels are live; active when
 		// chat is disconnected — see docs/wake-strategy.md §3 L2).
-		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook, pulseNudgeHook)),
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook)),
 		plan:           planStore,
 		notes:          notesInbox,
 		pulse:          pulseInst,
@@ -1725,6 +1758,42 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 // file path, alongside plan.jsonl and notes.jsonl.
 func defaultLeaderStatusPath(teamID string) string {
 	return filepath.Join(defaultStateDir(teamID), "leader_status.json")
+}
+
+// defaultMessagingDedupPath returns the daemon-global dedup state file
+// (not per-team — messaging is daemon-wide for v1).
+func defaultMessagingDedupPath() string {
+	return filepath.Join(daemonHomeDir(), "state", "messaging.json")
+}
+
+// initMessaging loads ~/.teem/messaging.yaml, resolves credentials from
+// the environment, and stashes the resulting Notifier + Dedup on the
+// daemon for per-team wiring. Returns an error only when messaging is
+// configured-but-broken (enabled with no token / chat_id) — a missing
+// config file is the silent off state.
+func (d *daemon) initMessaging() error {
+	cfg, err := messaging.Load(daemonHomeDir())
+	if err != nil {
+		return err
+	}
+	n, err := messaging.Resolve(cfg, os.Getenv)
+	if err != nil {
+		return err
+	}
+	if n == nil {
+		return nil
+	}
+	dedup, err := messaging.NewDedup(defaultMessagingDedupPath(), cfg.Telegram.DedupWindow())
+	if err != nil {
+		// Best-effort: a broken dedup file logs but doesn't block startup.
+		// The fresh in-memory map still gates duplicates this run.
+		fmt.Fprintf(os.Stderr, "[messaging] dedup state warning: %v\n", err)
+	}
+	d.messagingNotifier = n
+	d.messagingCfg = cfg.Telegram
+	d.messagingDedup = dedup
+	fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram enabled (chat_id=%d)\n", cfg.Telegram.ChatID)
+	return nil
 }
 
 // lookupRole returns the role for agentID from the registry, or ""

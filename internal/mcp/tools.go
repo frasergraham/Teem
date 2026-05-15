@@ -724,17 +724,27 @@ func (s *Server) handleRecordDecision(_ context.Context, req mcpgo.CallToolReque
 	if agentID == "" {
 		agentID = "leader"
 	}
+	severity := strings.ToLower(strings.TrimSpace(req.GetString("severity", "info")))
+	switch severity {
+	case "", "info":
+		severity = "info"
+	case "question":
+		// allowed
+	default:
+		return mcpgo.NewToolResultErrorf("record_decision: severity must be 'info' or 'question', got %q", severity), nil
+	}
+	meta := map[string]any{"task_id": taskID, "severity": severity}
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
 		AgentID:   agentID,
 		Kind:      audit.KindDecisionNote,
 		Message:   text,
-		Meta:      map[string]any{"task_id": taskID},
+		Meta:      meta,
 	}
 	if err := s.audit.Write(ev); err != nil {
 		return mcpgo.NewToolResultErrorFromErr("record_decision", err), nil
 	}
-	body, _ := json.Marshal(map[string]string{"recorded": taskID})
+	body, _ := json.Marshal(map[string]string{"recorded": taskID, "severity": severity})
 	return mcpgo.NewToolResultText(string(body)), nil
 }
 

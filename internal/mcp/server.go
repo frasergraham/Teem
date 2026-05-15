@@ -414,6 +414,7 @@ func (s *Server) registerTools() {
 			mcpgo.WithDescription("Record a non-trivial decision against a task: the \"why\" behind a choice that wouldn't be obvious from the diff alone. Persisted to the audit log under decision_note and rendered in the task's flow view. Use this for design choices, trade-offs picked, vendored deps, etc."),
 			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id this decision attaches to.")),
 			mcpgo.WithString("text", mcpgo.Required(), mcpgo.Description("Decision text — markdown allowed.")),
+			mcpgo.WithString("severity", mcpgo.Enum("info", "question"), mcpgo.Description("Optional. 'info' (default) records the decision quietly. 'question' flags it for the operator — the audit event is tagged and may push a messaging notification if the daemon is configured for one.")),
 		),
 		s.handleRecordDecision,
 	)
