@@ -462,7 +462,11 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		// 3. Final teardown.
 		d.mu.Lock()
 		for _, rt := range d.teams {
-			rt.pulse.Stop()
+			// Daemon shutdown: preserve the pulse running-flag so
+			// `teem start` auto-resumes Pulse on the next boot. Operator
+			// opt-out goes through `teem pulse stop` (the flag-clearing
+			// Stop variant), not through bouncing the daemon.
+			rt.pulse.StopForShutdown()
 			rt.spawner.Stop()
 			_ = rt.auditSink.Close()
 			_ = rt.plan.Close()

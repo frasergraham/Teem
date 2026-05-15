@@ -367,6 +367,81 @@ func TestPulse_RunningFlagFile(t *testing.T) {
 	}
 }
 
+// TestPulse_StopForShutdown_PreservesFlag verifies that the daemon
+// graceful-shutdown path leaves the running-flag on disk so the next
+// `teem start` will auto-resume Pulse via WasRunning.
+func TestPulse_StopForShutdown_PreservesFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:    "x",
+		LoadSession: func() (string, bool, error) { return "", false, nil },
+		PauseFile:   filepath.Join(dir, "paused"),
+		RunningFile: filepath.Join(dir, "running"),
+		MCPConfig:   filepath.Join(dir, "mcp.json"),
+		RepoRoot:    dir,
+		Audit:       tempSink(t),
+		Interval:    1 * time.Hour,
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+
+	p := New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+	if !p.WasRunning() {
+		t.Fatal("flag should exist after Start")
+	}
+
+	p.StopForShutdown()
+	if p.Running() {
+		t.Error("Running() should be false after StopForShutdown")
+	}
+	if !p.WasRunning() {
+		t.Error("StopForShutdown must NOT clear the running flag")
+	}
+
+	// Simulate a fresh daemon boot: a new Pulse instance against the
+	// same state dir should see WasRunning=true and auto-resume.
+	p2 := New(cfg)
+	if !p2.WasRunning() {
+		t.Error("post-StopForShutdown, a fresh Pulse must see WasRunning=true so the daemon auto-resumes")
+	}
+}
+
+// TestPulse_Stop_ClearsFlag verifies that the operator-explicit Stop
+// path removes the running-flag, so a daemon restart will NOT
+// auto-resume Pulse (operator said "off").
+func TestPulse_Stop_ClearsFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:    "x",
+		LoadSession: func() (string, bool, error) { return "", false, nil },
+		PauseFile:   filepath.Join(dir, "paused"),
+		RunningFile: filepath.Join(dir, "running"),
+		MCPConfig:   filepath.Join(dir, "mcp.json"),
+		RepoRoot:    dir,
+		Audit:       tempSink(t),
+		Interval:    1 * time.Hour,
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+
+	p := New(cfg)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+	if !p.WasRunning() {
+		t.Fatal("flag should exist after Start")
+	}
+
+	p.Stop()
+	if p.Running() {
+		t.Error("Running() should be false after Stop")
+	}
+	if p.WasRunning() {
+		t.Error("Stop must clear the running flag (operator opt-out)")
+	}
+}
+
 // TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels guards
 // against a regression where `--channels server:teem-channel` (variadic)
 // consumed the trailing prompt arg, leaving claude with no prompt.

@@ -134,17 +134,38 @@ func (p *Pulse) Start(parent context.Context) {
 	go p.runDebouncer(ctx)
 }
 
-// Stop ends the loop. Safe to call multiple times; safe to call before
-// Start. Removes the running-flag file so daemon restarts don't
-// auto-resume an explicitly-stopped Pulse.
+// Stop halts the loop AND clears the on-disk running-flag, so a
+// subsequent daemon restart will NOT auto-resume Pulse. Use this for
+// operator-explicit stops (`teem pulse stop`, team removal) — anywhere
+// the intent is "don't pulse this team again until told to." Safe to
+// call multiple times; safe to call before Start.
+//
+// For daemon graceful shutdown, use StopForShutdown instead so the
+// flag survives the bounce and the next `teem start` resumes Pulse.
 func (p *Pulse) Stop() {
-	if !p.running.CompareAndSwap(true, false) {
+	if !p.stopLoop() {
 		return
+	}
+	_ = p.clearRunningFlag()
+}
+
+// StopForShutdown halts the loop but preserves the on-disk running
+// flag, so the next daemon startup auto-resumes Pulse via WasRunning.
+// Use only from the daemon's graceful-shutdown path — `teem stop`
+// should not look like an operator opt-out.
+func (p *Pulse) StopForShutdown() { p.stopLoop() }
+
+// stopLoop performs the actual loop-cancel. Returns true if Pulse was
+// running (so flag-touching callers know they have meaningful work to
+// do), false on a no-op call against an already-stopped Pulse.
+func (p *Pulse) stopLoop() bool {
+	if !p.running.CompareAndSwap(true, false) {
+		return false
 	}
 	if p.cancel != nil {
 		p.cancel()
 	}
-	_ = p.clearRunningFlag()
+	return true
 }
 
 // WasRunning checks the persisted running-flag file. Used by the
