@@ -1461,6 +1461,12 @@
             <span class="n">{{ .Hero.OpenTasksTotal }}</span>
             <span class="lbl">open task{{ if ne .Hero.OpenTasksTotal 1 }}s{{ end }}</span>
           </div>
+          {{ if .HasPricing }}
+          <div class="stat secondary hero-spend" title="Today's token spend, summed from the audit stream. Per-task cost over-attributes when a job is linked to more than one task; this total stays correct.">
+            <span class="n">{{ .HeroSpendDisplay }}</span>
+            <span class="lbl">today's spend{{ if .PricingStale }} <span class="muted">(pricing stale)</span>{{ end }}</span>
+          </div>
+          {{ end }}
         </div>
         <div class="hero-chips" aria-label="agents by archetype">
           {{ range .Hero.AgentChips }}
@@ -1687,8 +1693,9 @@
         <h3>Open tasks</h3>
         {{ if not .OpenTasks }}<div class="empty">no open tasks — the leader hasn't broken work down yet</div>{{ end }}
         {{ if .OpenTasks }}
+        {{ $hasPricing := .HasPricing }}
         <table class="tasks">
-          <thead><tr><th>Task</th><th>Title</th><th>Stage</th><th>Assignee</th><th>In stage</th></tr></thead>
+          <thead><tr><th>Task</th><th>Title</th><th>Stage</th><th>Assignee</th><th>In stage</th>{{ if $hasPricing }}<th class="cost-col" title="Estimated token cost from pricing.yaml. v1 over-attributes when a job is linked to more than one task — Today's spend in the hero uses a separate code path.">Cost</th>{{ end }}</tr></thead>
           <tbody>
             {{ range .OpenTasks }}
               <tr>
@@ -1697,6 +1704,33 @@
                 <td>{{ if .Stage }}<span class="stage {{ .Stage }}">{{ .Stage }}</span>{{ end }}{{ if .Stale }}<span class="stale-pill" title="active stage but the assignee is no longer running — reassign or move the task">STALE</span>{{ end }}</td>
                 <td class="assignee{{ if and .AssignedTo (not .AssigneeActive) }} gone{{ end }}{{ if .AssigneeDerived }} derived{{ end }}"{{ if .AssigneeDerived }} title="inferred from the latest evidence job"{{ end }}>{{ if .AssignedTo }}{{ .AssignedTo }}{{ else }}—{{ end }}</td>
                 <td class="when">{{ .StageAgo }}</td>
+                {{ if $hasPricing }}
+                <td class="cost-col">
+                  {{ if .Cost.HasCost }}
+                    <details class="task-cost" id="details-task-{{ .ID }}-cost">
+                      <summary title="v1: over-attributes when a job is linked to more than one task. Hero 'Today's spend' uses a separate, accurate code path.">{{ .Cost.Display }}{{ if .Cost.Unknown }} <span class="cost-unknown" title="One or more contributing jobs ran on a model not in pricing.yaml — total is a lower bound.">?</span>{{ end }}</summary>
+                      <table class="cost-breakdown">
+                        <thead><tr><th>Job</th><th>Model</th><th class="num">In</th><th class="num">Out</th><th class="num">Cache W</th><th class="num">Cache R</th><th class="num">$</th></tr></thead>
+                        <tbody>
+                          {{ range .Cost.Jobs }}
+                            <tr{{ if not .Priced }} class="cost-unpriced"{{ end }}>
+                              <td>{{ .JobID }}</td>
+                              <td>{{ if .Model }}{{ .Model }}{{ else }}—{{ end }}</td>
+                              <td class="num">{{ .InputTokens }}</td>
+                              <td class="num">{{ .OutputTokens }}</td>
+                              <td class="num">{{ .CacheCreateTokens }}</td>
+                              <td class="num">{{ .CacheReadTokens }}</td>
+                              <td class="num">{{ .USD }}</td>
+                            </tr>
+                          {{ end }}
+                        </tbody>
+                      </table>
+                    </details>
+                  {{ else }}
+                    <span class="muted">—</span>
+                  {{ end }}
+                </td>
+                {{ end }}
               </tr>
             {{ end }}
           </tbody>

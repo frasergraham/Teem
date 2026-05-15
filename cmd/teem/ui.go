@@ -215,6 +215,25 @@ type dashboardTeam struct {
 	// team-detail page. Nil when the daemon has no Aggregator wired (the
 	// card is suppressed in that case).
 	Usage *usageSnapshot
+	// HasPricing is true when ~/.teem/pricing.yaml loaded with at least
+	// one priced model. Drives whether the dashboard's Cost column and
+	// hero "Today's spend" line render at all — absent pricing means
+	// the dashboard hides cost UI rather than rendering $0.
+	HasPricing bool
+	// PricingStale is true when the pricing.yaml mtime is older than
+	// usage.StaleAge. The hero shows a small "(stale)" hint next to
+	// Today's spend so the operator knows their numbers may have drifted
+	// from Anthropic's current list prices.
+	PricingStale bool
+	// HeroSpendUSD is the dollar total of every KindUsageEvent emitted
+	// since local midnight. Computed by usage.TodaysSpend from the raw
+	// audit stream so the daily total stays correct even when per-task
+	// numbers double-count cross-linked jobs.
+	HeroSpendUSD float64
+	// HeroSpendDisplay is the pre-formatted "$X.XX" string the template
+	// renders. Kept as a string so the template doesn't need a custom
+	// formatter func; empty when HasPricing is false.
+	HeroSpendDisplay string
 }
 
 // usageSnapshot is the data behind the team-detail "Usage" card. Built
@@ -421,6 +440,11 @@ type dashboardTask struct {
 	Stage      string
 	StageAgo   string
 	AssignedTo string
+	// Cost carries the per-task token-cost rollup. HasCost is false
+	// when pricing.yaml is absent (template hides the cell), or when
+	// the task has no priced evidence yet — both render as "—" so the
+	// column stays alignment-stable.
+	Cost taskCostCell
 	// AssigneeActive is false when AssignedTo names a worker the
 	// registry no longer treats as active (stopped, unregistered, or
 	// never seen). The template uses this to mute the cell so it's
@@ -438,6 +462,32 @@ type dashboardTask struct {
 	// the task forward.
 	Stale bool
 	URL   string
+}
+
+// taskCostCell is the dashboardTask sub-struct holding the rendered
+// cost cell + drill-in. Display is the "$X.XX" string the template
+// prints; Jobs is the per-evidence breakdown shown inside the
+// <details> drawer. Unknown is true when ≥1 contributing event ran on
+// a model that pricing.yaml didn't price (UI renders a "?").
+type taskCostCell struct {
+	HasCost bool
+	Display string
+	Unknown bool
+	Jobs    []taskCostJob
+}
+
+// taskCostJob is one row in the per-task <details> drill-in: which
+// job, which model, how many tokens of each class, and the dollar
+// amount that contributed to the task total.
+type taskCostJob struct {
+	JobID             string
+	Model             string
+	InputTokens       int64
+	OutputTokens      int64
+	CacheCreateTokens int64
+	CacheReadTokens   int64
+	USD               string // "$X.XX"; "—" when Priced is false
+	Priced            bool
 }
 
 type dashboardEvent struct {
@@ -721,6 +771,23 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	out := dashboardTeam{ID: rt.team.ID, Name: rt.team.Name}
 	out.RegisteredAgo = agoShort(rt.registered)
 
+	// Pricing: loaded once per render. A missing file flips HasPricing
+	// off, which the template uses to hide the Cost column and the
+	// hero spend line entirely (per design: "hidden, not $0").
+	pricing, pricingOK, _ := usage.LoadPricing(usage.DefaultPricingPath())
+	out.HasPricing = pricingOK && pricing.HasPricing()
+	out.PricingStale = out.HasPricing && pricing.Stale
+	// Cost events scan window: wide enough to cover the 5-most-recent
+	// completed tasks (capped at ~24h of activity), narrow enough that
+	// the per-render audit scan stays cheap. The TodaysSpend filter
+	// then walks this same slice with `since=startOfLocalDay`.
+	costEvents := buildCostEvents(rt.auditSink, time.Now().Add(-24*time.Hour))
+	if out.HasPricing {
+		spend, _ := usage.TodaysSpend(costEvents, startOfLocalDay(time.Now()), pricing)
+		out.HeroSpendUSD = spend
+		out.HeroSpendDisplay = formatUSD(spend)
+	}
+
 	// Agents from the registry — hide fully-stopped agents only.
 	// Provisioning and error states stay visible: an operator watching
 	// a Fargate spin-up or a crashed worker needs that signal. Stopped
@@ -783,7 +850,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 				awaiting = append(awaiting, t)
 			case t.Status.IsOpen():
 				out.OpenTaskCount++
-				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.ID, t, liveAgents, jobLookup))
+				out.OpenTasks = append(out.OpenTasks, taskToDashboardTask(rt.team.ID, t, liveAgents, jobLookup, pricing, costEvents))
 			case t.Status.IsShelved():
 				shelved = append(shelved, t)
 			}
@@ -814,7 +881,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		// so the operator doesn't forget what they paused on.
 		sort.Slice(shelved, func(i, j int) bool { return shelved[i].UpdatedAt.After(shelved[j].UpdatedAt) })
 		for _, t := range shelved {
-			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.ID, t, liveAgents, jobLookup))
+			out.Shelved = append(out.Shelved, taskToDashboardTask(rt.team.ID, t, liveAgents, jobLookup, pricing, costEvents))
 		}
 		// Recent completed: tasks whose status moved to done, newest
 		// first by UpdatedAt; capped to 5.
@@ -829,7 +896,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 			done = done[:5]
 		}
 		for _, t := range done {
-			out.RecentDone = append(out.RecentDone, taskToDashboardTask(rt.team.ID, t, liveAgents, jobLookup))
+			out.RecentDone = append(out.RecentDone, taskToDashboardTask(rt.team.ID, t, liveAgents, jobLookup, pricing, costEvents))
 		}
 	}
 
@@ -1504,7 +1571,7 @@ func formatUntil(d time.Duration) string {
 // derive an assignee for tasks that were linked to a job via evidence
 // but never had assigned_to set explicitly (link_task_to_job is
 // evidence-only by design).
-func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool, jobLookup func(jobID string) (string, bool)) dashboardTask {
+func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool, jobLookup func(jobID string) (string, bool), pricing usage.Pricing, costEvents []usage.CostEvent) dashboardTask {
 	stageAgo := ""
 	if !t.StageEnteredAt.IsZero() {
 		stageAgo = agoShort(t.StageEnteredAt)
@@ -1529,7 +1596,47 @@ func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool, j
 		AssigneeDerived: derived,
 		Stale:           stale,
 		URL:             fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID),
+		Cost:            buildTaskCostCell(t.Evidence, pricing, costEvents),
 	}
+}
+
+// buildTaskCostCell turns the per-task PerTaskCost result into the
+// view-ready taskCostCell. HasCost stays false when pricing isn't
+// loaded (template hides the cell) and when the task has no priced
+// evidence (template still hides — operators don't want an empty $0
+// in the column).
+func buildTaskCostCell(evidence []string, pricing usage.Pricing, costEvents []usage.CostEvent) taskCostCell {
+	cb, ok := usage.PerTaskCost(costEvents, evidence, pricing)
+	if !ok {
+		return taskCostCell{}
+	}
+	if len(cb.Jobs) == 0 {
+		return taskCostCell{}
+	}
+	cell := taskCostCell{
+		HasCost: true,
+		Display: formatUSD(cb.USD),
+		Unknown: cb.UnknownModels,
+		Jobs:    make([]taskCostJob, 0, len(cb.Jobs)),
+	}
+	for _, j := range cb.Jobs {
+		row := taskCostJob{
+			JobID:             j.JobID,
+			Model:             j.Model,
+			InputTokens:       j.InputTokens,
+			OutputTokens:      j.OutputTokens,
+			CacheCreateTokens: j.CacheCreateTokens,
+			CacheReadTokens:   j.CacheReadTokens,
+			Priced:            j.Priced,
+		}
+		if j.Priced {
+			row.USD = formatUSD(j.USD)
+		} else {
+			row.USD = "—"
+		}
+		cell.Jobs = append(cell.Jobs, row)
+	}
+	return cell
 }
 
 // deriveAssignee resolves the assignee for a task. Explicit
