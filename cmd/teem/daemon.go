@@ -1475,6 +1475,27 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	}
 	safeGo("archmem.summarizer:"+t.ID, func() { _ = summarizer.Run(archMemCtx) })
 
+	// Scheduled project-manager tick. Only fires for tracker-configured
+	// teams (the PM archetype was synthesised by MaybePMArchetype
+	// earlier in the same code path); a zero/negative PollInterval
+	// disables the loop while leaving the on-demand leader spawn alive.
+	if t.Tracker != nil && t.Tracker.Type != "" {
+		interval := t.Tracker.PollInterval
+		if interval == 0 {
+			interval = pmLoopDefaultInterval
+		}
+		if interval > 0 {
+			fmt.Fprintf(os.Stderr, "[teemd] %s: pm-loop interval=%s\n", t.Name, interval)
+			pmCfg := PMLoopConfig{
+				TeamName: t.Name,
+				Interval: interval,
+				Spawner:  spawner,
+				Audit:    auditSink,
+			}
+			safeGo("pm.loop:"+t.ID, func() { pmCfg.Loop(d.baseCtx) })
+		}
+	}
+
 	return &registeredTeam{
 		team:      t,
 		mcp:       srv,

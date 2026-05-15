@@ -71,6 +71,12 @@ const (
 	// and to. Surfaced on the leader's channel stream so the leader
 	// notices pipeline movement without polling list_tasks.
 	KindTaskStageChanged Kind = "task_stage_changed"
+	// KindPMTick is emitted by the daemon's project-manager loop on
+	// every scheduled tick. Meta.outcome is one of "spawned" (PM was
+	// spawned and assigned the standing consultation brief),
+	// "skipped_overlap" (a prior PM is still running), or "error".
+	// AgentID and JobID are filled when applicable.
+	KindPMTick Kind = "pm_tick"
 )
 
 // Event is one entry on the audit channel. Meta is a free-form bag for

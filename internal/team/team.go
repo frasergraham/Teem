@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -81,6 +82,10 @@ type TrackerConfig struct {
 	// AuthFile is a fallback path containing the API token, used
 	// when AuthEnv is unset or empty at PM-spawn time.
 	AuthFile string `yaml:"auth_file,omitempty"`
+	// PollInterval is the cadence the daemon spawns a scheduled PM
+	// consultation at. Unset means default (1h). Zero or negative
+	// disables the scheduled tick entirely (operator-only spawns).
+	PollInterval time.Duration `yaml:"poll_interval,omitempty"`
 }
 
 // ArchetypeSpec is a template for spawning worker instances of a given

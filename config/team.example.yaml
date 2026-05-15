@@ -89,3 +89,6 @@ team:
   #   team_id: ENG           # tracker-side team identifier (e.g. Linear's team key)
   #   auth_env: LINEAR_API_KEY
   #   auth_file: ~/.config/teem/linear.token
+  #   poll_interval: 1h      # cadence of the daemon's scheduled PM consultation tick.
+  #                          # Unset → 1h. Zero or negative disables the scheduled
+  #                          # spawn entirely (the leader can still consult on demand).
