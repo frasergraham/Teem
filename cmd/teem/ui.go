@@ -252,18 +252,25 @@ type taskLink struct {
 // inside the "Awaiting approval" section. Carries the bits the operator
 // needs to decide: title, id, the leader's notes preview, evidence
 // links, and the URLs the inline form posts to.
+//
+// EvidenceRows is the rich per-evidence-job view (worker, branch,
+// touched files); HasPlanArtifact is true when any evidence row is
+// plan-shaped (branch only touches docs/**/*.md), which flips the
+// card's "Plan artifact" header on. The brief in Notes/NotesPreview
+// stays available but the template renders it as a collapsed,
+// de-emphasized <details> so the operator's eye lands on the work
+// product first.
 type awaitingApprovalTask struct {
-	ID           string
-	Title        string
-	NotesPreview string
-	Notes        string // full notes (used by <details> for expansion)
-	NotesLong    bool   // true when Notes exceeds the preview cap
-	Evidence     []string
-	StageAgo     string
-	URL          string // /teams/<id>/tasks/<id> (deep link)
-	ApproveURL   string
-	RejectURL    string
-	CommentURL   string
+	ID              string
+	Title           string
+	Notes           string // full leader brief, rendered inside the de-emphasized <details>
+	EvidenceRows    []awaitingApprovalEvidence
+	HasPlanArtifact bool
+	StageAgo        string
+	URL             string // /teams/<id>/tasks/<id> (deep link)
+	ApproveURL      string
+	RejectURL       string
+	CommentURL      string
 }
 
 type dashboardTask struct {
@@ -644,8 +651,17 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		sort.SliceStable(awaiting, func(i, j int) bool {
 			return awaiting[i].StageEnteredAt.After(awaiting[j].StageEnteredAt)
 		})
+		// Pull one batch of recent audit events for job_id → agent_id
+		// resolution across every awaiting card. One query is cheaper
+		// than one-per-card; the 7-day window covers multi-round
+		// signoffs without dragging in archaeology.
+		var evidenceEvents []audit.Event
+		if len(awaiting) > 0 && rt.auditSink != nil {
+			evidenceEvents, _ = rt.auditSink.Query("", time.Now().Add(-7*24*time.Hour), 5000)
+		}
 		for _, t := range awaiting {
-			out.AwaitingApproval = append(out.AwaitingApproval, taskToAwaitingApprovalTask(rt.team.ID, t))
+			out.AwaitingApproval = append(out.AwaitingApproval,
+				taskToAwaitingApprovalTask(rt.team.ID, t, evidenceEvents, rt.repoRoot))
 		}
 		// Sort open tasks by stage order then created.
 		sort.SliceStable(out.OpenTasks, func(i, j int) bool {
@@ -940,36 +956,35 @@ func buildJobLookup(rt *registeredTeam) func(string) (string, bool) {
 
 // taskToAwaitingApprovalTask packages a plan.Task in awaiting_approval
 // stage for the dashboard's prominent "Awaiting approval" section,
-// pre-baking the form action URLs and a clamped notes preview.
-func taskToAwaitingApprovalTask(team string, t plan.Task) awaitingApprovalTask {
-	const previewMax = 200
-	preview := t.Notes
-	long := false
-	if len(preview) > previewMax {
-		end := previewMax
-		for end > 0 && !utf8.RuneStart(preview[end]) {
-			end--
-		}
-		preview = preview[:end] + "…"
-		long = true
-	}
+// pre-baking the form action URLs, a clamped notes preview, and the
+// resolved evidence rows (worker → branch → changed files). The
+// audit event slice is consulted to map each job_id to its
+// originating agent_id; repoRoot drives the per-branch file listing.
+func taskToAwaitingApprovalTask(team string, t plan.Task, events []audit.Event, repoRoot string) awaitingApprovalTask {
 	stageAgo := ""
 	if !t.StageEnteredAt.IsZero() {
 		stageAgo = agoShort(t.StageEnteredAt)
 	}
 	base := fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID)
+	rows := resolveEvidenceRows(events, t.Evidence, repoRoot, team)
+	hasPlan := false
+	for _, r := range rows {
+		if r.PlanShaped {
+			hasPlan = true
+			break
+		}
+	}
 	return awaitingApprovalTask{
-		ID:           t.ID,
-		Title:        t.Title,
-		NotesPreview: preview,
-		Notes:        t.Notes,
-		NotesLong:    long,
-		Evidence:     append([]string(nil), t.Evidence...),
-		StageAgo:     stageAgo,
-		URL:          base,
-		ApproveURL:   base + "/approve",
-		RejectURL:    base + "/reject",
-		CommentURL:   base + "/comment",
+		ID:              t.ID,
+		Title:           t.Title,
+		Notes:           t.Notes,
+		EvidenceRows:    rows,
+		HasPlanArtifact: hasPlan,
+		StageAgo:        stageAgo,
+		URL:             base,
+		ApproveURL:      base + "/approve",
+		RejectURL:       base + "/reject",
+		CommentURL:      base + "/comment",
 	}
 }
 

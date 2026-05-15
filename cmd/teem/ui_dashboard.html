@@ -141,8 +141,43 @@
   .approval-card .head .title a:hover { text-decoration: underline; }
   .approval-card .head .when { color: var(--muted); font-size: 12px; margin-left: auto; }
   .approval-card .preview { font-size: 13px; color: var(--fg); white-space: pre-wrap; margin: 6px 0; }
-  .approval-card .evidence { font-size: 12px; color: var(--muted); margin: 6px 0; }
-  .approval-card .evidence a { color: var(--info); text-decoration: none; margin-right: 8px; }
+  /* Plan-artifact block: the actual work product the operator is
+     approving (file paths + worker/branch link). Sits ABOVE the
+     brief so the operator's eye lands on what was produced, not on
+     the leader's instructions. */
+  .approval-card .plan-artifact { margin: 8px 0; }
+  .approval-card .plan-artifact .header {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); font-weight: 600; margin-bottom: 4px;
+  }
+  .approval-card .plan-artifact .files {
+    margin: 4px 0 4px 18px; padding: 0; list-style: disc;
+  }
+  .approval-card .plan-artifact .files li {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-size: 12px;
+  }
+  .approval-card .evidence-row {
+    font-size: 12px;
+    color: var(--muted);
+    padding: 2px 0;
+  }
+  .approval-card .evidence-row a { color: var(--info); text-decoration: none; }
+  .approval-card .evidence-row a:hover { text-decoration: underline; }
+  /* Brief from leader: deliberately de-emphasized — smaller, dimmer.
+     Operator can expand to see the original instructions but the
+     work product (above) is the primary signal. */
+  .approval-card .brief-deemph { font-size: 12px; color: var(--muted); margin: 6px 0; }
+  .approval-card .brief-deemph > summary {
+    cursor: pointer; list-style: none; color: var(--muted);
+  }
+  .approval-card .brief-deemph > summary::-webkit-details-marker { display: none; }
+  .approval-card .brief-deemph > summary::before { content: "▸ "; }
+  .approval-card .brief-deemph[open] > summary::before { content: "▾ "; }
+  .approval-card .brief-deemph .brief-body {
+    margin-top: 4px; white-space: pre-wrap; word-break: break-word;
+    color: var(--muted);
+  }
   .approval-card .actions {
     display: flex; gap: 8px; align-items: stretch; margin-top: 8px; flex-wrap: wrap;
   }
@@ -689,16 +724,28 @@
               <span class="id">{{ .ID }}</span>
               {{ if .StageAgo }}<span class="when">awaiting {{ .StageAgo }}</span>{{ end }}
             </div>
-            {{ if .NotesLong }}
-              <details class="expandable" id="details-task-{{ .ID }}-notes"><summary><div class="preview">{{ .NotesPreview }}</div></summary><div class="expanded">{{ .Notes }}</div></details>
-            {{ else if .NotesPreview }}
-              <div class="preview">{{ .NotesPreview }}</div>
-            {{ end }}
-            {{ if .Evidence }}
-              <div class="evidence">
-                evidence:
-                {{ range .Evidence }}<a href="/jobs/{{ . }}">{{ . }}</a>{{ end }}
+            {{ if .EvidenceRows }}
+              <div class="plan-artifact">
+                {{ if .HasPlanArtifact }}<div class="header">Plan artifact</div>{{ end }}
+                {{ range .EvidenceRows }}
+                  {{ if .PlanShaped }}
+                    <ul class="files">
+                      {{ range .PlanFiles }}<li>{{ .Path }}</li>{{ end }}
+                    </ul>
+                  {{ end }}
+                  <div class="evidence-row">
+                    {{ if .AgentID }}Worker: {{ .AgentID }} · {{ end }}
+                    {{ if .BranchURL }}branch: <a href="{{ .BranchURL }}">{{ .BranchRef }}</a> · {{ else if .BranchRef }}branch: {{ .BranchRef }} · {{ end }}
+                    job: <a href="{{ .JobURL }}">{{ .JobID }}</a>
+                  </div>
+                {{ end }}
               </div>
+            {{ end }}
+            {{ if .Notes }}
+              <details class="brief-deemph" id="details-task-{{ .ID }}-notes">
+                <summary>Brief from leader (details collapsed)</summary>
+                <div class="brief-body">{{ .Notes }}</div>
+              </details>
             {{ end }}
             <form class="actions" method="post" action="{{ .ApproveURL }}">
               <input type="text" name="comment" placeholder="optional comment / required reason for reject">

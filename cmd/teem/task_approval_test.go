@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -495,6 +497,210 @@ func TestDashboard_AwaitingApprovalSortedNewestFirst(t *testing.T) {
 	// in the body. So we want idx[2] < idx[1] < idx[0].
 	if !(idx[2] < idx[1] && idx[1] < idx[0]) {
 		t.Errorf("awaiting-approval render order wrong; want newest-first (titles index: third<second<first), got %v", idx)
+	}
+}
+
+// TestAwaitingApprovalCard_PlanShapedBranch wires an awaiting-approval
+// task to a worker whose branch touches only docs/foo.md. The card
+// must surface the "Plan artifact" header, list the docs/foo.md path,
+// and render the worker + branch link. The deep-link branch URL
+// goes to the per-agent jobs page (the closest existing branch view).
+func TestAwaitingApprovalCard_PlanShapedBranch(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	rt.repoRoot = seedRepoWithDocsBranch(t, "worker-una", "docs/foo.md")
+	d.teams["alpha"] = rt
+
+	// Seed an audit event linking job j1 → worker-una.
+	writeAuditJobReceived(t, rt, "worker-una", "j1", "go do the thing")
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{
+		Title: "Review the PM doc",
+		Notes: "Please skim docs/foo.md and confirm scope.",
+	})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{
+		Stage:       plan.StageAwaitingApproval,
+		AddEvidence: []string{"j1"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		"Plan artifact",
+		"docs/foo.md",
+		"worker-una",
+		"teem/worker-una",
+		`href="/teams/alpha/agents/worker-una/jobs"`,
+		`href="/teams/alpha/jobs/j1"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("plan-shaped card missing %q in body", want)
+		}
+	}
+}
+
+// TestAwaitingApprovalCard_MixedBranch asserts that when the worker's
+// branch touches Go files alongside (or instead of) docs, the card
+// still shows the worker + branch + job links but does NOT claim the
+// task is plan-shaped (no "Plan artifact" header).
+func TestAwaitingApprovalCard_MixedBranch(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	rt.repoRoot = seedRepoWithMixedBranch(t, "worker-pax")
+	d.teams["alpha"] = rt
+
+	writeAuditJobReceived(t, rt, "worker-pax", "j2", "ship the feature")
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{
+		Title: "Review the feature",
+		Notes: "Code change — confirm shape before merge.",
+	})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{
+		Stage:       plan.StageAwaitingApproval,
+		AddEvidence: []string{"j2"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+	// Worker / branch / job links present.
+	for _, want := range []string{
+		"worker-pax",
+		"teem/worker-pax",
+		`href="/teams/alpha/agents/worker-pax/jobs"`,
+		`href="/teams/alpha/jobs/j2"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("mixed-branch card missing %q in body", want)
+		}
+	}
+	// Mixed branch is NOT plan-shaped; the "Plan artifact" header must
+	// not appear for this card. The header is wrapped in its own div so
+	// substring search is enough — it's not used elsewhere on the page.
+	if strings.Contains(body, "Plan artifact") {
+		t.Errorf("mixed-branch card should not claim plan-shaped; body contained 'Plan artifact'")
+	}
+}
+
+// TestAwaitingApprovalCard_BriefDeEmphasized asserts the leader brief
+// stays accessible behind a stable-id <details> (so the sessionStorage
+// preserve-open-state script still finds it) AND is rendered with the
+// de-emphasized "brief-deemph" class so it visually retreats behind
+// the work-product block above it.
+func TestAwaitingApprovalCard_BriefDeEmphasized(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{
+		Title: "Operator-action task",
+		Notes: "this is the leader brief — secondary context",
+	})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+
+	wantID := `id="details-task-` + task.ID + `-notes"`
+	if !strings.Contains(body, wantID) {
+		t.Errorf("brief <details> missing stable id %q", wantID)
+	}
+	if !strings.Contains(body, `class="brief-deemph"`) {
+		t.Errorf("brief <details> missing de-emphasized class; body=%s", body)
+	}
+	if !strings.Contains(body, "Brief from leader") {
+		t.Errorf("brief summary label missing")
+	}
+	if !strings.Contains(body, "this is the leader brief") {
+		t.Errorf("brief body content missing")
+	}
+}
+
+// seedRepoWithDocsBranch builds a temp git repo whose main branch
+// holds an initial empty commit, and creates teem/<agentID> with a
+// single commit that adds docFile. The repo path is returned for
+// rt.repoRoot.
+func seedRepoWithDocsBranch(t *testing.T, agentID, docFile string) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--initial-branch=main", ".")
+	runGit(t, dir, "commit", "--allow-empty", "-m", "initial commit on main")
+	runGit(t, dir, "checkout", "-b", "teem/"+agentID)
+	// Create the doc file inside the worktree, then commit.
+	full := filepath.Join(dir, docFile)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte("# the design doc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", docFile)
+	runGit(t, dir, "commit", "-m", agentID+": add "+docFile)
+	runGit(t, dir, "checkout", "main")
+	return dir
+}
+
+// seedRepoWithMixedBranch builds a temp git repo with a teem/<agentID>
+// branch that touches BOTH a Go file and a markdown file — i.e. not
+// plan-shaped (code + doc). isPlanShaped requires every file to be
+// docs/**/*.md so a single .go file disqualifies the branch.
+func seedRepoWithMixedBranch(t *testing.T, agentID string) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--initial-branch=main", ".")
+	runGit(t, dir, "commit", "--allow-empty", "-m", "initial commit on main")
+	runGit(t, dir, "checkout", "-b", "teem/"+agentID)
+	files := map[string]string{
+		"docs/note.md": "# note\n",
+		"main.go":      "package main\n\nfunc main() {}\n",
+	}
+	for path, content := range files {
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, dir, "add", path)
+	}
+	runGit(t, dir, "commit", "-m", agentID+": mixed code + doc")
+	runGit(t, dir, "checkout", "main")
+	return dir
+}
+
+// writeAuditJobReceived stamps the minimum audit-event row needed for
+// resolveEvidenceRows to map jobID → agentID: a single job_received
+// event with the agent id populated.
+func writeAuditJobReceived(t *testing.T, rt *registeredTeam, agentID, jobID, prompt string) {
+	t.Helper()
+	err := rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   agentID,
+		JobID:     jobID,
+		Kind:      audit.KindJobReceived,
+		Message:   prompt,
+		Meta:      map[string]any{"prompt": prompt},
+	})
+	if err != nil {
+		t.Fatalf("audit write: %v", err)
 	}
 }
 
