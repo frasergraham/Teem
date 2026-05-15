@@ -1572,6 +1572,20 @@
     color: #9aa1ad;
   }
   }
+
+  /* t-b83b9936 — every section collapsible. Make <summary> sit flush
+     with the existing panel header it now wraps, and drop the browser
+     disclosure triangle (we rely on the heading text). Scoped to the
+     section-level details classes only so nested .plan-artifact-doc /
+     .brief-deemph / .task-cost / .usage-models keep their own styling. */
+  details.section-collapsible > summary {
+    cursor: pointer;
+    list-style: none;
+    display: block;
+  }
+  details.section-collapsible > summary::-webkit-details-marker { display: none; }
+  details.section-collapsible > summary::marker { content: ""; }
+  details.section-collapsible > summary > h3 { display: inline-block; margin: 0; }
 </style>
 {{ end }}
 
@@ -1665,25 +1679,28 @@
       </section>
 
       <section class="workers-panel" aria-label="active workers">
-        <h3 class="panel-label">Active workers <span class="count">{{ len .Workers }}</span></h3>
-        {{ if not .Workers }}
-          <div class="workers-empty">All idle — no agents running.</div>
-        {{ else }}
-        <div class="workers">
-          {{ range .Workers }}
-            <div class="worker-row">
-              <div class="worker-name">{{ .Persona }}</div>
-              <span class="role-tag {{ .RoleColourClass }}">{{ .RoleTag }}</span>
-              <div class="worker-doing{{ if not .Activity }} empty{{ end }}">{{ if .Activity }}{{ .Activity }}{{ else }}—{{ end }}</div>
-              <span class="worker-age">{{ if .Age }}{{ .Age }}{{ else }}—{{ end }}</span>
-            </div>
+        <details id="details-workers-{{ .ID }}" class="section-collapsible" open>
+          <summary><h3 class="panel-label">Active workers <span class="count">{{ len .Workers }}</span></h3></summary>
+          {{ if not .Workers }}
+            <div class="workers-empty">All idle — no agents running.</div>
+          {{ else }}
+          <div class="workers">
+            {{ range .Workers }}
+              <div class="worker-row">
+                <div class="worker-name">{{ .Persona }}</div>
+                <span class="role-tag {{ .RoleColourClass }}">{{ .RoleTag }}</span>
+                <div class="worker-doing{{ if not .Activity }} empty{{ end }}">{{ if .Activity }}{{ .Activity }}{{ else }}—{{ end }}</div>
+                <span class="worker-age">{{ if .Age }}{{ .Age }}{{ else }}—{{ end }}</span>
+              </div>
+            {{ end }}
+          </div>
           {{ end }}
-        </div>
-        {{ end }}
+        </details>
       </section>
 
       <section class="pulse-panel" aria-label="pulse management">
-        <h3 class="panel-label">Pulse <span class="state {{ if .Pulse.Running }}{{ if .Pulse.Paused }}paused{{ else }}on{{ end }}{{ else }}off{{ end }}">{{ if .Pulse.Running }}{{ if .Pulse.Paused }}paused{{ else }}on{{ end }}{{ else }}off{{ end }}</span></h3>
+        <details id="details-pulse-{{ .ID }}" class="section-collapsible">
+          <summary><h3 class="panel-label">Pulse <span class="state {{ if .Pulse.Running }}{{ if .Pulse.Paused }}paused{{ else }}on{{ end }}{{ else }}off{{ end }}">{{ if .Pulse.Running }}{{ if .Pulse.Paused }}paused{{ else }}on{{ end }}{{ else }}off{{ end }}</span></h3></summary>
         <div class="pulse-grid">
           <div class="pulse-toggle-cell">
             <form method="post" action="{{ if .Pulse.Running }}{{ .Pulse.StopURL }}{{ else }}{{ .Pulse.StartURL }}{{ end }}" class="pulse-toggle-form">
@@ -1713,14 +1730,17 @@
             </div>
           </form>
         </div>
+        </details>
       </section>
 
+      {{ $teamID := .ID }}
       {{ with .Usage }}
       <section class="usage-panel" aria-label="daily token usage">
-        <h3 class="panel-label">Usage
-          {{ if .Configured }}<span class="pct">· {{ printf "%.1f" .PercentUsed }}%</span>{{ end }}
-          {{ if .Throttle }}<span class="throttling-badge" role="status">THROTTLING</span>{{ end }}
-        </h3>
+        <details id="details-usage-{{ $teamID }}" class="section-collapsible">
+          <summary><h3 class="panel-label">Usage
+            {{ if .Configured }}<span class="pct">· {{ printf "%.1f" .PercentUsed }}%</span>{{ end }}
+            {{ if .Throttle }}<span class="throttling-badge" role="status">THROTTLING</span>{{ end }}
+          </h3></summary>
         {{ if .Configured }}
           <div class="usage-headline-row">
             <span class="usage-numbers"><span class="n">{{ .Used }}</span> / {{ .Cap }} tokens</span>
@@ -1757,6 +1777,7 @@
             </table>
           </details>
         {{ end }}
+        </details>
       </section>
       {{ end }}
 
@@ -1767,17 +1788,20 @@
       {{ if .Flash }}<div class="flash">{{ .Flash }}</div>{{ end }}
 
       <section class="chat-panel" aria-label="chat with leader" data-team-id="{{ .ID }}">
-        <h3 class="panel-label">Chat with leader <span class="count">one-shot</span></h3>
-        <div class="chat-log" id="chat-log-{{ .ID }}" aria-live="polite"></div>
-        <form class="chat-compose" id="chat-form-{{ .ID }}" onsubmit="return teemChatSubmit(event, '{{ .ID }}')">
-          <textarea class="chat-input" id="chat-input-{{ .ID }}" placeholder="Ask the leader something — or hand it a one-shot directive. Each send is a fresh turn." rows="2"></textarea>
-          <button type="submit" class="chat-send">SEND</button>
-        </form>
-        <div class="chat-hint">Each send opens a fresh leader turn (no resumed session). <kbd>&#8984;</kbd>+<kbd>&#8629;</kbd> to submit.</div>
+        <details id="details-chat-{{ .ID }}" class="section-collapsible" open>
+          <summary><h3 class="panel-label">Chat with leader <span class="count">one-shot</span></h3></summary>
+          <div class="chat-log" id="chat-log-{{ .ID }}" aria-live="polite"></div>
+          <form class="chat-compose" id="chat-form-{{ .ID }}" onsubmit="return teemChatSubmit(event, '{{ .ID }}')">
+            <textarea class="chat-input" id="chat-input-{{ .ID }}" placeholder="Ask the leader something — or hand it a one-shot directive. Each send is a fresh turn." rows="2"></textarea>
+            <button type="submit" class="chat-send">SEND</button>
+          </form>
+          <div class="chat-hint">Each send opens a fresh leader turn (no resumed session). <kbd>&#8984;</kbd>+<kbd>&#8629;</kbd> to submit.</div>
+        </details>
       </section>
 
       <section class="decisions-section" aria-label="decisions awaiting operator">
-        <h3 class="panel-label">Decisions <span class="count">{{ len .Decisions }}</span></h3>
+        <details id="details-decisions-{{ .ID }}" class="section-collapsible" open>
+          <summary><h3 class="panel-label">Decisions <span class="count">{{ len .Decisions }}</span></h3></summary>
         {{ if not .Decisions }}
           <div class="decisions-empty">All clear.</div>
         {{ else }}
@@ -1842,10 +1866,12 @@
             </div>
           {{ end }}
         {{ end }}
+        </details>
       </section>
 
       <div class="leader-card">
-        <h3>Status board</h3>
+        <details id="details-status-{{ .ID }}" class="section-collapsible" open>
+          <summary><h3>Status board</h3></summary>
         {{ if .LeaderStatus }}
           <div class="leader-line">
             <span class="who">leader</span>
@@ -1874,10 +1900,12 @@
             </div>
           {{ end }}
         {{ end }}
+        </details>
       </div>
 
       <div class="section">
-        <h3>Open tasks</h3>
+        <details id="details-tasks-{{ .ID }}" class="section-collapsible" open>
+          <summary><h3>Open tasks</h3></summary>
         {{ if not .OpenTasks }}<div class="empty">no open tasks — the leader hasn't broken work down yet</div>{{ end }}
         {{ if .OpenTasks }}
         {{ $hasPricing := .HasPricing }}
@@ -1923,6 +1951,7 @@
           </tbody>
         </table>
         {{ end }}
+        </details>
       </div>
 
       {{ if .Shelved }}
@@ -1998,7 +2027,7 @@
         </div>
       </div>
 
-      <details id="details-branches" class="section branches-section-collapsed">
+      <details id="details-branches" class="section branches-section-collapsed section-collapsible">
         <summary>
           <span class="branches-count">{{ .Branches.Count }} branch{{ if ne .Branches.Count 1 }}es{{ end }}</span>
           {{ if .Branches.NamePeek }}<span class="branches-peek muted">{{ .Branches.NamePeek }}</span>{{ end }}
@@ -2028,12 +2057,27 @@
   <footer>teem · refreshing every 10s · uptime {{ .UptimeAgo }}</footer>
 
   <script>
+    // Persist every <details id="details-..."> across reloads in
+    // localStorage. One-time migration from the legacy sessionStorage
+    // key ('expanded:<id>' = '1' meant open) so previously-expanded
+    // panels stay expanded after this rollout.
     (function() {
-      document.querySelectorAll('details[id]').forEach(function(d) {
-        if (sessionStorage.getItem('expanded:' + d.id) === '1') d.open = true;
-        d.addEventListener('toggle', function() {
-          if (d.open) sessionStorage.setItem('expanded:' + d.id, '1');
-          else sessionStorage.removeItem('expanded:' + d.id);
+      var KEY_PREFIX = 'teem.ui.collapse.';
+      document.querySelectorAll('details[id^="details-"]').forEach(function(el) {
+        var key = KEY_PREFIX + el.id;
+        var legacy = null;
+        try { legacy = sessionStorage.getItem('expanded:' + el.id); } catch (e) {}
+        var stored = null;
+        try { stored = localStorage.getItem(key); } catch (e) {}
+        if (stored === null && legacy === '1') {
+          stored = 'open';
+          try { localStorage.setItem(key, stored); } catch (e) {}
+          try { sessionStorage.removeItem('expanded:' + el.id); } catch (e) {}
+        }
+        if (stored === 'closed') el.removeAttribute('open');
+        else if (stored === 'open') el.setAttribute('open', '');
+        el.addEventListener('toggle', function() {
+          try { localStorage.setItem(key, el.open ? 'open' : 'closed'); } catch (e) {}
         });
       });
     })();

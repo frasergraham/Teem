@@ -279,12 +279,13 @@ func TestDashboard_RendersAwaitingApprovalSection(t *testing.T) {
 }
 
 // TestDashboard_AwaitingApprovalDetailsPersistsAcrossReload locks in
-// the sessionStorage-based expand-state preservation: the awaiting-
-// approval brief <details> must carry a stable id matching
+// the per-details expand-state preservation: the awaiting-approval
+// brief <details> must carry a stable id matching
 // details-task-<taskid>-notes, and the team-detail page must include
 // the inline restore/persist script that reads/writes
-// sessionStorage('expanded:<id>'). Together those keep an operator's
-// expanded brief expanded across the 10s auto-refresh.
+// localStorage('teem.ui.collapse.<id>'). Together those keep an
+// operator's expanded brief expanded across the 10s auto-refresh and
+// across tab close (post t-b83b9936 migration from sessionStorage).
 func TestDashboard_AwaitingApprovalDetailsPersistsAcrossReload(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}}
 	rt := newFullTestTeam(t, "alpha")
@@ -309,11 +310,14 @@ func TestDashboard_AwaitingApprovalDetailsPersistsAcrossReload(t *testing.T) {
 	if !strings.Contains(body, wantID) {
 		t.Errorf("awaiting-approval <details> missing stable id %q; body=%s", wantID, body)
 	}
-	if !strings.Contains(body, "sessionStorage.getItem('expanded:'") {
-		t.Errorf("team page missing sessionStorage restore script; body=%s", body)
+	if !strings.Contains(body, "localStorage.getItem(key)") {
+		t.Errorf("team page missing localStorage restore script; body=%s", body)
 	}
-	if !strings.Contains(body, "sessionStorage.setItem('expanded:'") {
-		t.Errorf("team page missing sessionStorage persist script; body=%s", body)
+	if !strings.Contains(body, "localStorage.setItem(key,") {
+		t.Errorf("team page missing localStorage persist script; body=%s", body)
+	}
+	if !strings.Contains(body, "'teem.ui.collapse.'") {
+		t.Errorf("team page missing collapse key prefix; body=%s", body)
 	}
 }
 
