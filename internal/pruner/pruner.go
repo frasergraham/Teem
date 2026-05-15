@@ -17,6 +17,7 @@
 package pruner
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -83,6 +84,12 @@ const (
 	// liveness recheck at Apply time saw the agent as live (sub-second
 	// race: a worker was spawned between Classify and Apply).
 	SkipLiveAtApply SkipReason = "live-at-apply-time"
+	// SkipExternalWorktree: a worktree outside WorktreeBase is pinned
+	// to the branch. For ReasonMerged this is always fatal (refuse and
+	// let the operator decide); for the force-deletable family we
+	// attempt `git worktree remove --force` first and only land here
+	// when even the force-remove fails.
+	SkipExternalWorktree SkipReason = "external-worktree-blocks"
 )
 
 // Classification is one row of the prune report.
@@ -289,12 +296,13 @@ type SweepOpts struct {
 // them); ForceSkipped and DirtySkipped exist so the CLI can print a
 // targeted "run with --force to remove" hint.
 type SweepResult struct {
-	Deleted      []string
-	Skipped      []string
-	ForceSkipped []string
-	DirtySkipped []string
-	LiveSkipped  []string
-	Errors       map[string]error
+	Deleted                 []string
+	Skipped                 []string
+	ForceSkipped            []string
+	DirtySkipped            []string
+	LiveSkipped             []string
+	ExternalWorktreeSkipped []string
+	Errors                  map[string]error
 }
 
 // Apply runs Sweep over a Classification slice. Branches with
@@ -368,6 +376,38 @@ func Apply(ctx context.Context, cls []Classification, opts SweepOpts) SweepResul
 				}
 			}
 		}
+		// External worktrees — anything pinned to this branch from a
+		// path outside WorktreeBase. Reviewers occasionally create
+		// these (`git worktree add /tmp/foo teem/worker-X`) and never
+		// clean them up; a subsequent `git branch -d/-D` then fails
+		// with "branch is checked out at /tmp/foo". Detect + decide
+		// before we get there. For ReasonMerged (safe path) any block
+		// is fatal — the merge is fine, but the operator should
+		// resolve the worktree first. For the force-deletable family
+		// we try `git worktree remove --force` and only land in the
+		// SkipExternalWorktree bucket when even that fails.
+		if externals, err := externalWorktreesForBranch(ctx, opts.RepoRoot, c.Name, opts.WorktreeBase); err == nil && len(externals) > 0 {
+			blocked := false
+			for _, path := range externals {
+				if c.Reason == ReasonMerged {
+					res.Errors[c.Name] = fmt.Errorf("worktree at %s blocks deletion (run 'git worktree remove %s' first)", path, path)
+					logf("pruner: cannot delete %s — worktree at %s blocks deletion (run 'git worktree remove %s' first)", c.Name, path, path)
+					blocked = true
+					break
+				}
+				if err := runGit(ctx, opts.RepoRoot, "worktree", "remove", "--force", path); err != nil {
+					res.ExternalWorktreeSkipped = append(res.ExternalWorktreeSkipped, c.Name)
+					res.Errors[c.Name] = fmt.Errorf("force-remove external worktree %s: %w", path, err)
+					logf("pruner: %s external worktree at %s — `git worktree remove --force` failed: %v", c.Name, path, err)
+					blocked = true
+					break
+				}
+				logf("pruner: %s force-removed external worktree %s", c.Name, path)
+			}
+			if blocked {
+				continue
+			}
+		}
 		flag := "-d"
 		if c.Reason != ReasonMerged {
 			flag = "-D" // gated above by opts.Force
@@ -406,6 +446,78 @@ func DeleteBranch(ctx context.Context, repoRoot, branch string, force bool) erro
 		flag = "-D"
 	}
 	return runGit(ctx, repoRoot, "branch", flag, branch)
+}
+
+// externalWorktreesForBranch returns the on-disk paths of any
+// worktrees registered in repoRoot pinned to `refs/heads/<branch>`
+// whose location is OUTSIDE worktreeBase. The in-base case is
+// already handled by Apply's existing per-agent stat+remove block —
+// callers should not double-clean those. worktreeBase == "" means
+// "the caller has no per-agent base, treat every pinned worktree as
+// external" (safe: Apply will still try the safe-then-force
+// progression on each).
+func externalWorktreesForBranch(ctx context.Context, repoRoot, branch, worktreeBase string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "worktree", "list", "--porcelain")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("git worktree list: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	wantRef := "refs/heads/" + branch
+	canonBase := ""
+	if worktreeBase != "" {
+		if real, err := filepath.EvalSymlinks(worktreeBase); err == nil {
+			canonBase = real
+		} else if abs, err := filepath.Abs(worktreeBase); err == nil {
+			canonBase = abs
+		} else {
+			canonBase = worktreeBase
+		}
+	}
+	var external []string
+	var currentPath, currentBranch string
+	flush := func() {
+		if currentPath == "" || currentBranch != wantRef {
+			return
+		}
+		canon := currentPath
+		if real, err := filepath.EvalSymlinks(currentPath); err == nil {
+			canon = real
+		} else if abs, err := filepath.Abs(currentPath); err == nil {
+			canon = abs
+		}
+		if canonBase != "" {
+			rel, err := filepath.Rel(canonBase, canon)
+			if err == nil && !strings.HasPrefix(rel, "..") && rel != "." {
+				// path lies inside worktreeBase — handled by caller's
+				// per-agent block, not "external".
+				return
+			}
+		}
+		external = append(external, currentPath)
+	}
+	sc := bufio.NewScanner(&stdout)
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			flush()
+			currentPath = strings.TrimPrefix(line, "worktree ")
+			currentBranch = ""
+		case strings.HasPrefix(line, "branch "):
+			currentBranch = strings.TrimPrefix(line, "branch ")
+		case line == "":
+			flush()
+			currentPath = ""
+			currentBranch = ""
+		}
+	}
+	flush()
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return external, nil
 }
 
 func runGit(ctx context.Context, dir string, args ...string) error {

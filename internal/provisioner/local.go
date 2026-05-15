@@ -291,12 +291,61 @@ func (p *LocalProvisioner) Teardown(ctx context.Context, a *Agent) error {
 	}
 
 	// Worktree cleanup is independent of worker shutdown.
-	if a.Cloud != nil && a.Cloud.TaskARN != "" && p.RepoRoot != "" {
+	if p.RepoRoot != "" {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return RemoveWorktree(ctx, p.RepoRoot, a.Cloud.TaskARN)
+		if a.Cloud != nil && a.Cloud.TaskARN != "" {
+			if err := RemoveWorktree(ctx, p.RepoRoot, a.Cloud.TaskARN); err != nil {
+				// Surface the primary failure but still try to mop
+				// up reviewer-style externals below — leaking those
+				// is what blocks the next prune sweep.
+				p.removeExternalsForBranch(ctx, a)
+				return err
+			}
+		}
+		// Reviewers (and any agent that calls `git worktree add` mid-
+		// job) can leave worktrees pinned to a.WorktreeBranch in
+		// locations outside our control. They block a future `git
+		// branch -D` and a future prune sweep. Best-effort force-
+		// remove now while we have the lock.
+		p.removeExternalsForBranch(ctx, a)
 	}
 	return nil
+}
+
+// removeExternalsForBranch walks `git worktree list --porcelain` and
+// force-removes every worktree pinned to a.WorktreeBranch. Best-
+// effort: a failed remove logs and the caller continues. Skips when
+// the agent has no per-agent branch (Fargate / SSH / explicit
+// working_dir cases).
+//
+// Caller must hold p.mu — listWorktrees and the per-worktree force
+// remove both mutate git's bookkeeping under the hood.
+func (p *LocalProvisioner) removeExternalsForBranch(ctx context.Context, a *Agent) {
+	if a == nil || a.WorktreeBranch == "" {
+		return
+	}
+	wts, err := listWorktrees(ctx, p.RepoRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[local-provisioner] external-worktree scan for %s: %v\n", a.WorktreeBranch, err)
+		return
+	}
+	wantRef := "refs/heads/" + a.WorktreeBranch
+	for path, ref := range wts {
+		if ref != wantRef {
+			continue
+		}
+		// Skip the canonical per-agent worktree — it was either
+		// already removed above or never existed.
+		if a.Cloud != nil && a.Cloud.TaskARN != "" {
+			if canonicalize(path) == canonicalize(a.Cloud.TaskARN) {
+				continue
+			}
+		}
+		if err := runGit(ctx, p.RepoRoot, "worktree", "remove", "--force", path); err != nil {
+			fmt.Fprintf(os.Stderr, "[local-provisioner] force-remove external worktree %s (%s): %v\n", path, a.WorktreeBranch, err)
+		}
+	}
 }
 
 // adoptOrphanedWorktree renames a pre-canonicalisation worker's

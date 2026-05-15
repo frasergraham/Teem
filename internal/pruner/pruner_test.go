@@ -2,6 +2,7 @@ package pruner
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,12 +16,12 @@ func TestClassify(t *testing.T) {
 	week := 7 * 24 * time.Hour
 	in := Inputs{
 		Branches: []Branch{
-			{Name: "teem/worker-ada", AgentID: "worker-ada", Merged: true},          // merged → delete
-			{Name: "teem/worker-blake", AgentID: "worker-blake", Merged: false},     // live → skip
-			{Name: "teem/worker-cleo", AgentID: "worker-cleo", Merged: false},       // retired (old) → skip without Force
-			{Name: "teem/worker-drew", AgentID: "worker-drew", Merged: false},       // retired but young → skip
-			{Name: "teem/worker-ezra", AgentID: "worker-ezra", Merged: false},       // not in roster → orphan, skip without Force
-			{Name: "teem/reviewer-fern", AgentID: "reviewer-fern", Merged: false},   // roster says in use → unmerged, skip
+			{Name: "teem/worker-ada", AgentID: "worker-ada", Merged: true},        // merged → delete
+			{Name: "teem/worker-blake", AgentID: "worker-blake", Merged: false},   // live → skip
+			{Name: "teem/worker-cleo", AgentID: "worker-cleo", Merged: false},     // retired (old) → skip without Force
+			{Name: "teem/worker-drew", AgentID: "worker-drew", Merged: false},     // retired but young → skip
+			{Name: "teem/worker-ezra", AgentID: "worker-ezra", Merged: false},     // not in roster → orphan, skip without Force
+			{Name: "teem/reviewer-fern", AgentID: "reviewer-fern", Merged: false}, // roster says in use → unmerged, skip
 		},
 		Roster: []RosterView{
 			{AgentID: "worker-ada", InUse: false, LastUsedAt: now.Add(-2 * week)},
@@ -40,12 +41,12 @@ func TestClassify(t *testing.T) {
 		Reason Reason
 		Action Action
 	}{
-		"teem/worker-ada":      {ReasonMerged, ActionDelete},
-		"teem/worker-blake":    {ReasonLive, ActionSkip},
-		"teem/worker-cleo":     {ReasonRetired, ActionSkip},
-		"teem/worker-drew":     {ReasonUnmerged, ActionSkip},
-		"teem/worker-ezra":     {ReasonOrphan, ActionSkip},
-		"teem/reviewer-fern":   {ReasonUnmerged, ActionSkip},
+		"teem/worker-ada":    {ReasonMerged, ActionDelete},
+		"teem/worker-blake":  {ReasonLive, ActionSkip},
+		"teem/worker-cleo":   {ReasonRetired, ActionSkip},
+		"teem/worker-drew":   {ReasonUnmerged, ActionSkip},
+		"teem/worker-ezra":   {ReasonOrphan, ActionSkip},
+		"teem/reviewer-fern": {ReasonUnmerged, ActionSkip},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("classify returned %d rows, want %d", len(got), len(want))
@@ -120,12 +121,12 @@ func TestBranchRE(t *testing.T) {
 		{"teem/reviewer-blake", true},
 		{"teem/integrator-cleo", true},
 		{"main", false},
-		{"teem/worker", false},          // missing name
-		{"teem/worker-", false},         // empty name
-		{"teem/worker-3", false},        // starts with digit
-		{"teem/pm-ada", false},          // pm not in whitelist
-		{"teem/worker-Ada", false},      // uppercase
-		{"feature/worker-ada", false},   // wrong prefix
+		{"teem/worker", false},           // missing name
+		{"teem/worker-", false},          // empty name
+		{"teem/worker-3", false},         // starts with digit
+		{"teem/pm-ada", false},           // pm not in whitelist
+		{"teem/worker-Ada", false},       // uppercase
+		{"feature/worker-ada", false},    // wrong prefix
 		{"teem/worker-ada-extra", false}, // trailing junk (hyphen disallowed)
 	}
 	for _, c := range cases {
@@ -193,20 +194,20 @@ func TestApply_ForceGating(t *testing.T) {
 	// Force, only merged should be deleted; retired/orphan are
 	// ForceSkipped. With Force, all three are deleted.
 	cases := []struct {
-		name  string
-		force bool
-		wantDeleted  []string
+		name          string
+		force         bool
+		wantDeleted   []string
 		wantForceSkip []string
 	}{
 		{
-			name:  "no-force",
-			force: false,
+			name:          "no-force",
+			force:         false,
 			wantDeleted:   []string{"teem/worker-merged"},
 			wantForceSkip: []string{"teem/worker-orphan", "teem/worker-retired"},
 		},
 		{
-			name:  "force",
-			force: true,
+			name:        "force",
+			force:       true,
 			wantDeleted: []string{"teem/worker-merged", "teem/worker-orphan", "teem/worker-retired"},
 		},
 	}
@@ -414,6 +415,119 @@ func TestApply_LiveCheckRaces(t *testing.T) {
 	}
 }
 
+func TestApply_ExternalWorktreeForceRemoved(t *testing.T) {
+	// A reviewer ran `git worktree add /tmp/foo teem/worker-foo` mid-
+	// session and left the worktree behind. The prune sweep must
+	// detect it and force-remove it before deleting the branch when
+	// --force is set; otherwise `branch -D` fails with "branch is
+	// checked out at /tmp/foo" and the operator is stuck.
+	repo := initRepo(t)
+	makeBranchUnmerged(t, repo, "teem/worker-foo")
+
+	// "External" — outside any WorktreeBase the pruner owns.
+	externalDir := filepath.Join(t.TempDir(), "external-review")
+	if out, err := exec.Command("git", "-C", repo, "worktree", "add", externalDir, "teem/worker-foo").CombinedOutput(); err != nil {
+		t.Fatalf("worktree add external: %v: %s", err, out)
+	}
+
+	cls := []Classification{
+		{Name: "teem/worker-foo", AgentID: "worker-foo", Reason: ReasonRetired, Action: ActionDelete},
+	}
+	worktreeBase := t.TempDir() // empty base, the externalDir is not inside it
+	res := Apply(context.Background(), cls, SweepOpts{
+		RepoRoot: repo, WorktreeBase: worktreeBase, Force: true,
+	})
+	if len(res.Deleted) != 1 {
+		t.Errorf("expected branch deleted after external worktree force-removal, got %+v", res)
+	}
+	if _, err := os.Stat(externalDir); !os.IsNotExist(err) {
+		t.Errorf("external worktree dir should be removed: stat err=%v", err)
+	}
+	if branchExists(t, repo, "teem/worker-foo") {
+		t.Errorf("branch should be deleted")
+	}
+}
+
+func TestApply_ExternalWorktreeBlocksMerged(t *testing.T) {
+	// A merged branch always uses `git branch -d` (safe). If an
+	// external worktree is pinned to it, the safe delete will fail
+	// anyway — refuse up front with a message the operator can act
+	// on rather than letting git produce a cryptic failure.
+	repo := initRepo(t)
+	// Merged branch: just branch at HEAD with no extra commits.
+	if out, err := exec.Command("git", "-C", repo, "branch", "teem/worker-bar").CombinedOutput(); err != nil {
+		t.Fatalf("create merged branch: %v: %s", err, out)
+	}
+	externalDir := filepath.Join(t.TempDir(), "external")
+	if out, err := exec.Command("git", "-C", repo, "worktree", "add", externalDir, "teem/worker-bar").CombinedOutput(); err != nil {
+		t.Fatalf("worktree add external: %v: %s", err, out)
+	}
+
+	cls := []Classification{
+		{Name: "teem/worker-bar", AgentID: "worker-bar", Reason: ReasonMerged, Action: ActionDelete},
+	}
+	var logged []string
+	res := Apply(context.Background(), cls, SweepOpts{
+		RepoRoot: repo, WorktreeBase: t.TempDir(), Force: true,
+		Logf: func(format string, a ...any) {
+			logged = append(logged, fmt.Sprintf(format, a...))
+		},
+	})
+	if _, ok := res.Errors["teem/worker-bar"]; !ok {
+		t.Fatalf("expected error for merged branch blocked by external worktree, got %+v", res)
+	}
+	if !branchExists(t, repo, "teem/worker-bar") {
+		t.Errorf("merged branch should be retained when external worktree blocks deletion")
+	}
+	if _, err := os.Stat(externalDir); err != nil {
+		t.Errorf("external worktree must be left intact for the operator to inspect; stat: %v", err)
+	}
+	found := false
+	for _, l := range logged {
+		if strings.Contains(l, "blocks deletion") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected logf to mention 'blocks deletion'; got %v", logged)
+	}
+}
+
+func TestExternalWorktreesForBranch_InBaseIsNotExternal(t *testing.T) {
+	repo := initRepo(t)
+	makeBranchUnmerged(t, repo, "teem/worker-internal")
+	makeBranchUnmerged(t, repo, "teem/worker-external")
+	// Use a stable per-team base so the helper can match against it.
+	base := t.TempDir()
+	internalDir := filepath.Join(base, "worker-internal")
+	if out, err := exec.Command("git", "-C", repo, "worktree", "add", internalDir, "teem/worker-internal").CombinedOutput(); err != nil {
+		t.Fatalf("worktree add internal: %v: %s", err, out)
+	}
+	external := filepath.Join(t.TempDir(), "out")
+	if out, err := exec.Command("git", "-C", repo, "worktree", "add", external, "teem/worker-external").CombinedOutput(); err != nil {
+		t.Fatalf("worktree add external: %v: %s", err, out)
+	}
+
+	// Inside base → not external.
+	gotInside, err := externalWorktreesForBranch(context.Background(), repo, "teem/worker-internal", base)
+	if err != nil {
+		t.Fatalf("externalWorktreesForBranch internal: %v", err)
+	}
+	if len(gotInside) != 0 {
+		t.Errorf("worktree inside WorktreeBase must not be reported external, got %v", gotInside)
+	}
+
+	// Outside base → external.
+	gotOutside, err := externalWorktreesForBranch(context.Background(), repo, "teem/worker-external", base)
+	if err != nil {
+		t.Fatalf("externalWorktreesForBranch external: %v", err)
+	}
+	if len(gotOutside) != 1 {
+		t.Errorf("expected exactly 1 external worktree, got %v", gotOutside)
+	}
+}
+
 func TestLoadCandidatesVerbose_LogsFiltered(t *testing.T) {
 	repo := initRepo(t)
 	run := func(args ...string) {
@@ -423,8 +537,8 @@ func TestLoadCandidatesVerbose_LogsFiltered(t *testing.T) {
 		}
 	}
 	run("branch", "teem/worker-ok")
-	run("branch", "teem/worker-3")  // digit prefix — filtered
-	run("branch", "teem/pm-bad")    // role not in whitelist — filtered
+	run("branch", "teem/worker-3") // digit prefix — filtered
+	run("branch", "teem/pm-bad")   // role not in whitelist — filtered
 
 	var logged []string
 	branches, err := LoadCandidatesVerbose(context.Background(), repo, "main", func(format string, args ...any) {

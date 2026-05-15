@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -128,4 +130,102 @@ func captureStdoutAndErr(t *testing.T, fn func() error) (string, error) {
 	var err error
 	out := captureStdout(t, func() { err = fn() })
 	return out, err
+}
+
+// captureStderr swaps os.Stderr for a pipe for the duration of fn and
+// returns whatever the function wrote there. Used by prune tests that
+// want to assert on the operator-facing "skipped live" message.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	done := make(chan struct{})
+	var buf bytes.Buffer
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(done)
+	}()
+	fn()
+	_ = w.Close()
+	<-done
+	os.Stderr = orig
+	return buf.String()
+}
+
+// TestRunPruneBranches_ForceSkipsLiveWorker is the regression test for
+// t-0a16821c: even with `--yes --force`, a branch whose owner is on
+// the roster with in_use=true must NOT be deleted, and the CLI must
+// print the operator-facing "stop first" hint to stderr. The bug was
+// that the CLI passed no LiveCheck callback to pruner.Apply, so a
+// stale Classify snapshot (or a spawn during the sweep) could let a
+// live worker's branch through.
+func TestRunPruneBranches_ForceSkipsLiveWorker(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repo := t.TempDir()
+	runGit(t, repo, "init", "--initial-branch=main", ".")
+	runGit(t, repo, "commit", "--allow-empty", "-m", "init")
+	// Live worker branch with unmerged work — without the live check
+	// this would be eligible for `branch -D` under --force.
+	runGit(t, repo, "checkout", "-b", "teem/worker-una")
+	runGit(t, repo, "commit", "--allow-empty", "-m", "wip on una")
+	runGit(t, repo, "checkout", "main")
+
+	teamID := "t-cafe000011112222"
+	yamlBody := `team:
+  id: ` + teamID + `
+  name: example-team
+  leader: {system_prompt: p}
+  archetypes:
+    - {role: worker, placement: local, max_concurrent: 1}
+`
+	yamlPath := filepath.Join(repo, "teem.yaml")
+	if err := os.WriteFile(yamlPath, []byte(yamlBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed the roster with the live worker. in_use=true is the signal
+	// that this worker is currently spawned — the same flag the spawner
+	// writes in production.
+	rosterDir := filepath.Join(home, ".teem", "state", teamID)
+	if err := os.MkdirAll(rosterDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rosterJSON := `{"entries":{"worker-una":{"id":"worker-una","role":"worker","in_use":true,"last_used_at":"2026-05-15T00:00:00Z"}},"next_numeric":{}}`
+	if err := os.WriteFile(filepath.Join(rosterDir, "roster.json"), []byte(rosterJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	if err := os.Chdir(repo); err != nil {
+		t.Fatal(err)
+	}
+
+	var runErr error
+	stderr := captureStderr(t, func() {
+		_ = captureStdout(t, func() {
+			runErr = runPruneBranches([]string{"--team", yamlPath, "--yes", "--force", "--retired-age=1ns"})
+		})
+	})
+	if runErr != nil {
+		t.Fatalf("--yes --force: %v", runErr)
+	}
+	if !branchExistsInRepo(t, repo, "teem/worker-una") {
+		t.Errorf("live worker's branch was deleted under --yes --force (work would be lost)")
+	}
+	if !strings.Contains(stderr, "refusing to delete teem/worker-una") {
+		t.Errorf("stderr missing 'refusing to delete teem/worker-una' line; got:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "agent is live") {
+		t.Errorf("stderr missing 'agent is live' rationale; got:\n%s", stderr)
+	}
 }

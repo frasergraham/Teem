@@ -4,8 +4,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -144,26 +146,27 @@ func runPruneBranches(args []string) error {
 	}
 
 	// Live set: the daemon's in-memory registry isn't available from
-	// this process, but the on-disk roster's InUse flag is — the
-	// spawner maintains it via Allocate / ReserveNamed / Release /
-	// MarkInUse and persists on every change. Treat InUse=true as
-	// "currently spawned, don't touch" so the CLI is safe to run with
-	// the daemon up.
+	// this process, but two on-disk signals stand in for it. The
+	// roster's InUse flag is the primary one — the spawner maintains it
+	// via Allocate / ReserveNamed / Release / MarkInUse and persists
+	// every change. The SocketDir is the secondary belt-and-suspenders:
+	// each spawned local worker binds `<SocketDir>/<agent-id>.sock`, so
+	// a dialable socket means a live worker even if the roster lags or
+	// was hand-edited. Union of both → "don't touch under any
+	// circumstance, including --force".
 	rost, err := roster.Open(defaultRosterPath(t.ID))
 	if err != nil {
 		return fmt.Errorf("roster: %w", err)
 	}
 	rosterEntries := rost.Snapshot()
+	socketDir := defaultSocketDir(t.ID)
 
-	live := map[string]bool{}
+	live := liveAgentSetCLI(rosterEntries, socketDir)
 	rosterView := make([]pruner.RosterView, 0, len(rosterEntries))
 	for _, e := range rosterEntries {
 		rosterView = append(rosterView, pruner.RosterView{
 			AgentID: e.ID, InUse: e.InUse, LastUsedAt: e.LastUsedAt,
 		})
-		if e.InUse {
-			live[e.ID] = true
-		}
 	}
 
 	ctx := context.Background()
@@ -194,6 +197,19 @@ func runPruneBranches(args []string) error {
 		return nil
 	}
 
+	// Classify already marks live workers as ReasonLive/ActionSkip so
+	// Apply never sees them — but the operator who passed --force
+	// deserves an explicit "I refused, here's why" line for each one,
+	// not just a row in the classification table. Print before Apply
+	// so the refusal lines appear before the deletion stream.
+	for _, c := range cls {
+		if c.Reason == pruner.ReasonLive {
+			fmt.Fprintf(os.Stderr,
+				"[teem] pruner: refusing to delete teem/%s — agent is live (use 'teem stop %s' first)\n",
+				c.AgentID, c.AgentID)
+		}
+	}
+
 	// Heads-up: an automated `--yes --force` run can drop unmerged
 	// work. Print the warning before the destructive call (no
 	// confirmation prompt — that breaks `--yes` automation).
@@ -209,10 +225,34 @@ func runPruneBranches(args []string) error {
 		}
 	}
 
+	// LiveCheck at Apply time closes the race window between Classify
+	// (snapshotted ~a second ago) and the destructive git calls below.
+	// A live recheck unconditionally beats --force; the operator's
+	// "force" intent is about merge state, not about overriding live
+	// workers. When this fires we also print the operator-friendly
+	// "stop first" hint — Apply's own logf would just say "skipped:
+	// live at apply time", which is correct but harder to act on.
+	liveCheck := func(agentID string) bool {
+		// Re-read the roster on every call; the on-disk file is the
+		// only source of truth this process has, and a spawn during a
+		// long sweep would otherwise go unnoticed.
+		fresh, err := roster.Open(defaultRosterPath(t.ID))
+		if err == nil {
+			if liveAgentSetCLI(fresh.Snapshot(), socketDir)[agentID] {
+				fmt.Fprintf(os.Stderr,
+					"[teem] pruner: refusing to delete teem/%s — agent is live (use 'teem stop %s' first)\n",
+					agentID, agentID)
+				return true
+			}
+		}
+		return false
+	}
+
 	res := pruner.Apply(ctx, cls, pruner.SweepOpts{
 		RepoRoot:     repoRoot,
 		WorktreeBase: defaultWorktreeBase(t.ID),
 		Force:        *force,
+		LiveCheck:    liveCheck,
 		Logf: func(format string, a ...any) {
 			fmt.Fprintf(os.Stderr, "[teem] "+format+"\n", a...)
 		},
@@ -251,6 +291,59 @@ func printClassificationTable(w *os.File, cls []pruner.Classification) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", c.Name, c.Reason, c.Action, merged)
 	}
 	tw.Flush()
+}
+
+// liveAgentSetCLI builds the "do not touch" agent-id set from the
+// two on-disk signals the CLI process can see:
+//
+//   - rosterEntries[*].InUse — the spawner's authoritative flag,
+//     written transactionally on Allocate / ReserveNamed / Release /
+//     MarkInUse. Stale only if the daemon crashed between spawn and
+//     persist (rare).
+//   - <socketDir>/<id>.sock — each ephemeral local worker binds a
+//     unix socket at spawn time; the daemon never removes the socket
+//     while the worker is up. Belt-and-suspenders for the (rare)
+//     window where InUse hasn't been flushed yet.
+//
+// Union. A worker counted live by either signal is protected.
+// socketDir == "" disables the second signal (tests; remote-only
+// teams).
+func liveAgentSetCLI(rosterEntries []roster.Entry, socketDir string) map[string]bool {
+	live := map[string]bool{}
+	for _, e := range rosterEntries {
+		if e.InUse {
+			live[e.ID] = true
+		}
+	}
+	if socketDir == "" {
+		return live
+	}
+	entries, err := os.ReadDir(socketDir)
+	if err != nil {
+		return live
+	}
+	for _, ent := range entries {
+		name := ent.Name()
+		if !strings.HasSuffix(name, ".sock") {
+			continue
+		}
+		agentID := strings.TrimSuffix(name, ".sock")
+		if agentID == "" {
+			continue
+		}
+		sockPath := filepath.Join(socketDir, name)
+		// A bare stat is enough — workers remove their socket on
+		// exit; a lingering file with no listener will fall through
+		// the dial below. Be tolerant of stale sockets: if the dial
+		// fails, the worker is gone, so don't count it live.
+		conn, derr := net.DialTimeout("unix", sockPath, 200*time.Millisecond)
+		if derr != nil {
+			continue
+		}
+		_ = conn.Close()
+		live[agentID] = true
+	}
+	return live
 }
 
 // truncateSubject clamps a commit subject to a single-line preview

@@ -213,6 +213,60 @@ func TestAdoptOrphanedWorktree_NoOpWhenCanonicalExists(t *testing.T) {
 	}
 }
 
+// TestTeardown_RemovesExternalWorktreeFallback covers the reviewer
+// teardown gap: when the canonical per-agent worktree has been removed
+// out-of-band (e.g. an earlier failed teardown that cleaned the dir
+// but left git's bookkeeping behind, then a later session added a
+// fresh worktree on the same branch at a different path), the next
+// Teardown must still scan for and clean up any worktrees pinned to
+// the agent's branch. Without that scan, a stale external worktree
+// blocks every future `git branch -d` on the branch.
+func TestTeardown_RemovesExternalWorktreeFallback(t *testing.T) {
+	repo := initRepo(t)
+	base := t.TempDir()
+	ctx := context.Background()
+
+	canonicalDir := filepath.Join(base, "worker-xena")
+	if err := EnsureWorktree(ctx, repo, canonicalDir, "teem/worker-xena"); err != nil {
+		t.Fatalf("seed canonical worktree: %v", err)
+	}
+	// Remove the canonical so the branch has no live worktree — now
+	// the test can `git worktree add` it at a path outside `base`,
+	// simulating the reviewer's ad-hoc placement.
+	if err := RemoveWorktree(ctx, repo, canonicalDir); err != nil {
+		t.Fatalf("seed remove canonical: %v", err)
+	}
+	externalDir := filepath.Join(t.TempDir(), "external-review")
+	if out, err := exec.Command("git", "-C", repo, "worktree", "add", externalDir, "teem/worker-xena").CombinedOutput(); err != nil {
+		t.Fatalf("worktree add external: %v: %s", err, out)
+	}
+
+	p := &LocalProvisioner{RepoRoot: repo, WorktreeBase: base}
+	a := &Agent{
+		ID:             "worker-xena",
+		Role:           "worker",
+		Backend:        BackendLocal,
+		WorktreeBranch: "teem/worker-xena",
+		// Cloud points at the canonical path which no longer exists —
+		// RemoveWorktree's "not registered" branch handles that fine
+		// (best-effort prune + dir remove). The external scan is what
+		// actually fixes the problem.
+		Cloud: &CloudPlacement{TaskARN: canonicalDir},
+	}
+	if err := p.Teardown(ctx, a); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	if _, err := os.Stat(externalDir); !os.IsNotExist(err) {
+		t.Errorf("external worktree should be force-removed by Teardown fallback: %v", err)
+	}
+	// Branch must survive Teardown — the pruner is what eventually
+	// drops it. We just need to be unblocked from dropping it.
+	if !branchExists(ctx, repo, "teem/worker-xena") {
+		t.Errorf("branch was unexpectedly removed by Teardown")
+	}
+}
+
 func TestRemoveWorktree_MissingIsOK(t *testing.T) {
 	repo := initRepo(t)
 	if err := RemoveWorktree(context.Background(), repo, filepath.Join(t.TempDir(), "nope")); err != nil {
