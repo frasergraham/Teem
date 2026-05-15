@@ -183,7 +183,7 @@ type dashboardTeam struct {
 	// HasRepo reflects whether the team's registration carried a repo
 	// root. False ⇒ render "(no repo)" in place of the branches section.
 	HasRepo  bool
-	Branches []dashboardBranch
+	Branches teamPageBranches
 	// Hero is the "page-header" summary: big bold counters, agent
 	// chips per archetype, and today's task pipeline as a stacked bar.
 	Hero teamHero
@@ -202,6 +202,16 @@ type teamHero struct {
 	// HasStageActivity is false when no stage had a transition today;
 	// the template renders a "no activity today" placeholder.
 	HasStageActivity bool
+}
+
+// teamPageBranches wraps the branch list rendered at the bottom of the
+// team-detail page. NamePeek is a short comma-joined preview ("teem/a,
+// teem/b, teem/c +2 more") shown in the collapsed <summary>; Rows is
+// the full table rendered inside the <details> body.
+type teamPageBranches struct {
+	Count    int
+	NamePeek string
+	Rows     []dashboardBranch
 }
 
 // agentChip is one pill in the per-archetype breakdown above the page
@@ -415,7 +425,7 @@ func teamTileSnapshot(rt *registeredTeam) summaryTile {
 		PulseRunning:          ts.PulseRunning,
 		PulsePaused:           ts.PulsePaused,
 		UnreadNotes:           ts.UnreadNotes,
-		BranchCount:           len(ts.Branches),
+		BranchCount:           ts.Branches.Count,
 		AwaitingApprovalCount: len(ts.AwaitingApproval),
 	}
 	tile.URL = "/teams/" + tile.Slug
@@ -758,9 +768,43 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 	// climb into the hundreds we can layer a small TTL cache here.
 	out.HasRepo = rt.repoRoot != ""
 	if out.HasRepo {
-		out.Branches = listTeemBranches(rt.repoRoot, rt.registry, rt.team.ID)
+		rows := listTeemBranches(rt.repoRoot, rt.registry, rt.team.ID)
+		out.Branches = teamPageBranches{
+			Count:    len(rows),
+			NamePeek: branchNamePeek(rows, branchNamePeekLimit),
+			Rows:     rows,
+		}
 	}
 	return out
+}
+
+// branchNamePeekLimit is the number of branch names rendered inline in
+// the collapsed branches <summary> before the remainder is folded into
+// "+N more". Chosen so the peek fits comfortably on one row at default
+// body font without wrapping.
+const branchNamePeekLimit = 5
+
+// branchNamePeek formats the collapsed-branches summary string:
+// comma-joined names up to limit, followed by "+N more" when over.
+// Returns "" for an empty input so the template can suppress the muted
+// span entirely.
+func branchNamePeek(rows []dashboardBranch, limit int) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	n := len(rows)
+	if n <= limit {
+		names := make([]string, 0, n)
+		for _, r := range rows {
+			names = append(names, r.Name)
+		}
+		return strings.Join(names, ", ")
+	}
+	names := make([]string, 0, limit)
+	for _, r := range rows[:limit] {
+		names = append(names, r.Name)
+	}
+	return strings.Join(names, ", ") + " +" + strconv.Itoa(n-limit) + " more"
 }
 
 // stageBarColors maps each canonical stage to the hex colour the hero

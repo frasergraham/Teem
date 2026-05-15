@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -455,7 +456,8 @@ func TestTeamDetail_RendersBranchesSection(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, want := range []string{
-		"Active branches",
+		`<details id="details-branches"`,
+		"2 branches",
 		"teem/worker-1",
 		"teem/worker-2",
 		"did the thing",
@@ -498,11 +500,107 @@ func TestTeamDetail_NoRepoShowsPlaceholder(t *testing.T) {
 		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "Active branches") {
-		t.Errorf("section header missing")
+	if !strings.Contains(body, `<details id="details-branches"`) {
+		t.Errorf("collapsed branches section missing")
 	}
 	if !strings.Contains(body, "(no repo)") {
 		t.Errorf("expected '(no repo)' placeholder for repo-less team")
+	}
+}
+
+// TestTeamPage_BranchesCollapsedByDefault asserts the branches section
+// renders as a closed <details> at the bottom of the team page (below
+// the recent-activity section), with the count + name peek in the
+// summary and the existing branches table inside the body.
+func TestTeamPage_BranchesCollapsedByDefault(t *testing.T) {
+	dir := seedRepoWithBranches(t)
+
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	rt.repoRoot = dir
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// <details id="details-branches"> must be present and NOT pre-opened.
+	idx := strings.Index(body, `<details id="details-branches"`)
+	if idx < 0 {
+		t.Fatalf("missing collapsed branches <details> wrapper")
+	}
+	// Slice forward to the closing > of the opening tag and assert no
+	// open attribute slipped in (default state must be collapsed).
+	openTagEnd := strings.Index(body[idx:], ">")
+	if openTagEnd < 0 {
+		t.Fatalf("unterminated <details> opening tag")
+	}
+	openTag := body[idx : idx+openTagEnd+1]
+	if strings.Contains(openTag, " open") {
+		t.Errorf("branches <details> opened by default: %q", openTag)
+	}
+
+	// Summary carries the count text and the name peek (two seeded branches).
+	if !strings.Contains(body, "2 branches") {
+		t.Errorf("summary missing branch count")
+	}
+	if !strings.Contains(body, "teem/worker-1") || !strings.Contains(body, "teem/worker-2") {
+		t.Errorf("summary peek missing seeded branch names")
+	}
+
+	// Branches section must come AFTER the Recent activity section.
+	activityIdx := strings.Index(body, "Recent activity")
+	if activityIdx < 0 {
+		t.Fatalf("Recent activity heading not found")
+	}
+	if idx < activityIdx {
+		t.Errorf("branches section at offset %d should come after Recent activity at %d", idx, activityIdx)
+	}
+}
+
+// TestTeamPage_BranchesPeek_Truncates asserts the comma-joined peek is
+// capped at branchNamePeekLimit names and appends a "+N more" tail.
+func TestTeamPage_BranchesPeek_Truncates(t *testing.T) {
+	rows := make([]dashboardBranch, 10)
+	for i := range rows {
+		rows[i].Name = fmt.Sprintf("teem/worker-%c", 'a'+i)
+	}
+	got := branchNamePeek(rows, branchNamePeekLimit)
+	want := "teem/worker-a, teem/worker-b, teem/worker-c, teem/worker-d, teem/worker-e +5 more"
+	if got != want {
+		t.Errorf("peek mismatch:\n  got  %q\n  want %q", got, want)
+	}
+}
+
+// TestTeamPage_NoBranches_StillRenders asserts the team page is happy
+// with a repo that has zero teem/* branches: the collapsed wrapper is
+// there, the summary reads "0 branches", and the empty body renders the
+// existing placeholder rather than panicking.
+func TestTeamPage_NoBranches_StillRenders(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	rt.repoRoot = t.TempDir() // empty dir → listTeemBranches yields nil
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `<details id="details-branches"`) {
+		t.Errorf("collapsed branches wrapper missing")
+	}
+	if !strings.Contains(body, "0 branches") {
+		t.Errorf("expected '0 branches' in summary")
+	}
+	if !strings.Contains(body, "no teem/* branches in this working tree") {
+		t.Errorf("empty-state placeholder missing")
 	}
 }
 

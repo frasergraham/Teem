@@ -273,6 +273,24 @@
   .branch.orphan .name { opacity: 0.7; }
   .branch.orphan .name::after { content: " (orphan)"; color: var(--muted); font-style: italic; }
 
+  /* Collapsed branches section sits at the bottom of the team page —
+     visually demoted so it doesn't compete with status / awaiting-approval
+     / tasks above it. The <summary> shows count + a peek of branch names. */
+  .branches-section-collapsed { color: var(--muted); padding: 6px 0; }
+  .branches-section-collapsed > summary {
+    cursor: pointer; list-style: revert; padding: 4px 0;
+    font-size: 13px; color: var(--muted);
+  }
+  .branches-section-collapsed > summary:hover { color: var(--fg); }
+  .branches-section-collapsed .branches-count { font-weight: 500; }
+  .branches-section-collapsed .branches-peek {
+    margin-left: 8px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px;
+  }
+  .branches-section-collapsed[open] { color: inherit; padding-bottom: 10px; }
+  .branches-section-collapsed[open] > summary { color: var(--fg); margin-bottom: 6px; }
+  .branches-body { padding-top: 4px; }
+  .muted { color: var(--muted); }
+
   .agents-mini { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; }
   .agents-mini .agent {
     background: var(--pill-bg); border-radius: 6px; padding: 4px 8px;
@@ -869,26 +887,6 @@
       </div>
 
       <div class="section">
-        <h3>Active branches</h3>
-        {{ if not .HasRepo }}
-          <div class="empty">(no repo)</div>
-        {{ else if not .Branches }}
-          <div class="empty">no teem/* branches in this working tree</div>
-        {{ else }}
-          <div class="branches">
-            {{ range .Branches }}
-              <div class="branch{{ if not .Live }} orphan{{ end }}">
-                <span class="name">{{ if .Live }}<a href="{{ .JobsURL }}">{{ .Name }}</a>{{ else }}{{ .Name }}{{ end }}</span>
-                <span class="sha">{{ .SHA }}</span>
-                <span class="subj">{{ .Subject }}</span>
-                <span class="when">{{ .AgeAgo }}</span>
-              </div>
-            {{ end }}
-          </div>
-        {{ end }}
-      </div>
-
-      <div class="section">
         <h3>Recent activity</h3>
         {{ if not .RecentEvents }}<div class="empty">quiet for now</div>{{ end }}
         <div class="events">
@@ -904,6 +902,31 @@
           {{ end }}
         </div>
       </div>
+
+      <details id="details-branches" class="section branches-section-collapsed">
+        <summary>
+          <span class="branches-count">{{ .Branches.Count }} branch{{ if ne .Branches.Count 1 }}es{{ end }}</span>
+          {{ if .Branches.NamePeek }}<span class="branches-peek muted">{{ .Branches.NamePeek }}</span>{{ end }}
+        </summary>
+        <div class="branches-body">
+          {{ if not .HasRepo }}
+            <div class="empty">(no repo)</div>
+          {{ else if not .Branches.Rows }}
+            <div class="empty">no teem/* branches in this working tree</div>
+          {{ else }}
+            <div class="branches">
+              {{ range .Branches.Rows }}
+                <div class="branch{{ if not .Live }} orphan{{ end }}">
+                  <span class="name">{{ if .Live }}<a href="{{ .JobsURL }}">{{ .Name }}</a>{{ else }}{{ .Name }}{{ end }}</span>
+                  <span class="sha">{{ .SHA }}</span>
+                  <span class="subj">{{ .Subject }}</span>
+                  <span class="when">{{ .AgeAgo }}</span>
+                </div>
+              {{ end }}
+            </div>
+          {{ end }}
+        </div>
+      </details>
     </section>
   {{ end }}
 
