@@ -55,15 +55,21 @@ type Config struct {
 	LoadSession SessionLoader // returns the session id or (false) if no chat has run yet
 	PauseFile   string        // path; presence skips ticks
 	RunningFile string        // path; presence signals daemon to auto-resume on restart
-	MCPConfig   string        // path to ~/.teem/state/<team>/pulse-mcp.json
-	RepoRoot    string        // CWD for the claude subprocess
-	Plan        *plan.Plan
-	Audit       audit.Sink
-	Registry    *mcpsrv.Registry
-	Interval    time.Duration // timer cadence; default 5m
-	BodyCap     int           // truncation cap for assistant text in audit; default 64 KiB
-	ClaudePath  string        // optional override (default: exec.LookPath("claude"))
-	TickTimeout time.Duration // per-tick deadline; default 5m
+	// WakePromptFile, when non-empty, is the per-team operator
+	// override for the wake-prompt text passed to claude on every
+	// tick. Pulse reads it on construction; non-empty contents wins,
+	// otherwise defaultWakePrompt is used. SetWakePrompt rewrites it
+	// so daemon restarts pick up overrides.
+	WakePromptFile string
+	MCPConfig      string // path to ~/.teem/state/<team>/pulse-mcp.json
+	RepoRoot       string // CWD for the claude subprocess
+	Plan           *plan.Plan
+	Audit          audit.Sink
+	Registry       *mcpsrv.Registry
+	Interval       time.Duration // timer cadence; default 5m
+	BodyCap        int           // truncation cap for assistant text in audit; default 64 KiB
+	ClaudePath     string        // optional override (default: exec.LookPath("claude"))
+	TickTimeout    time.Duration // per-tick deadline; default 5m
 	// MaxPerHour caps autonomous ticks; default 30. Exceeded ticks
 	// are skipped and counted but emit no claude invocation. A pause
 	// flag and stop() are the override knobs.
@@ -118,6 +124,19 @@ type Pulse struct {
 	// the same way. On disconnect the flag clears and pulse resumes
 	// as the headless fallback. See docs/wake-strategy.md §5.
 	channelsLive atomic.Bool
+
+	// wakePrompt is the active first-turn message handed to claude on
+	// each tick. Initialized from WakePromptFile in New (or
+	// defaultWakePrompt when the file is missing/empty); SetWakePrompt
+	// swaps it atomically and persists to disk. Stored as a plain
+	// string via atomic.Pointer-style atomic.Value so concurrent
+	// invokeClaude callers see a consistent snapshot per tick.
+	wakePrompt atomic.Value // string
+
+	// intervalNs holds the current cadence in nanoseconds. Stored
+	// atomically so the timer loop's effectiveInterval read doesn't
+	// race the dashboard's SetInterval / UpdateConfig writes.
+	intervalNs atomic.Int64
 }
 
 // New constructs a Pulse from a Config. Sensible defaults are applied
@@ -141,7 +160,81 @@ func New(cfg Config) *Pulse {
 	if cfg.IdleBackoffAfter == 0 {
 		cfg.IdleBackoffAfter = 3
 	}
-	return &Pulse{cfg: cfg, nudgeCh: make(chan string, 32)}
+	p := &Pulse{cfg: cfg, nudgeCh: make(chan string, 32)}
+	p.wakePrompt.Store(loadWakePromptFile(cfg.WakePromptFile))
+	p.intervalNs.Store(int64(cfg.Interval))
+	return p
+}
+
+// loadWakePromptFile returns the file's trimmed contents when present
+// and non-empty; otherwise returns defaultWakePrompt. A missing file or
+// any read error counts as "use the default" — the override file is
+// strictly opt-in.
+func loadWakePromptFile(path string) string {
+	if path == "" {
+		return defaultWakePrompt
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return defaultWakePrompt
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return defaultWakePrompt
+	}
+	return trimmed
+}
+
+// WakePrompt returns the message currently passed to claude as the
+// leader's first turn on each tick. Used by the dashboard's pulse
+// panel to render the textarea pre-filled with the active value.
+func (p *Pulse) WakePrompt() string {
+	v, _ := p.wakePrompt.Load().(string)
+	if v == "" {
+		return defaultWakePrompt
+	}
+	return v
+}
+
+// IsCustomWakePrompt reports whether the active prompt differs from
+// the built-in default — a UX hint for the dashboard ("custom" vs
+// "using default"). Cheap; no I/O.
+func (p *Pulse) IsCustomWakePrompt() bool {
+	return p.WakePrompt() != defaultWakePrompt
+}
+
+// DefaultWakePrompt exposes the built-in default so callers (the
+// dashboard panel, tests) can render it as a placeholder when the
+// operator hasn't supplied an override.
+func DefaultWakePrompt() string { return defaultWakePrompt }
+
+// SetWakePrompt swaps the active wake prompt and persists the change
+// so a daemon restart picks it up. An empty (whitespace-only) value
+// clears the override and returns to defaultWakePrompt — the file is
+// removed from disk in that case so a fresh New() also reads the
+// default. Safe to call while pulse is running; the next tick's
+// invokeClaude call observes the new value.
+func (p *Pulse) SetWakePrompt(text string) error {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		p.wakePrompt.Store(defaultWakePrompt)
+		if p.cfg.WakePromptFile == "" {
+			return nil
+		}
+		err := os.Remove(p.cfg.WakePromptFile)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	p.wakePrompt.Store(trimmed)
+	if p.cfg.WakePromptFile == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(p.cfg.WakePromptFile), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(p.cfg.WakePromptFile, []byte(trimmed+"\n"), 0o600)
 }
 
 // Start kicks off the periodic loop AND the audit-event debouncer.
@@ -240,7 +333,7 @@ func (p *Pulse) LastTick() time.Time {
 func (p *Pulse) TickCount() int64 { return p.tickN.Load() }
 
 // Interval returns the current timer cadence.
-func (p *Pulse) Interval() time.Duration { return p.cfg.Interval }
+func (p *Pulse) Interval() time.Duration { return time.Duration(p.intervalNs.Load()) }
 
 // Busy peeks at the tick mutex and reports whether a tick is currently
 // executing. Useful for HTTP handlers that want a quick "already in
@@ -262,8 +355,24 @@ func (p *Pulse) Busy() bool {
 // change takes effect on the next tick wakeup.
 func (p *Pulse) SetInterval(d time.Duration) {
 	if d > 0 {
-		p.cfg.Interval = d
+		p.intervalNs.Store(int64(d))
 	}
+}
+
+// UpdateConfig changes the cadence and/or wake prompt on a running
+// pulse without bouncing. Either argument may be left at its zero
+// value to leave the corresponding field unchanged: a zero interval
+// keeps the existing cadence; a nil wakePrompt pointer keeps the
+// existing prompt. Returns the wake-prompt persistence error (if any)
+// — the interval change is in-memory only and cannot fail.
+func (p *Pulse) UpdateConfig(interval time.Duration, wakePrompt *string) error {
+	if interval > 0 {
+		p.intervalNs.Store(int64(interval))
+	}
+	if wakePrompt == nil {
+		return nil
+	}
+	return p.SetWakePrompt(*wakePrompt)
 }
 
 // Paused returns true if the pause flag file exists.
@@ -340,15 +449,16 @@ func (p *Pulse) run(ctx context.Context) {
 // streak crosses IdleBackoffAfter, capped at 8× so we never go fully
 // silent (still want a periodic check-in).
 func (p *Pulse) effectiveInterval() time.Duration {
+	base := p.Interval()
 	streak := int(p.idleStreak.Load())
 	if streak <= p.cfg.IdleBackoffAfter {
-		return p.cfg.Interval
+		return base
 	}
 	mult := 1 << ((streak - p.cfg.IdleBackoffAfter) - 1)
 	if mult > 8 {
 		mult = 8
 	}
-	return p.cfg.Interval * time.Duration(mult)
+	return base * time.Duration(mult)
 }
 
 // runDebouncer collects nudges (audit-event triggers) and fires one
@@ -629,7 +739,7 @@ func (p *Pulse) buildContextSnapshot(trigger string, priorLast time.Time) string
 	if p.cfg.Audit != nil {
 		since := priorLast
 		if since.IsZero() {
-			since = time.Now().Add(-p.cfg.Interval)
+			since = time.Now().Add(-p.Interval())
 		}
 		events, err := p.cfg.Audit.Query("", since, 30)
 		if err == nil && len(events) > 0 {
@@ -708,7 +818,7 @@ func (p *Pulse) invokeClaude(ctx context.Context, contextBody string) (tickResul
 		}
 		claudePath = path
 	}
-	args := buildClaudeArgs(p.cfg.MCPConfig, contextBody)
+	args := buildClaudeArgs(p.cfg.MCPConfig, contextBody, p.WakePrompt())
 	cmd := exec.CommandContext(ctx, claudePath, args...)
 	cmd.Dir = p.cfg.RepoRoot
 	cmd.Stdin = nil
@@ -764,7 +874,10 @@ Required before ending your turn (no exceptions): call update_leader_status with
 // trailing prompt). ChannelFlags are placed BEFORE another flag so the
 // next `--…` token terminates the variadic, leaving the prompt at the
 // end intact.
-func buildClaudeArgs(mcpConfig, contextBody string) []string {
+func buildClaudeArgs(mcpConfig, contextBody, wakePrompt string) []string {
+	if wakePrompt == "" {
+		wakePrompt = defaultWakePrompt
+	}
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -776,7 +889,7 @@ func buildClaudeArgs(mcpConfig, contextBody string) []string {
 		"--append-system-prompt", contextBody,
 		"--dangerously-skip-permissions",
 	)
-	args = append(args, defaultWakePrompt)
+	args = append(args, wakePrompt)
 	return args
 }
 

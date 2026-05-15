@@ -213,7 +213,7 @@ func TestPulse_TickSkippedWithoutSession(t *testing.T) {
 func TestPulse_StartStop(t *testing.T) {
 	claudePath := writeFakeClaude(t, "ok")
 	p, sink := newTestPulse(t, claudePath, true)
-	p.cfg.Interval = 50 * time.Millisecond
+	p.SetInterval(50 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -295,7 +295,7 @@ func TestPulse_TickBudgetExceeded(t *testing.T) {
 func TestPulse_IdleBackoffMultipliesInterval(t *testing.T) {
 	// Fake claude emits no tool_use blocks → every tick is "idle".
 	p, _ := newTestPulse(t, writeFakeClaude(t, "idle reply"), true)
-	p.cfg.Interval = 100 * time.Millisecond
+	p.SetInterval(100 * time.Millisecond)
 	p.cfg.IdleBackoffAfter = 2
 
 	for i := 0; i < 4; i++ {
@@ -304,14 +304,14 @@ func TestPulse_IdleBackoffMultipliesInterval(t *testing.T) {
 	// Streak has been bumped 4×. After IdleBackoffAfter (2), the
 	// effective interval should be larger than the base.
 	eff := p.effectiveInterval()
-	if eff <= p.cfg.Interval {
-		t.Errorf("expected backed-off interval > %s, got %s", p.cfg.Interval, eff)
+	if eff <= p.Interval() {
+		t.Errorf("expected backed-off interval > %s, got %s", p.Interval(), eff)
 	}
 }
 
 func TestPulse_NudgeTriggersTick(t *testing.T) {
 	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
-	p.cfg.Interval = 10 * time.Second // long enough that the timer doesn't fire during test
+	p.SetInterval(10 * time.Second) // long enough that the timer doesn't fire during test
 	p.cfg.DebounceWindow = 50 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -484,7 +484,7 @@ func TestPulse_Stop_ClearsFlag(t *testing.T) {
 // its single-arg value), never by a value that belongs to a variadic
 // option like --channels.
 func TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels(t *testing.T) {
-	args := buildClaudeArgs("/tmp/mcp.json", "ctx")
+	args := buildClaudeArgs("/tmp/mcp.json", "ctx", "")
 	if len(args) == 0 {
 		t.Fatal("empty args")
 	}
@@ -541,6 +541,165 @@ func TestPulse_DefaultWakePrompt_IsDirective(t *testing.T) {
 	}
 }
 
+// TestPulse_LoadsCustomWakePromptFromDisk verifies that a non-empty
+// override file present at construction wins over defaultWakePrompt
+// for the active prompt + the args handed to claude.
+func TestPulse_LoadsCustomWakePromptFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	wakePath := filepath.Join(dir, "pulse-wake.txt")
+	custom := "Custom wake — please scan and report."
+	if err := os.WriteFile(wakePath, []byte(custom+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		TeamName:       "x",
+		LoadSession:    func() (string, bool, error) { return "", false, nil },
+		PauseFile:      filepath.Join(dir, "paused"),
+		WakePromptFile: wakePath,
+		MCPConfig:      filepath.Join(dir, "mcp.json"),
+		RepoRoot:       dir,
+		Audit:          tempSink(t),
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+
+	p := New(cfg)
+	if got := p.WakePrompt(); got != custom {
+		t.Errorf("WakePrompt = %q, want %q", got, custom)
+	}
+	if !p.IsCustomWakePrompt() {
+		t.Errorf("IsCustomWakePrompt should be true when override file is present")
+	}
+	args := buildClaudeArgs(cfg.MCPConfig, "ctx", p.WakePrompt())
+	if last := args[len(args)-1]; last != custom {
+		t.Errorf("buildClaudeArgs trailing prompt = %q, want %q", last, custom)
+	}
+}
+
+// TestPulse_FallsBackToDefaultWakePromptWhenFileMissing verifies that
+// missing or whitespace-only override files yield defaultWakePrompt.
+func TestPulse_FallsBackToDefaultWakePromptWhenFileMissing(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:       "x",
+		LoadSession:    func() (string, bool, error) { return "", false, nil },
+		PauseFile:      filepath.Join(dir, "paused"),
+		WakePromptFile: filepath.Join(dir, "missing-wake.txt"),
+		MCPConfig:      filepath.Join(dir, "mcp.json"),
+		RepoRoot:       dir,
+		Audit:          tempSink(t),
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+
+	p := New(cfg)
+	if got := p.WakePrompt(); got != defaultWakePrompt {
+		t.Errorf("WakePrompt with missing file = %q, want defaultWakePrompt", got)
+	}
+	if p.IsCustomWakePrompt() {
+		t.Errorf("IsCustomWakePrompt should be false when file is missing")
+	}
+
+	// Whitespace-only file also reads as "use default".
+	if err := os.WriteFile(cfg.WakePromptFile, []byte("   \n  \t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p2 := New(cfg)
+	if got := p2.WakePrompt(); got != defaultWakePrompt {
+		t.Errorf("WakePrompt with whitespace-only file = %q, want defaultWakePrompt", got)
+	}
+}
+
+// TestPulse_SetWakePromptPersists verifies SetWakePrompt updates the
+// active prompt AND writes through to the override file so a daemon
+// restart picks it up. Clearing (empty string) removes the file.
+func TestPulse_SetWakePromptPersists(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:       "x",
+		LoadSession:    func() (string, bool, error) { return "", false, nil },
+		PauseFile:      filepath.Join(dir, "paused"),
+		WakePromptFile: filepath.Join(dir, "pulse-wake.txt"),
+		MCPConfig:      filepath.Join(dir, "mcp.json"),
+		RepoRoot:       dir,
+		Audit:          tempSink(t),
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+	p := New(cfg)
+
+	custom := "Bridge: scan ops and report."
+	if err := p.SetWakePrompt(custom); err != nil {
+		t.Fatalf("SetWakePrompt: %v", err)
+	}
+	if got := p.WakePrompt(); got != custom {
+		t.Errorf("WakePrompt after Set = %q, want %q", got, custom)
+	}
+	body, err := os.ReadFile(cfg.WakePromptFile)
+	if err != nil {
+		t.Fatalf("read wake file: %v", err)
+	}
+	if got := strings.TrimSpace(string(body)); got != custom {
+		t.Errorf("wake file body = %q, want %q", got, custom)
+	}
+
+	// Fresh Pulse picks up the persisted override.
+	p2 := New(cfg)
+	if got := p2.WakePrompt(); got != custom {
+		t.Errorf("post-restart WakePrompt = %q, want %q", got, custom)
+	}
+
+	// Empty value clears the override and removes the file.
+	if err := p.SetWakePrompt(""); err != nil {
+		t.Fatalf("SetWakePrompt empty: %v", err)
+	}
+	if got := p.WakePrompt(); got != defaultWakePrompt {
+		t.Errorf("WakePrompt after clear = %q, want defaultWakePrompt", got)
+	}
+	if _, err := os.Stat(cfg.WakePromptFile); !os.IsNotExist(err) {
+		t.Errorf("wake file should be removed after clear; stat err = %v", err)
+	}
+}
+
+// TestPulse_UpdateConfig verifies the atomic interval+wake_prompt
+// update used by the dashboard's "Save changes" button. Either
+// argument may be omitted (zero / nil) to leave that field unchanged.
+func TestPulse_UpdateConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:       "x",
+		LoadSession:    func() (string, bool, error) { return "", false, nil },
+		PauseFile:      filepath.Join(dir, "paused"),
+		WakePromptFile: filepath.Join(dir, "pulse-wake.txt"),
+		MCPConfig:      filepath.Join(dir, "mcp.json"),
+		RepoRoot:       dir,
+		Audit:          tempSink(t),
+		Interval:       5 * time.Minute,
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+	p := New(cfg)
+
+	custom := "Updated wake prompt."
+	if err := p.UpdateConfig(30*time.Second, &custom); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	if got := p.Interval(); got != 30*time.Second {
+		t.Errorf("Interval after UpdateConfig = %s, want 30s", got)
+	}
+	if got := p.WakePrompt(); got != custom {
+		t.Errorf("WakePrompt after UpdateConfig = %q, want %q", got, custom)
+	}
+
+	// Nil wake prompt leaves the existing override alone; zero
+	// interval leaves the existing cadence alone.
+	if err := p.UpdateConfig(0, nil); err != nil {
+		t.Fatalf("UpdateConfig zero: %v", err)
+	}
+	if got := p.Interval(); got != 30*time.Second {
+		t.Errorf("Interval should be unchanged; got %s", got)
+	}
+	if got := p.WakePrompt(); got != custom {
+		t.Errorf("WakePrompt should be unchanged; got %q", got)
+	}
+}
+
 // TestPulse_TickEmitsUsageEvent verifies the t-cc22531c integration:
 // every successful pulse tick emits a KindUsageEvent with the
 // expected Meta shape, alongside the existing pulse_tick event.
@@ -594,7 +753,7 @@ func TestPulse_IsInterestingKind(t *testing.T) {
 // produces zero extra ticks beyond the initial startup tick.
 func TestPulse_NudgeSuppressedWhenChannelsLive(t *testing.T) {
 	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
-	p.cfg.Interval = 10 * time.Second
+	p.SetInterval(10 * time.Second)
 	p.cfg.DebounceWindow = 50 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -639,7 +798,7 @@ func TestPulse_NudgeSuppressedWhenChannelsLive(t *testing.T) {
 // the live transition by milliseconds.
 func TestPulse_DebouncerReChecksChannelsLive(t *testing.T) {
 	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
-	p.cfg.Interval = 10 * time.Second
+	p.SetInterval(10 * time.Second)
 	// Long debounce window so the test has time to flip the gate
 	// before the timer fires.
 	p.cfg.DebounceWindow = 200 * time.Millisecond
@@ -671,7 +830,7 @@ func TestPulse_DebouncerReChecksChannelsLive(t *testing.T) {
 // next interval.
 func TestPulse_TimerSkippedWhenChannelsLive(t *testing.T) {
 	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
-	p.cfg.Interval = 50 * time.Millisecond
+	p.SetInterval(50 * time.Millisecond)
 	// Start with channels-live so the immediate startup tick is also
 	// suppressed; otherwise the loop's first tick fires before we get
 	// a chance to flip the flag.

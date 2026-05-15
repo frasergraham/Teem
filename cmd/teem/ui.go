@@ -16,6 +16,7 @@ import (
 	"github.com/frasergraham/teem/internal/leaderstatus"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/plan"
+	"github.com/frasergraham/teem/internal/pulse"
 	"github.com/frasergraham/teem/internal/team"
 )
 
@@ -178,9 +179,15 @@ type dashboardTeam struct {
 	PulseInterval  string
 	PulseLastTick  string // "(never)" or "<duration> ago"
 	PulseTickCount int64
-	RecentEvents   []dashboardEvent
-	UnreadNotes    int
-	InFlight       int64
+	// Pulse is the richer per-team pulse view used by the bridge-console
+	// pulse-management panel: lamp toggle, interval input, wake-prompt
+	// textarea. Mirrors the top-level Pulse* fields above for the
+	// existing header pill / heading line so we don't have to rewrite
+	// callers.
+	Pulse        pulseSnapshot
+	RecentEvents []dashboardEvent
+	UnreadNotes  int
+	InFlight     int64
 	// HasRepo reflects whether the team's registration carried a repo
 	// root. False ⇒ render "(no repo)" in place of the branches section.
 	HasRepo  bool
@@ -234,6 +241,27 @@ type decisionAction struct {
 	Method  string
 	URL     string
 	Primary bool
+}
+
+// pulseSnapshot is the data behind the bridge-console pulse-management
+// panel on the team-detail page. Derived from rt.pulse + the active
+// wake-prompt file. IntervalValue + IntervalUnit feed the number-input
+// + select pair so the form posts back the same shape; FormAction is
+// pre-built so the template doesn't have to know the URL prefix.
+type pulseSnapshot struct {
+	Running              bool
+	Paused               bool
+	Interval             string // formatted Go duration ("5m0s")
+	IntervalValue        int    // for the number input
+	IntervalUnit         string // "s" / "m" / "h"
+	LastTick             string // "(never)" or "<duration> ago"
+	TickCount            int64
+	WakePrompt           string // current value (default or override)
+	UseDefaultWakePrompt bool   // true ⇒ render textarea as placeholder
+	DefaultWakePrompt    string // shown as the placeholder text
+	StartURL             string // /control/teams/<id>/pulse/start
+	StopURL              string // /control/teams/<id>/pulse/stop
+	ConfigURL            string // /control/teams/<id>/pulse/config
 }
 
 // workerRow is one entry in the active-workers manifest. Persona is the
@@ -788,6 +816,7 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		} else {
 			out.PulseLastTick = "(never)"
 		}
+		out.Pulse = buildPulseSnapshot(rt)
 	}
 
 	// Recent audit events.
@@ -1175,6 +1204,57 @@ var roleDisplayTags = map[string]string{
 	"reviewer":        "REVIEWER",
 	"integrator":      "INTEGRATOR",
 	"project_manager": "PM",
+}
+
+// buildPulseSnapshot derives the data the pulse-management panel
+// renders. Splits the rounded interval into a number+unit pair so the
+// dashboard's number-input + select stay in sync with the running
+// pulse, and pre-builds the form-action URLs so the template doesn't
+// have to repeat the team-id prefix.
+func buildPulseSnapshot(rt *registeredTeam) pulseSnapshot {
+	if rt == nil || rt.pulse == nil {
+		return pulseSnapshot{}
+	}
+	wp := rt.pulse.WakePrompt()
+	custom := rt.pulse.IsCustomWakePrompt()
+	val, unit := splitInterval(rt.pulse.Interval())
+	last := "(never)"
+	if t := rt.pulse.LastTick(); !t.IsZero() {
+		last = agoShort(t)
+	}
+	base := "/control/teams/" + rt.team.ID + "/pulse"
+	return pulseSnapshot{
+		Running:              rt.pulse.Running(),
+		Paused:               rt.pulse.Paused(),
+		Interval:             rt.pulse.Interval().String(),
+		IntervalValue:        val,
+		IntervalUnit:         unit,
+		LastTick:             last,
+		TickCount:            rt.pulse.TickCount(),
+		WakePrompt:           wp,
+		UseDefaultWakePrompt: !custom,
+		DefaultWakePrompt:    pulse.DefaultWakePrompt(),
+		StartURL:             base + "/start",
+		StopURL:              base + "/stop",
+		ConfigURL:            base + "/config",
+	}
+}
+
+// splitInterval picks the largest unit (h/m/s) that the duration is an
+// exact multiple of, falling back to seconds for anything sub-minute.
+// Used to populate the dashboard's number-input + unit-select from a
+// running pulse without lossy conversion.
+func splitInterval(d time.Duration) (int, string) {
+	if d <= 0 {
+		return 5, "m"
+	}
+	if d%time.Hour == 0 {
+		return int(d / time.Hour), "h"
+	}
+	if d%time.Minute == 0 {
+		return int(d / time.Minute), "m"
+	}
+	return int(d / time.Second), "s"
 }
 
 // buildWorkers shapes the active-agent list into the bridge-console

@@ -569,6 +569,13 @@ func (d *daemon) handler() http.Handler {
 			// rather than 127.0.0.1, anyone on the tailnet can hit
 			// this — same boundary as the dashboard itself.
 			d.handlePingTeam(w, r)
+		case strings.HasPrefix(path, "/control/teams/") && isDashboardPulseAction(path):
+			// Dashboard "Pulse" panel form posts (start/stop/config
+			// sub-paths). Same unauth rationale as /ping — the
+			// dashboard is the localhost / tailnet UI surface and
+			// can't carry the bearer token. The GET on /pulse stays
+			// auth'd; only the action sub-paths are exempt.
+			d.handleControlTeamsItem(w, r)
 		case strings.HasPrefix(path, "/control/teams/"):
 			d.requireAuth(w, r, d.handleControlTeamsItem)
 		case strings.HasPrefix(path, "/teams/"):
@@ -582,6 +589,20 @@ func (d *daemon) handler() http.Handler {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+// isDashboardPulseAction reports whether the request path matches one
+// of the dashboard's pulse-panel form-post sub-paths
+// (/control/teams/<id>/pulse/{start,stop,config}). Those endpoints are
+// served unauth so the dashboard's HTML form can hit them; the bare
+// /pulse GET stays auth'd.
+func isDashboardPulseAction(path string) bool {
+	for _, suffix := range []string{"/pulse/start", "/pulse/stop", "/pulse/config"} {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *daemon) requireAuth(w http.ResponseWriter, r *http.Request, h func(http.ResponseWriter, *http.Request)) {
@@ -1097,7 +1118,9 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		d.persistStateSnapshot()
 		w.WriteHeader(http.StatusNoContent)
 	case sub == "pulse":
-		d.handlePulseControl(w, r, rt)
+		d.handlePulseControl(w, r, rt, "")
+	case strings.HasPrefix(sub, "pulse/"):
+		d.handlePulseControl(w, r, rt, strings.TrimPrefix(sub, "pulse/"))
 	case strings.HasPrefix(sub, "tasks/"):
 		d.handleControlTaskAction(w, r, rt, strings.TrimPrefix(sub, "tasks/"))
 	default:
@@ -1106,35 +1129,55 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 }
 
 // pulseStatus is the GET response shape and the start-result shape.
+// WakePrompt carries the active first-turn message; UseDefaultWakePrompt
+// is true when the operator hasn't supplied an override (useful as a
+// dashboard hint to render the textarea as a placeholder rather than a
+// pre-filled value).
 type pulseStatus struct {
-	Running   bool      `json:"running"`
-	Paused    bool      `json:"paused"`
-	Interval  string    `json:"interval"`
-	LastTick  time.Time `json:"last_tick,omitempty"`
-	TickCount int64     `json:"tick_count"`
+	Running              bool      `json:"running"`
+	Paused               bool      `json:"paused"`
+	Interval             string    `json:"interval"`
+	LastTick             time.Time `json:"last_tick,omitempty"`
+	TickCount            int64     `json:"tick_count"`
+	WakePrompt           string    `json:"wake_prompt"`
+	UseDefaultWakePrompt bool      `json:"use_default_wake_prompt"`
+	DefaultWakePrompt    string    `json:"default_wake_prompt"`
 }
 
-// pulseCommand is the POST body for action-style requests.
+// pulseCommand is the POST body for action-style requests. WakePrompt
+// is *string so callers can distinguish "leave alone" (nil) from
+// "clear override / fall back to default" (empty string).
 type pulseCommand struct {
-	Action   string `json:"action"`   // start|stop|pause|resume|tick
-	Interval string `json:"interval"` // for start; Go duration string
-	Reason   string `json:"reason"`   // for pause
+	Action     string  `json:"action"`   // start|stop|pause|resume|tick|config (action also derived from URL sub-path)
+	Interval   string  `json:"interval"` // for start/config; Go duration string
+	Reason     string  `json:"reason"`   // for pause
+	WakePrompt *string `json:"wake_prompt,omitempty"`
 }
 
-// handlePulseControl handles GET/POST under /control/teams/<name>/pulse.
-// The control plane is intentionally small: the daemon does the work,
-// the CLI is a thin formatter.
-func (d *daemon) handlePulseControl(w http.ResponseWriter, r *http.Request, rt *registeredTeam) {
+// handlePulseControl handles GET/POST under /control/teams/<id>/pulse,
+// including the sub-paths /pulse/start, /pulse/stop, /pulse/config used
+// by the dashboard's pulse panel. subAction (when non-empty) overrides
+// any cmd.Action in the body so form-style POSTs don't need to repeat
+// the verb.
+func (d *daemon) handlePulseControl(w http.ResponseWriter, r *http.Request, rt *registeredTeam, subAction string) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, currentPulseStatus(rt))
-	case http.MethodPost:
-		var cmd pulseCommand
-		if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil && err != io.EOF {
-			http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		if subAction != "" {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		switch cmd.Action {
+		writeJSON(w, http.StatusOK, currentPulseStatus(rt))
+	case http.MethodPost:
+		cmd, err := decodePulseCommand(r)
+		if err != nil {
+			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		action := cmd.Action
+		if subAction != "" {
+			action = subAction
+		}
+		switch action {
 		case "start":
 			if cmd.Interval != "" {
 				dur, err := time.ParseDuration(cmd.Interval)
@@ -1143,6 +1186,12 @@ func (d *daemon) handlePulseControl(w http.ResponseWriter, r *http.Request, rt *
 					return
 				}
 				rt.pulse.SetInterval(dur)
+			}
+			if cmd.WakePrompt != nil {
+				if err := rt.pulse.SetWakePrompt(*cmd.WakePrompt); err != nil {
+					http.Error(w, "set wake prompt: "+err.Error(), http.StatusInternalServerError)
+					return
+				}
 			}
 			rt.pulse.Start(d.baseCtx)
 		case "stop":
@@ -1162,14 +1211,82 @@ func (d *daemon) handlePulseControl(w http.ResponseWriter, r *http.Request, rt *
 			// and for testing. Runs on a background context so the
 			// HTTP request returning doesn't cancel the tick.
 			safeGo("pulse.tick:"+rt.team.Name, func() { _ = rt.pulse.Tick(d.baseCtx, "manual") })
+		case "config":
+			var dur time.Duration
+			if cmd.Interval != "" {
+				parsed, err := time.ParseDuration(cmd.Interval)
+				if err != nil {
+					http.Error(w, "bad interval: "+err.Error(), http.StatusBadRequest)
+					return
+				}
+				dur = parsed
+			}
+			if err := rt.pulse.UpdateConfig(dur, cmd.WakePrompt); err != nil {
+				http.Error(w, "update config: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		default:
-			http.Error(w, "unknown action: "+cmd.Action, http.StatusBadRequest)
+			http.Error(w, "unknown action: "+action, http.StatusBadRequest)
+			return
+		}
+		// Dashboard form posts come with Accept: text/html — redirect
+		// back to the team page so the operator stays in context.
+		if strings.Contains(r.Header.Get("Accept"), "text/html") {
+			http.Redirect(w, r, "/teams/"+rt.team.ID, http.StatusSeeOther)
 			return
 		}
 		writeJSON(w, http.StatusOK, currentPulseStatus(rt))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// decodePulseCommand reads a pulseCommand from either an
+// application/x-www-form-urlencoded body (dashboard form posts) or a
+// JSON body (CLI / programmatic callers). Empty bodies decode to a
+// zero-value command so callers can still drive the URL sub-action.
+func decodePulseCommand(r *http.Request) (pulseCommand, error) {
+	var cmd pulseCommand
+	ctype := r.Header.Get("Content-Type")
+	if i := strings.IndexByte(ctype, ';'); i >= 0 {
+		ctype = ctype[:i]
+	}
+	ctype = strings.TrimSpace(ctype)
+	switch ctype {
+	case "application/x-www-form-urlencoded", "multipart/form-data":
+		if err := r.ParseForm(); err != nil {
+			return cmd, err
+		}
+		cmd.Action = r.FormValue("action")
+		cmd.Reason = r.FormValue("reason")
+		// Dashboard splits interval into number + unit; either form
+		// works here. A bare `interval` value wins if both are sent.
+		if v := r.FormValue("interval"); v != "" {
+			cmd.Interval = v
+		} else if num := r.FormValue("interval_value"); num != "" {
+			unit := r.FormValue("interval_unit")
+			if unit == "" {
+				unit = "m"
+			}
+			cmd.Interval = num + unit
+		}
+		// Form-post wake-prompt: the textarea is always present in
+		// the form, even when blank — that's how the operator clears
+		// an override. Detect "submitted as part of the form" via the
+		// PostForm map so a missing field doesn't accidentally clear.
+		if r.PostForm.Has("wake_prompt") {
+			v := r.PostForm.Get("wake_prompt")
+			cmd.WakePrompt = &v
+		}
+	default:
+		if r.Body == nil {
+			return cmd, nil
+		}
+		if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil && err != io.EOF {
+			return cmd, err
+		}
+	}
+	return cmd, nil
 }
 
 // handlePingTeam serves POST /control/teams/<id>/ping — the dashboard's
@@ -1265,12 +1382,17 @@ func (d *daemon) pingRespond(w http.ResponseWriter, r *http.Request, teamID stri
 }
 
 func currentPulseStatus(rt *registeredTeam) pulseStatus {
+	wp := rt.pulse.WakePrompt()
+	custom := rt.pulse.IsCustomWakePrompt()
 	return pulseStatus{
-		Running:   rt.pulse.Running(),
-		Paused:    rt.pulse.Paused(),
-		Interval:  rt.pulse.Interval().String(),
-		LastTick:  rt.pulse.LastTick(),
-		TickCount: rt.pulse.TickCount(),
+		Running:              rt.pulse.Running(),
+		Paused:               rt.pulse.Paused(),
+		Interval:             rt.pulse.Interval().String(),
+		LastTick:             rt.pulse.LastTick(),
+		TickCount:            rt.pulse.TickCount(),
+		WakePrompt:           wp,
+		UseDefaultWakePrompt: !custom,
+		DefaultWakePrompt:    pulse.DefaultWakePrompt(),
 	}
 }
 
@@ -1586,14 +1708,15 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 			}
 			return s.SessionID, true, nil
 		},
-		PauseFile:   filepath.Join(defaultStateDir(t.ID), "pulse.paused"),
-		RunningFile: defaultPulseRunningFlag(t.ID),
-		MCPConfig:   pulseMCPPath,
-		RepoRoot:    repoRoot,
-		Plan:        planStore,
-		Audit:       auditSink,
-		Registry:    reg,
-		OnUsage:     d.usageRecorder(),
+		PauseFile:      filepath.Join(defaultStateDir(t.ID), "pulse.paused"),
+		RunningFile:    defaultPulseRunningFlag(t.ID),
+		WakePromptFile: filepath.Join(defaultStateDir(t.ID), "pulse-wake.txt"),
+		MCPConfig:      pulseMCPPath,
+		RepoRoot:       repoRoot,
+		Plan:           planStore,
+		Audit:          auditSink,
+		Registry:       reg,
+		OnUsage:        d.usageRecorder(),
 	})
 	// Auto-resume Pulse if it was running before the daemon
 	// restarted. Operator opt-out is `teem pulse stop` (which clears
