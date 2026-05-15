@@ -146,7 +146,7 @@ func runPruneBranches(args []string) error {
 	// MarkInUse and persists on every change. Treat InUse=true as
 	// "currently spawned, don't touch" so the CLI is safe to run with
 	// the daemon up.
-	rost, err := roster.Open(defaultRosterPath(t.Name))
+	rost, err := roster.Open(defaultRosterPath(t.ID))
 	if err != nil {
 		return fmt.Errorf("roster: %w", err)
 	}
@@ -208,7 +208,7 @@ func runPruneBranches(args []string) error {
 
 	res := pruner.Apply(ctx, cls, pruner.SweepOpts{
 		RepoRoot:     repoRoot,
-		WorktreeBase: defaultWorktreeBase(t.Name),
+		WorktreeBase: defaultWorktreeBase(t.ID),
 		Force:        *force,
 		Logf: func(format string, a ...any) {
 			fmt.Fprintf(os.Stderr, "[teem] "+format+"\n", a...)

@@ -135,7 +135,7 @@ func (d *daemon) pruneOneTeam(ctx context.Context, rt *registeredTeam) {
 
 	res := pruner.Apply(ctx, cls, pruner.SweepOpts{
 		RepoRoot:     rt.repoRoot,
-		WorktreeBase: defaultWorktreeBase(rt.team.Name),
+		WorktreeBase: defaultWorktreeBase(rt.team.ID),
 		// Periodic sweep never forces — it only ever deletes merged
 		// branches automatically. Retired / orphan / unmerged sit
 		// until the operator runs `teem prune-branches --yes --force`.
