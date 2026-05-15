@@ -45,6 +45,9 @@ func runPulse(args []string) error {
 	if err != nil {
 		return err
 	}
+	if t.ID == "" {
+		return fmt.Errorf("team has no team_id yet — run `teem chat` or `teem start` to register it")
+	}
 
 	ds, ok, err := readDaemonStateFile()
 	if err != nil {

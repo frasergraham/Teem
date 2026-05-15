@@ -745,21 +745,29 @@ func (d *daemon) restoreTeams() {
 			continue
 		}
 		t, err := team.Load(tmpFile)
-		// If the YAML on the temp file picked up an id during Load (the
-		// migration above should have already injected one, but belt &
-		// suspenders), refresh the persisted registration body so the
-		// id flows through subsequent restarts.
-		if err == nil {
-			if updated, rerr := os.ReadFile(tmpFile); rerr == nil && string(updated) != reg.TeamYAML {
-				reg.TeamYAML = string(updated)
-				_ = writeTeamRegistration(t.ID, reg)
-			}
-		}
-		_ = os.Remove(tmpFile)
 		if err != nil {
+			_ = os.Remove(tmpFile)
 			fmt.Fprintf(os.Stderr, "[teemd] skip %s: invalid yaml: %v\n", e.Name(), err)
 			continue
 		}
+		// Load is pure-read since the team-id refactor: mint+persist
+		// here so restored teams without an id (legacy registrations
+		// that escaped migrateLegacyTeamDirs) still get one written
+		// back into the saved YAML body.
+		if t.ID == "" {
+			id, werr := team.EnsureIDFile(tmpFile)
+			if werr != nil {
+				_ = os.Remove(tmpFile)
+				fmt.Fprintf(os.Stderr, "[teemd] skip %s: mint id: %v\n", e.Name(), werr)
+				continue
+			}
+			t.ID = id
+		}
+		if updated, rerr := os.ReadFile(tmpFile); rerr == nil && string(updated) != reg.TeamYAML {
+			reg.TeamYAML = string(updated)
+			_ = writeTeamRegistration(t.ID, reg)
+		}
+		_ = os.Remove(tmpFile)
 		rt, err := d.buildTeamServices(t, reg.RepoRoot, reg.WorktreeBase)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[teemd] skip %s: build services: %v\n", e.Name(), err)
@@ -1055,10 +1063,11 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "team_yaml is required", http.StatusBadRequest)
 		return
 	}
-	// Parse the YAML by writing to a temp file and using team.Load — it
-	// already validates everything we need. Load also back-fills a
-	// team_id into the temp file when missing; we re-read so the
-	// id-bearing YAML is what we persist into registration.json.
+	// Parse the YAML by writing to a temp file and using team.Load
+	// (pure-read since the team-id refactor). When the submitted YAML
+	// lacks an `id:`, EnsureIDFile mints one into the temp file; we
+	// re-read so the id-bearing YAML is what gets persisted into
+	// registration.json.
 	tmpFile, err := writeTempYAML(req.TeamYAML)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("write yaml: %v", err), http.StatusInternalServerError)
@@ -1069,6 +1078,14 @@ func (d *daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, fmt.Sprintf("validate team: %v", err), http.StatusBadRequest)
 		return
+	}
+	if t.ID == "" {
+		id, werr := team.EnsureIDFile(tmpFile)
+		if werr != nil {
+			http.Error(w, fmt.Sprintf("mint team id: %v", werr), http.StatusInternalServerError)
+			return
+		}
+		t.ID = id
 	}
 	if updated, rerr := os.ReadFile(tmpFile); rerr == nil {
 		req.TeamYAML = string(updated)

@@ -31,8 +31,10 @@ team:
 
 // agentCLIFixture sets up a temp HOME and a team yaml in cwd so the
 // CLI's defaults land under the test's scratch directory. The state
-// dir component is now <t.ID> (not the team name), so we Load the
-// team here to auto-mint and return the same id the runtime will see.
+// dir component is <t.ID> (not the team name); EnsureIDFile mints +
+// persists the id here, simulating the post-`teem chat` state where
+// the daemon has back-filled the operator's yaml. Plain Load is now
+// pure-read and would leave t.ID empty.
 func agentCLIFixture(t *testing.T) (yamlPath, stateDir string) {
 	t.Helper()
 	home := t.TempDir()
@@ -50,13 +52,11 @@ func agentCLIFixture(t *testing.T) (yamlPath, stateDir string) {
 	if err := os.WriteFile(yamlPath, []byte(agentCLITestYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Loading once mints + persists the id; subsequent loads (in the
-	// CLI under test) read it back, so this id matches the runtime.
-	tm, err := team.Load(yamlPath)
+	id, err := team.EnsureIDFile(yamlPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateDir = filepath.Join(home, ".teem", "state", tm.ID)
+	stateDir = filepath.Join(home, ".teem", "state", id)
 	return yamlPath, stateDir
 }
 
@@ -354,6 +354,72 @@ func TestParsePositional_FlagWithSpaceSeparatedValue(t *testing.T) {
 	}
 	if *teamPath != "/tmp/foo.yaml" {
 		t.Errorf("--team = %q, want /tmp/foo.yaml", *teamPath)
+	}
+}
+
+// agentCLIFixtureNoID is like agentCLIFixture but skips EnsureIDFile —
+// the on-disk yaml has no `id:` key, simulating the pre-`teem chat`
+// state. team.Load returns t.ID == "" and read-side CLIs must surface
+// a clear error rather than silently substituting "" into state paths.
+func agentCLIFixtureNoID(t *testing.T) (yamlPath string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	yamlPath = filepath.Join(cwd, "teem.yaml")
+	if err := os.WriteFile(yamlPath, []byte(agentCLITestYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return yamlPath
+}
+
+// TestAgentList_EmptyTeamID_ErrorsClearly locks in the read-side guard:
+// `teem agent list` against an id-less yaml must error with a clear
+// hint rather than silently looking up state under "" (which would
+// silently miscompute paths). Same guard exists in `teem audit`,
+// `teem pulse`, and `teem prune-branches`.
+func TestAgentList_EmptyTeamID_ErrorsClearly(t *testing.T) {
+	agentCLIFixtureNoID(t)
+	err := runAgentList(nil)
+	if err == nil {
+		t.Fatal("expected error against id-less yaml, got nil")
+	}
+	if !strings.Contains(err.Error(), "team_id") {
+		t.Errorf("error should mention team_id: %v", err)
+	}
+}
+
+// TestAgentUpdate_EmptyTeamID_MintsAndProceeds confirms `teem agent
+// update` is the write-side path: it routes through EnsureIDFile so an
+// id-less yaml gets a fresh id persisted back, matching runChat. Once
+// minted, the editor noop ("true") returns "no changes".
+func TestAgentUpdate_EmptyTeamID_MintsAndProceeds(t *testing.T) {
+	yamlPath := agentCLIFixtureNoID(t)
+	t.Setenv("EDITOR", "true")
+	t.Setenv("VISUAL", "")
+	out := captureStdout(t, func() {
+		if err := runAgentUpdate([]string{"worker", "--prompt"}); err != nil {
+			t.Fatalf("update against id-less yaml should mint id and proceed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "no changes") {
+		t.Errorf("expected 'no changes' after noop edit, got:\n%s", out)
+	}
+	// EnsureIDFile must have persisted an id back to the yaml.
+	tm, err := team.Load(yamlPath)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if tm.ID == "" {
+		t.Error("expected team.ID to be minted+persisted after update")
 	}
 }
 

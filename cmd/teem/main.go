@@ -117,6 +117,20 @@ func runChat(args []string) error {
 	if err != nil {
 		return err
 	}
+	// `teem chat` is the launch path that legitimately writes back —
+	// mint+persist the team id into the operator's teem.yaml so the
+	// daemon keys subsequent registrations off the same stable id
+	// rather than freshly minting per chat. Best-effort: if the file
+	// is read-only (rare), keep the in-memory id so this chat still
+	// works; the daemon will mint into its own copy.
+	if t.ID == "" {
+		if id, werr := team.EnsureIDFile(resolved); werr == nil {
+			t.ID = id
+		} else {
+			t.ID = team.NewID()
+			fmt.Fprintf(os.Stderr, "[teem] could not write team id back to %s: %v (using %s for this run)\n", resolved, werr, t.ID)
+		}
+	}
 	yamlBody, err := os.ReadFile(resolved)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", resolved, err)

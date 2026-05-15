@@ -46,6 +46,9 @@ func runAudit(args []string) error {
 		if err != nil {
 			return fmt.Errorf("load team: %w", err)
 		}
+		if t.ID == "" {
+			return fmt.Errorf("team has no team_id yet — run `teem chat` or `teem start` to register it")
+		}
 		path = defaultAuditPath(t.ID)
 	}
 

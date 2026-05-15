@@ -184,6 +184,16 @@ func (t *Team) MarshalYAML() ([]byte, error) {
 	}})
 }
 
+// Load parses the team YAML at path and returns the in-memory Team.
+//
+// Load is pure-read: it never writes to path. If the YAML lacks an
+// `id:` key, the returned Team's ID field is empty. Callers that need
+// a persisted id (the daemon's register / restore flows; `teem chat`
+// in the operator's working tree) must call EnsureIDFile explicitly
+// after Load. Read-side CLI commands (`teem agent show/list`,
+// `teem audit`, `teem pulse status`, ...) MUST NOT call EnsureIDFile
+// — minting from a read path silently rewrites the operator's
+// hand-edited teem.yaml the first time they peek at a prompt.
 func Load(path string) (*Team, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -199,19 +209,6 @@ func Load(path string) (*Team, error) {
 	}
 	if t.Tailnet.Hostname == "" {
 		t.Tailnet.Hostname = sanitizeHostname(t.Name)
-	}
-	// Back-fill the team_id when missing, write it back to the YAML
-	// in-place using the Node API so existing comments/order survive.
-	// Best-effort: a write failure (read-only fs, permissions) only
-	// keeps the minted id in memory so this Load still succeeds.
-	if t.ID == "" {
-		id, werr := EnsureIDFile(path)
-		if werr == nil {
-			t.ID = id
-		} else {
-			t.ID = NewID()
-			fmt.Fprintf(os.Stderr, "[teem] could not write team id back to %s: %v (using %s for this run)\n", path, werr, t.ID)
-		}
 	}
 	return t, nil
 }

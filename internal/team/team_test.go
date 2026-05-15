@@ -299,6 +299,60 @@ team:
 	}
 }
 
+// TestLoad_DoesNotMutateYAMLWithoutID is the regression test for the
+// pure-read Load contract. Before this fix, Load auto-minted+wrote a
+// `team_id` back into the operator's teem.yaml the first time a CLI
+// read-side command (`teem agent show --prompt`, `teem agent list`)
+// touched the file. That silently mutated the operator's hand-edited
+// YAML during a read — surprising and a bug. Load must now return
+// whatever's on disk, byte-for-byte unchanged.
+func TestLoad_DoesNotMutateYAMLWithoutID(t *testing.T) {
+	body := `# Hand-edited config — comments must survive.
+team:
+  name: alpha
+  leader:
+    system_prompt: "Ship the MVP."
+  archetypes:
+    - role: worker
+      description: "Implements features."
+      placement: local
+      max_concurrent: 1
+`
+	path := writeTemp(t, body)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read before: %v", err)
+	}
+	beforeStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+	beforeMtime := beforeStat.ModTime()
+
+	tm, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if tm.ID != "" {
+		t.Errorf("Load returned t.ID=%q on a yaml without id; pure-read Load must surface the disk state, not mint", tm.ID)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Errorf("Load mutated the YAML.\n--- before ---\n%s\n--- after ---\n%s", before, after)
+	}
+	afterStat, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if !afterStat.ModTime().Equal(beforeMtime) {
+		t.Errorf("Load touched the file's mtime (before=%v after=%v); pure-read must not write", beforeMtime, afterStat.ModTime())
+	}
+}
+
 // TestNewID_FormatAndUniqueness exercises the id minter directly: every
 // minted id must match the canonical regex (`t-` + 16 lowercase hex
 // chars) and ten draws in a row must all differ. A regression that

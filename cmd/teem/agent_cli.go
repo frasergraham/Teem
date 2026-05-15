@@ -60,7 +60,19 @@ Usage:
 
 // loadAgentDeps resolves the team YAML and returns the team plus the
 // prompt Builder and memory Store rooted under the team's state dir.
+// Read-side path (list/show): errors if the yaml has no team_id yet.
 func loadAgentDeps(teamPath string) (*team.Team, *prompts.Builder, *archmem.Store, error) {
+	return loadAgentDepsInternal(teamPath, false)
+}
+
+// loadAgentDepsForWrite is like loadAgentDeps but mints+persists a
+// team id into the yaml when missing (write-side: `teem agent update`
+// is editing artefacts that live under the team-id state dir).
+func loadAgentDepsForWrite(teamPath string) (*team.Team, *prompts.Builder, *archmem.Store, error) {
+	return loadAgentDepsInternal(teamPath, true)
+}
+
+func loadAgentDepsInternal(teamPath string, ensureID bool) (*team.Team, *prompts.Builder, *archmem.Store, error) {
 	resolved, err := resolveTeamPath(teamPath)
 	if err != nil {
 		return nil, nil, nil, err
@@ -68,6 +80,16 @@ func loadAgentDeps(teamPath string) (*team.Team, *prompts.Builder, *archmem.Stor
 	t, err := team.Load(resolved)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	if t.ID == "" {
+		if !ensureID {
+			return nil, nil, nil, fmt.Errorf("team has no team_id yet — run `teem chat` or `teem start` to register it")
+		}
+		id, werr := team.EnsureIDFile(resolved)
+		if werr != nil {
+			return nil, nil, nil, fmt.Errorf("mint team id into %s: %w", resolved, werr)
+		}
+		t.ID = id
 	}
 	b := prompts.New(t, defaultPromptOverrideDir(t.ID))
 	store := archmem.New(defaultMemoryDir(t.ID), func() []string {
@@ -190,7 +212,7 @@ func runAgentUpdate(args []string) error {
 	if !*editPrompt && !*editMemory {
 		*editPrompt = true
 	}
-	t, b, store, err := loadAgentDeps(*teamPath)
+	t, b, store, err := loadAgentDepsForWrite(*teamPath)
 	if err != nil {
 		return err
 	}
