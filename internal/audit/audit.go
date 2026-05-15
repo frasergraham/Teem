@@ -72,11 +72,23 @@ const (
 	// notices pipeline movement without polling list_tasks.
 	KindTaskStageChanged Kind = "task_stage_changed"
 	// KindPMTick is emitted by the daemon's project-manager loop on
-	// every scheduled tick. Meta.outcome is one of "spawned" (PM was
-	// spawned and assigned the standing consultation brief),
-	// "skipped_overlap" (a prior PM is still running), or "error".
-	// AgentID and JobID are filled when applicable.
+	// every scheduled tick. Meta.outcome is one of the PMOutcomeXxx
+	// constants below. AgentID and JobID are filled when applicable.
 	KindPMTick Kind = "pm_tick"
+)
+
+// PMOutcomeXxx are the values the project-manager loop writes into
+// audit.Event.Meta["outcome"] for KindPMTick events.
+const (
+	// PMOutcomeSpawned: PM was spawned and assigned the standing
+	// consultation brief.
+	PMOutcomeSpawned = "spawned"
+	// PMOutcomeSkippedOverlap: a prior PM is still running, so this
+	// tick was skipped.
+	PMOutcomeSkippedOverlap = "skipped_overlap"
+	// PMOutcomeError: spawn or assign_job failed for some other
+	// reason; Event.Message carries the underlying error.
+	PMOutcomeError = "error"
 )
 
 // Event is one entry on the audit channel. Meta is a free-form bag for

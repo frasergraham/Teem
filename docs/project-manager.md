@@ -89,6 +89,9 @@ leader sees it on its next pulse.
   path.
 - **Idempotency:** the scheduled tick should be a no-op when one is
   already in flight; daemon guards with a per-team mutex.
+- **Per-tick wait timeout:** 15m. Slow tracker round-trips can exceed
+  5m; 15m gives the PM headroom before the loop retires the worker
+  and moves on.
 
 **Why both, not just on-demand:**
 

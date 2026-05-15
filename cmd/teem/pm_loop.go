@@ -137,9 +137,9 @@ func (c PMLoopConfig) Loop(ctx context.Context) {
 func (c PMLoopConfig) tick(ctx context.Context) {
 	agentID, err := c.Spawner.Spawn(ctx, "project_manager", "")
 	if err != nil {
-		outcome := "error"
+		outcome := audit.PMOutcomeError
 		if isAtCapacityErr(err) {
-			outcome = "skipped_overlap"
+			outcome = audit.PMOutcomeSkippedOverlap
 		}
 		c.writeAudit(audit.Event{
 			Kind:    audit.KindPMTick,
@@ -159,7 +159,7 @@ func (c PMLoopConfig) tick(ctx context.Context) {
 			AgentID: agentID,
 			Kind:    audit.KindPMTick,
 			Message: "assign_job: " + err.Error(),
-			Meta:    map[string]any{"outcome": "error"},
+			Meta:    map[string]any{"outcome": audit.PMOutcomeError},
 		})
 		// Retire the worker even on assign failure — leaving it idle
 		// would leak the capacity slot.
@@ -168,6 +168,8 @@ func (c PMLoopConfig) tick(ctx context.Context) {
 	}
 
 	c.waitForJob(ctx, jobID)
+	// Best-effort retire. If the daemon is shutting down, ctx is already Done
+	// and the spawner's shutdown path will tear the agent down via its own loop.
 	if err := c.Spawner.StopAgent(ctx, agentID); err != nil {
 		fmt.Fprintf(os.Stderr, "[pm_loop] %s: stop %s: %v\n", c.TeamName, agentID, err)
 	}
@@ -175,7 +177,7 @@ func (c PMLoopConfig) tick(ctx context.Context) {
 		AgentID: agentID,
 		JobID:   jobID,
 		Kind:    audit.KindPMTick,
-		Meta:    map[string]any{"outcome": "spawned"},
+		Meta:    map[string]any{"outcome": audit.PMOutcomeSpawned},
 	})
 }
 
