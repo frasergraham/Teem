@@ -567,7 +567,7 @@
               {{ if .StageAgo }}<span class="when">awaiting {{ .StageAgo }}</span>{{ end }}
             </div>
             {{ if .NotesLong }}
-              <details class="expandable"><summary><div class="preview">{{ .NotesPreview }}</div></summary><div class="expanded">{{ .Notes }}</div></details>
+              <details class="expandable" id="details-task-{{ .ID }}-notes"><summary><div class="preview">{{ .NotesPreview }}</div></summary><div class="expanded">{{ .Notes }}</div></details>
             {{ else if .NotesPreview }}
               <div class="preview">{{ .NotesPreview }}</div>
             {{ end }}
@@ -737,6 +737,18 @@
   {{ end }}
 
   <footer>teem · refreshing every 10s · uptime {{ .UptimeAgo }}</footer>
+
+  <script>
+    (function() {
+      document.querySelectorAll('details[id]').forEach(function(d) {
+        if (sessionStorage.getItem('expanded:' + d.id) === '1') d.open = true;
+        d.addEventListener('toggle', function() {
+          if (d.open) sessionStorage.setItem('expanded:' + d.id, '1');
+          else sessionStorage.removeItem('expanded:' + d.id);
+        });
+      });
+    })();
+  </script>
 </body>
 </html>
 {{ end }}

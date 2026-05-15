@@ -186,11 +186,14 @@ func TestTeamPage_RendersPingButtonAndFlash(t *testing.T) {
 		t.Errorf("flash still uses stale 'queued'/'next tick' wording")
 	}
 
-	// Unknown flash values are dropped (whitelist-only).
+	// Unknown flash values are dropped (whitelist-only). The page legitimately
+	// embeds a same-origin inline <script> for sessionStorage expand-state
+	// persistence, so probe for the hostile payload itself rather than the
+	// generic tag.
 	req2 := httptest.NewRequest(http.MethodGet, "/teams/alpha?flash=%3Cscript%3Ealert(1)%3C/script%3E", nil)
 	w2 := httptest.NewRecorder()
 	d.handler().ServeHTTP(w2, req2)
-	if strings.Contains(w2.Body.String(), "<script>") {
+	if strings.Contains(w2.Body.String(), "alert(1)") {
 		t.Errorf("flash whitelist failed to drop hostile value")
 	}
 }

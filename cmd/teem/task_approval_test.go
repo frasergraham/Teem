@@ -275,6 +275,45 @@ func TestDashboard_RendersAwaitingApprovalSection(t *testing.T) {
 	}
 }
 
+// TestDashboard_AwaitingApprovalDetailsPersistsAcrossReload locks in
+// the sessionStorage-based expand-state preservation: the awaiting-
+// approval brief <details> must carry a stable id matching
+// details-task-<taskid>-notes, and the team-detail page must include
+// the inline restore/persist script that reads/writes
+// sessionStorage('expanded:<id>'). Together those keep an operator's
+// expanded brief expanded across the 10s auto-refresh.
+func TestDashboard_AwaitingApprovalDetailsPersistsAcrossReload(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	// Notes must exceed the 200-char preview threshold so the renderer
+	// emits the collapsible <details> path (not the plain preview div).
+	long := strings.Repeat("please skim and confirm scope. ", 20)
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Review the PM doc", Notes: long})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+
+	wantID := `id="details-task-` + task.ID + `-notes"`
+	if !strings.Contains(body, wantID) {
+		t.Errorf("awaiting-approval <details> missing stable id %q; body=%s", wantID, body)
+	}
+	if !strings.Contains(body, "sessionStorage.getItem('expanded:'") {
+		t.Errorf("team page missing sessionStorage restore script; body=%s", body)
+	}
+	if !strings.Contains(body, "sessionStorage.setItem('expanded:'") {
+		t.Errorf("team page missing sessionStorage persist script; body=%s", body)
+	}
+}
+
 func TestDashboard_SummaryShowsAwaitingApprovalCount(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}}
 	rt := newFullTestTeam(t, "alpha")
