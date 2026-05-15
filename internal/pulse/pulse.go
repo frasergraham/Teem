@@ -92,6 +92,14 @@ type Pulse struct {
 	// fires Tick after DebounceWindow of quiet. Buffered so callers
 	// never block.
 	nudgeCh chan string
+
+	// channelsLive gates the audit-nudge path: when true, Claude Code
+	// channels are delivering wake events to the leader directly, so
+	// NudgeFromAudit/runDebouncer suppress (double-wake avoidance).
+	// The timer loop, manual ping, idle backoff and budget gate are
+	// unaffected — they remain always-on as the headless fallback.
+	// See docs/wake-strategy.md §5.
+	channelsLive atomic.Bool
 }
 
 // New constructs a Pulse from a Config. Sensible defaults are applied
@@ -347,6 +355,13 @@ func (p *Pulse) runDebouncer(ctx context.Context) {
 			r := reason
 			reason = ""
 			timer = nil
+			// Re-check the channels-live gate at fire time, not just at
+			// nudge time: a chat may have connected during the debounce
+			// window, in which case the leader will already have woken
+			// from the channel block.
+			if p.channelsLive.Load() {
+				continue
+			}
 			if err := p.Tick(ctx, "event:"+r); err != nil && !errors.Is(err, context.Canceled) {
 				p.logErr(err)
 			}
@@ -364,12 +379,31 @@ func debounceFire(t *time.Timer) <-chan time.Time {
 	return t.C
 }
 
+// SetChannelsLive flips the audit-nudge gate. When true the daemon has
+// observed at least one teem-channel SSE subscriber (Claude Code is
+// receiving channel notifications), so NudgeFromAudit becomes a no-op
+// to avoid double-waking the leader. Callers: the daemon's
+// channel-events SSE handler on subscribe/unsubscribe transitions.
+func (p *Pulse) SetChannelsLive(live bool) { p.channelsLive.Store(live) }
+
+// ChannelsLive reports the current gate state. Exposed for status
+// rendering and tests.
+func (p *Pulse) ChannelsLive() bool { return p.channelsLive.Load() }
+
 // NudgeFromAudit is the entry point the daemon's audit-handler wrapper
 // calls every time workers POST events. Pulse inspects the events for
 // "interesting" kinds (job lifecycle, errors) and, if Pulse is
 // running, schedules a debounced tick.
+//
+// When channels-live is set, this path is a no-op — the leader is
+// receiving the same events via the Claude Code channel block and
+// firing pulse here would double-wake. The timer + manual ping stay
+// always-on as the headless fallback (see docs/wake-strategy.md).
 func (p *Pulse) NudgeFromAudit(events []audit.Event) {
 	if !p.Running() {
+		return
+	}
+	if p.channelsLive.Load() {
 		return
 	}
 	for _, e := range events {
@@ -394,7 +428,7 @@ func (p *Pulse) NudgeFromAudit(events []audit.Event) {
 // pulse_tick echoes don't (we'd loop on our own audit writes).
 func isInterestingKind(k audit.Kind) bool {
 	switch k {
-	case audit.KindJobComplete, audit.KindJobError, audit.KindNote:
+	case audit.KindJobComplete, audit.KindJobError, audit.KindNote, audit.KindWorkerStopped:
 		return true
 	}
 	return false

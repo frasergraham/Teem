@@ -76,10 +76,22 @@ func New(bufSize int) *Bus {
 // silently — that's intentional. We optimise for the leader's wake
 // signal, not for replay completeness.
 func (b *Bus) Subscribe() (id int, ch <-chan Event, cancel func()) {
+	id, ch, _, c := b.SubscribeAndCount()
+	return id, ch, func() { c() }
+}
+
+// SubscribeAndCount is the TOCTOU-free variant of Subscribe: it
+// registers the listener AND returns the post-subscribe subscriber
+// count observed under the same internal lock, so callers can decide
+// "am I the first subscriber?" without a separate Len() call (which
+// could see an inflated/deflated count between Subscribe and Len).
+// The returned cancel func unsubscribes and returns the post-cancel
+// count, symmetrically — useful for "am I the last subscriber?".
+func (b *Bus) SubscribeAndCount() (id int, ch <-chan Event, count int, cancel func() int) {
 	if b == nil {
 		closed := make(chan Event)
 		close(closed)
-		return 0, closed, func() {}
+		return 0, closed, 0, func() int { return 0 }
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -87,7 +99,8 @@ func (b *Bus) Subscribe() (id int, ch <-chan Event, cancel func()) {
 	id = b.nextID
 	c := make(chan Event, b.bufSize)
 	b.subscribers[id] = c
-	cancel = func() {
+	count = len(b.subscribers)
+	cancel = func() int {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		if ex, ok := b.subscribers[id]; ok {
@@ -95,8 +108,9 @@ func (b *Bus) Subscribe() (id int, ch <-chan Event, cancel func()) {
 			delete(b.lastDropLog, id)
 			close(ex)
 		}
+		return len(b.subscribers)
 	}
-	return id, c, cancel
+	return id, c, count, cancel
 }
 
 // Publish delivers e to every current subscriber. Non-blocking: if a

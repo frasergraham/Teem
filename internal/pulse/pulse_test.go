@@ -487,7 +487,7 @@ func TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels(t *testing.T) {
 }
 
 func TestPulse_IsInterestingKind(t *testing.T) {
-	for _, k := range []audit.Kind{audit.KindJobComplete, audit.KindJobError, audit.KindNote} {
+	for _, k := range []audit.Kind{audit.KindJobComplete, audit.KindJobError, audit.KindNote, audit.KindWorkerStopped} {
 		if !isInterestingKind(k) {
 			t.Errorf("%q should be interesting", k)
 		}
@@ -496,5 +496,107 @@ func TestPulse_IsInterestingKind(t *testing.T) {
 		if isInterestingKind(k) {
 			t.Errorf("%q should NOT be interesting (causes feedback loop)", k)
 		}
+	}
+}
+
+// TestPulse_NudgeSuppressedWhenChannelsLive verifies the t-50458567
+// gate: when channels-live is set, NudgeFromAudit must not enqueue
+// (and so must not produce a tick), but the timer/manual paths are
+// unaffected. Acceptance: with channelsLive=true a job_complete event
+// produces zero extra ticks beyond the initial startup tick.
+func TestPulse_NudgeSuppressedWhenChannelsLive(t *testing.T) {
+	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
+	p.cfg.Interval = 10 * time.Second
+	p.cfg.DebounceWindow = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+	defer p.Stop()
+
+	// Drain the immediate startup tick.
+	time.Sleep(200 * time.Millisecond)
+	before, _ := sink.Query("leader", time.Time{}, 0)
+
+	p.SetChannelsLive(true)
+	if !p.ChannelsLive() {
+		t.Fatal("ChannelsLive after SetChannelsLive(true) should be true")
+	}
+	p.NudgeFromAudit([]audit.Event{
+		{Kind: audit.KindJobComplete, AgentID: "worker-1", JobID: "j7"},
+	})
+	time.Sleep(300 * time.Millisecond)
+	after, _ := sink.Query("leader", time.Time{}, 0)
+	if len(after) != len(before) {
+		t.Errorf("nudge while channels-live should be a no-op; ticks before=%d after=%d", len(before), len(after))
+	}
+
+	// Now flip channels back to fallback and re-nudge: a tick should
+	// fire normally.
+	p.SetChannelsLive(false)
+	p.NudgeFromAudit([]audit.Event{
+		{Kind: audit.KindJobComplete, AgentID: "worker-1", JobID: "j8"},
+	})
+	time.Sleep(300 * time.Millisecond)
+	resumed, _ := sink.Query("leader", time.Time{}, 0)
+	if len(resumed) <= len(after) {
+		t.Errorf("post-fallback nudge did not produce a tick: before=%d after=%d", len(after), len(resumed))
+	}
+}
+
+// TestPulse_DebouncerReChecksChannelsLive: if channels-live flips
+// during the debounce window (chat reconnected just after the nudge),
+// the deferred Tick must not fire. Guards the doc's "suppresses while
+// channels are live" claim against the race where the nudge precedes
+// the live transition by milliseconds.
+func TestPulse_DebouncerReChecksChannelsLive(t *testing.T) {
+	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
+	p.cfg.Interval = 10 * time.Second
+	// Long debounce window so the test has time to flip the gate
+	// before the timer fires.
+	p.cfg.DebounceWindow = 200 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+	defer p.Stop()
+
+	time.Sleep(200 * time.Millisecond)
+	before, _ := sink.Query("leader", time.Time{}, 0)
+
+	// Nudge while NOT live, then flip live before the debounce fires.
+	p.NudgeFromAudit([]audit.Event{
+		{Kind: audit.KindJobComplete, AgentID: "w", JobID: "j"},
+	})
+	p.SetChannelsLive(true)
+	time.Sleep(500 * time.Millisecond)
+	after, _ := sink.Query("leader", time.Time{}, 0)
+	if len(after) != len(before) {
+		t.Errorf("debouncer should re-check channels-live at fire time; ticks before=%d after=%d", len(before), len(after))
+	}
+}
+
+// TestPulse_TimerNotGatedByChannels: even with channels-live the
+// always-on timer path must still produce ticks. The gate is for the
+// audit-nudge path only.
+func TestPulse_TimerNotGatedByChannels(t *testing.T) {
+	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
+	p.SetChannelsLive(true)
+
+	if err := p.Tick(context.Background(), "timer"); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	events, _ := sink.Query("leader", time.Time{}, 0)
+	if len(events) != 1 {
+		t.Errorf("timer Tick under channels-live should still fire; got %d events", len(events))
+	}
+
+	// Manual ping path is the same as timer (direct Tick): also unaffected.
+	if err := p.Tick(context.Background(), "manual"); err != nil {
+		t.Fatalf("manual Tick: %v", err)
+	}
+	events, _ = sink.Query("leader", time.Time{}, 0)
+	if len(events) != 2 {
+		t.Errorf("manual Tick under channels-live should still fire; got %d events", len(events))
 	}
 }

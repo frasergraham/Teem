@@ -75,6 +75,12 @@ const (
 	// every scheduled tick. Meta.outcome is one of the PMOutcomeXxx
 	// constants below. AgentID and JobID are filled when applicable.
 	KindPMTick Kind = "pm_tick"
+	// KindChannelsState is emitted by the daemon's channel-events SSE
+	// handler on every channels-live ↔ channels-fallback transition.
+	// Meta carries {"state": "live"|"fallback", "team": "<id>"}.
+	// Consumed by `teem status`, the dashboard, and (transitively) by
+	// pulse's audit-nudge gate. See docs/wake-strategy.md §5.
+	KindChannelsState Kind = "channels_state"
 )
 
 // PMOutcomeXxx are the values the project-manager loop writes into

@@ -314,6 +314,15 @@ type registeredTeam struct {
 	// teem-channel SSE subscriber. One bus per team; survives daemon
 	// lifetime, no persistence.
 	channelBus *channelbus.Bus
+
+	// detectionMu guards channelsLive and serializes the per-team
+	// channels-live ↔ fallback state machine. Held around BOTH the
+	// channelbus Subscribe/cancel call and the flag mutation so the
+	// "first subscriber" / "last subscriber" decision is TOCTOU-safe
+	// even when two SSE handlers connect concurrently. See
+	// docs/wake-strategy.md §5.
+	detectionMu  sync.Mutex
+	channelsLive bool
 }
 
 // serveDaemon runs the multi-tenant orchestrator until ctx is cancelled.
@@ -1620,6 +1629,17 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// high-volume kinds like heartbeats and pulse_tick echoes.
 	channelHook := makeChannelHook(srv.PushChannel)
 
+	// Pulse audit-nudge hook: schedules a debounced pulse Tick on
+	// interesting worker events when channels are NOT live (the L2
+	// fallback path in docs/wake-strategy.md). Pulse internally gates
+	// on its channels-live flag — when chat is connected, this hook is
+	// a no-op and the channel block does the waking. Safe whether or
+	// not Pulse has been Started: NudgeFromAudit early-returns when
+	// the loop isn't running.
+	pulseNudgeHook := func(events []audit.Event) {
+		pulseInst.NudgeFromAudit(events)
+	}
+
 	// Summarizer goroutine: rolling digest + retention pruning per
 	// role. Best-effort — failures log to stderr and the next tick
 	// retries. Uses the operator's Claude Code auth via `claude -p`
@@ -1668,11 +1688,11 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		// Audit handler fans every POST out to: write to disk, bump
 		// the agent's LastSeen, publish on bus topic "leader.wake" for
 		// terminal worker events, reconcile worker_stopped, append to
-		// archetype memory, and push channel notifications to any
-		// connected leader chat. Pulse no longer subscribes here —
-		// channels handle event-driven wakes for connected leaders;
-		// pulse handles disconnected timer wakes.
-		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook)),
+		// archetype memory, push channel notifications to any connected
+		// leader chat, and nudge pulse's debounced audit-nudge tick
+		// (suppressed by pulse when channels are live; active when
+		// chat is disconnected — see docs/wake-strategy.md §3 L2).
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook, pulseNudgeHook)),
 		plan:           planStore,
 		notes:          notesInbox,
 		pulse:          pulseInst,
@@ -2104,6 +2124,67 @@ func (d *daemon) handleTranscripts(w http.ResponseWriter, r *http.Request, rt *r
 	}
 }
 
+// observeChannelSubscribe subscribes a new SSE handler to the team's
+// channelbus and drives the channels-live ↔ fallback state machine.
+// It is the single place that mutates rt.channelsLive: the flag, the
+// audit transition event, and the pulse gate are all flipped together
+// under detectionMu, so concurrent connect/disconnect races converge
+// on a single transition emission. The returned cancel unsubscribes
+// and runs the symmetric fallback transition when the last subscriber
+// leaves.
+//
+// Why the mutex wraps cancel() (not just the bool flip): without it,
+// a concurrent subscribe between cancel()'s "I am the last" snapshot
+// and the flag mutation would see channelsLive=true and skip its own
+// 0→1 transition, then this cancel would clear the flag and emit
+// "fallback" while the new subscriber is in fact live. Holding
+// detectionMu across both the channelbus mutation AND the flag
+// mutation linearizes the decisions.
+func (d *daemon) observeChannelSubscribe(rt *registeredTeam) (<-chan channelbus.Event, func()) {
+	if rt.channelBus == nil {
+		closed := make(chan channelbus.Event)
+		close(closed)
+		return closed, func() {}
+	}
+	_, ch, count, cancelSub := rt.channelBus.SubscribeAndCount()
+	rt.detectionMu.Lock()
+	if count == 1 && !rt.channelsLive {
+		rt.channelsLive = true
+		if rt.pulse != nil {
+			rt.pulse.SetChannelsLive(true)
+		}
+		if rt.auditSink != nil {
+			_ = rt.auditSink.Write(audit.Event{
+				Timestamp: time.Now().UTC(),
+				AgentID:   "leader",
+				Kind:      audit.KindChannelsState,
+				Meta:      map[string]any{"state": "live", "team": rt.team.ID},
+			})
+		}
+	}
+	rt.detectionMu.Unlock()
+	cancel := func() {
+		rt.detectionMu.Lock()
+		defer rt.detectionMu.Unlock()
+		post := cancelSub()
+		if post == 0 && rt.channelsLive {
+			rt.channelsLive = false
+			if rt.pulse != nil {
+				rt.pulse.SetChannelsLive(false)
+			}
+			if rt.auditSink != nil {
+				_ = rt.auditSink.Write(audit.Event{
+					Timestamp: time.Now().UTC(),
+					AgentID:   "leader",
+					Kind:      audit.KindChannelsState,
+					Meta:      map[string]any{"state": "fallback", "team": rt.team.ID},
+				})
+			}
+		}
+	}
+	return ch, cancel
+}
+
 // handleChannelEvents serves the team's channel-event SSE stream to a
 // teem-channel stdio shim. The shim runs as a subprocess of Claude
 // Code, holds open one GET against this endpoint, and re-emits every
@@ -2140,7 +2221,7 @@ func (d *daemon) handleChannelEvents(w http.ResponseWriter, r *http.Request, rt 
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	_, ch, cancel := rt.channelBus.Subscribe()
+	ch, cancel := d.observeChannelSubscribe(rt)
 	defer cancel()
 
 	keepalive := time.NewTicker(25 * time.Second)
