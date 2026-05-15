@@ -348,9 +348,11 @@
     border: 1px solid var(--border);
     background: var(--card);
   }
-  .flash.pinged { border-color: var(--accent); color: var(--accent); }
-  .flash.busy   { border-color: var(--info); color: var(--info); }
-  .flash.paused { border-color: var(--warn); color: var(--warn); }
+  .flash.pinged      { border-color: var(--info); color: var(--info); }
+  .flash.tick-ok     { border-color: var(--accent); color: var(--accent); }
+  .flash.tick-failed { border-color: var(--error); color: var(--error); }
+  .flash.busy        { border-color: var(--info); color: var(--info); }
+  .flash.paused      { border-color: var(--warn); color: var(--warn); }
 
   /* --- Mobile (≤ 720px) ----------------------------------------
      Strategy: tables and event rows turn into stacked cards. Long
@@ -522,7 +524,9 @@
     <span class="clock">{{ .NowFormatted }}</span>
   </header>
 
-  {{ if eq .Flash "pinged" }}<div class="flash pinged">Ping queued — the leader will pick it up on the next tick.</div>
+  {{ if eq .Flash "pinged" }}<div class="flash pinged">Pinged — leader is taking a turn now.</div>
+  {{ else if eq .Flash "tick_ok" }}<div class="flash tick-ok">Leader turn done{{ if .FlashDetail }} ({{ .FlashDetail }}){{ end }}.</div>
+  {{ else if eq .Flash "tick_failed" }}<div class="flash tick-failed">Leader turn FAILED{{ if .FlashDetail }}: {{ .FlashDetail }}{{ end }}</div>
   {{ else if eq .Flash "busy" }}<div class="flash busy">A tick is already in progress; this ping was ignored.</div>
   {{ else if eq .Flash "paused" }}<div class="flash paused">Pulse is paused — run <code>teem pulse resume</code> before pinging.</div>{{ end }}
 

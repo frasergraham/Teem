@@ -973,12 +973,12 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 	}
 	if rt.pulse.Paused() {
 		d.pingRespond(w, r, id, http.StatusConflict, "paused",
-			"pulse paused; `teem pulse resume` first")
+			"pulse paused; `teem pulse resume` first", 0)
 		return
 	}
 	if rt.pulse.Busy() {
 		d.pingRespond(w, r, id, http.StatusAccepted, "busy",
-			"tick already in progress")
+			"tick already in progress", 0)
 		return
 	}
 
@@ -991,16 +991,27 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 			Meta:      map[string]any{"trigger": "manual"},
 		})
 	}
+	// Capture the timestamp we redirect with so the team page can scan
+	// the audit log for the matching leader pulse_tick and render the
+	// actual outcome (success / failure / still-working) instead of a
+	// fire-and-forget banner.
+	pingedAt := time.Now().Unix()
 	safeGo("pulse.ping:"+rt.team.ID, func() { _ = rt.pulse.Tick(d.baseCtx, "manual") })
-	d.pingRespond(w, r, id, http.StatusOK, "pinged", "ping queued")
+	d.pingRespond(w, r, id, http.StatusOK, "pinged", "ping queued", pingedAt)
 }
 
 // pingRespond emits the right shape based on the request's Accept
 // header: a redirect with ?flash=<tag> for form posts (so the dashboard
 // surfaces a flash), or a plain text body for curl / fetch callers.
-func (d *daemon) pingRespond(w http.ResponseWriter, r *http.Request, teamID string, code int, flash, body string) {
+// pingTS (if non-zero) is appended as &ping_ts=<unix> so the team page
+// can correlate the redirect with the leader's pulse_tick audit event.
+func (d *daemon) pingRespond(w http.ResponseWriter, r *http.Request, teamID string, code int, flash, body string, pingTS int64) {
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {
-		http.Redirect(w, r, "/teams/"+teamID+"?flash="+flash, http.StatusSeeOther)
+		loc := "/teams/" + teamID + "?flash=" + flash
+		if pingTS > 0 {
+			loc += "&ping_ts=" + strconv.FormatInt(pingTS, 10)
+		}
+		http.Redirect(w, r, loc, http.StatusSeeOther)
 		return
 	}
 	w.WriteHeader(code)

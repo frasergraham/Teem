@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -136,10 +137,14 @@ type teamPageSnapshot struct {
 	NowFormatted string
 	Team         dashboardTeam
 	// Flash is the optional one-shot message surfaced after a POST
-	// (e.g. the "Ping leader" button). Values: "pinged" / "busy" /
-	// "paused" — anything else is rendered verbatim, so unknown
-	// strings degrade gracefully.
+	// (e.g. the "Ping leader" button). Values: "pinged" (tick fired,
+	// outcome not yet known) / "tick_ok" / "tick_failed" / "busy" /
+	// "paused" — anything else renders no banner.
 	Flash string
+	// FlashDetail carries the trailing context for outcome-bearing
+	// flashes: a duration like "1.2s" for tick_ok, or the leader's
+	// error message for tick_failed. Empty for stateless flashes.
+	FlashDetail string
 }
 
 type dashboardTeam struct {
@@ -310,12 +315,28 @@ func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID s
 	case "task_commented":
 		team.Flash = "Comment added"
 	}
+	flashTag := flashFromQuery(r.URL.Query().Get("flash"))
+	flashDetail := ""
+	// For flash=pinged we wait for the leader's pulse_tick audit event
+	// since ?ping_ts=<unix> and upgrade the flash to tick_ok / tick_failed
+	// once the tick lands. The team page meta-refreshes every 10s, so the
+	// banner converges naturally — no JS poll required.
+	if flashTag == "pinged" {
+		if ts, ok := parseUnixSeconds(r.URL.Query().Get("ping_ts")); ok && found.auditSink != nil {
+			if outcomeTag, detail, found := resolvePingOutcome(found.auditSink, ts); found {
+				flashTag = outcomeTag
+				flashDetail = detail
+			}
+		}
+	}
+
 	snap := teamPageSnapshot{
 		Endpoint:     d.endpoint,
 		UptimeAgo:    agoShort(state.StartedAt),
 		NowFormatted: time.Now().Local().Format("Mon Jan 2 15:04:05"),
 		Team:         team,
-		Flash:        flashFromQuery(r.URL.Query().Get("flash")),
+		Flash:        flashTag,
+		FlashDetail:  flashDetail,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -388,6 +409,88 @@ func flashFromQuery(v string) string {
 	default:
 		return ""
 	}
+}
+
+// parseUnixSeconds parses the ?ping_ts=<unix> query parameter, rejecting
+// negative / non-integer / unreasonably old values. The cap of one hour
+// keeps stale shared/refreshed URLs from re-rendering a long-resolved
+// tick as if it just happened.
+func parseUnixSeconds(v string) (time.Time, bool) {
+	if v == "" {
+		return time.Time{}, false
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return time.Time{}, false
+	}
+	t := time.Unix(n, 0)
+	if time.Since(t) > time.Hour || t.After(time.Now().Add(time.Minute)) {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// resolvePingOutcome scans the audit log for a leader pulse_tick event
+// emitted on or after sinceTS (the moment we dispatched the ping). On
+// hit it returns ("tick_ok"|"tick_failed", detailString, true). On miss
+// (tick still in flight) it returns ("", "", false) and the caller
+// keeps the "pinged — taking a turn now" banner; the page's 10s meta
+// refresh will retry until the event lands.
+//
+// We pad the since cursor by one second because the audit timestamp is
+// stamped at the start of Tick() while ping_ts is stamped just before
+// safeGo dispatch — those can land in opposite microsecond orders.
+func resolvePingOutcome(sink *audit.FileSink, sinceTS time.Time) (string, string, bool) {
+	since := sinceTS.Add(-1 * time.Second)
+	events, err := sink.Query("leader", since, 32)
+	if err != nil {
+		return "", "", false
+	}
+	for _, ev := range events {
+		if ev.Kind != audit.Kind("pulse_tick") {
+			continue
+		}
+		if errFlag, _ := ev.Meta["error"].(bool); errFlag {
+			msg := ev.Message
+			if msg == "" {
+				msg = "(no error message)"
+			}
+			return "tick_failed", msg, true
+		}
+		// Success — surface duration when available so the operator can
+		// see at-a-glance how long the leader's turn took.
+		detail := ""
+		if ms, ok := metaInt(ev.Meta["duration_ms"]); ok {
+			detail = formatDurationMs(ms)
+		}
+		return "tick_ok", detail, true
+	}
+	return "", "", false
+}
+
+// metaInt narrows the audit event Meta map (which carries any) into an
+// int64 millisecond duration. JSON round-trips numbers as float64, so we
+// accept both shapes.
+func metaInt(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int64:
+		return n, true
+	case float64:
+		return int64(n), true
+	default:
+		return 0, false
+	}
+}
+
+// formatDurationMs renders a tick duration in a compact, operator-readable
+// form: sub-second as "320ms", otherwise "1.2s".
+func formatDurationMs(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return fmt.Sprintf("%.1fs", float64(ms)/1000)
 }
 
 func startOfLocalDay(now time.Time) time.Time {
