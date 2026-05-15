@@ -466,6 +466,8 @@ func (s *Spawner) specFromArchetype(arch team.ArchetypeSpec, id string) team.Age
 		WorkingDir:  arch.WorkingDir,
 		Lifecycle:   arch.Lifecycle,
 		MCPs:        arch.MCPs,
+		NoWorktree:  arch.NoWorktree,
+		Skill:       arch.Skill,
 	}
 	switch {
 	case arch.Placement == "local":

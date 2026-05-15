@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -113,6 +114,82 @@ func TestSpawnAgent_NameReincarnates(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "branch refs/heads/teem/worker-ada") {
 		t.Errorf("worktree list missing branch teem/worker-ada after reincarnation:\n%s", out)
+	}
+}
+
+// TestSpawnAgent_NoWorktree confirms PM1's archetype.NoWorktree flag:
+// when set, the spawner does NOT create the per-agent git worktree
+// directory or the teem/<agent-id> branch. The worker still gets a
+// usable cwd (the leader's repo root) so the claude subprocess has
+// somewhere to chdir into.
+func TestSpawnAgent_NoWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not on PATH")
+	}
+	repo := initGitRepo(t)
+	worktreeBase := t.TempDir()
+	tm := &team.Team{
+		Name:   "x",
+		Leader: team.LeaderSpec{SystemPrompt: "p"},
+		Archetypes: []team.ArchetypeSpec{
+			{
+				Role:          "project_manager",
+				Placement:     "local",
+				MaxConcurrent: 1,
+				NoWorktree:    true,
+				Skill:         "linear",
+			},
+		},
+	}
+	bs := bus.NewMemBus()
+	t.Cleanup(func() { bs.Close() })
+	sp := NewSpawner(context.Background(), tm, bs, mcpsrv.NewRegistry(), Config{
+		RepoRoot:     repo,
+		WorktreeBase: worktreeBase,
+	})
+
+	id, err := sp.Spawn(context.Background(), "project_manager", "ada")
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if id != "project_manager-ada" {
+		t.Fatalf("id = %q, want project_manager-ada", id)
+	}
+	swapExecutor(t, sp, id)
+
+	// No branch on the operator's repo.
+	if branchExists(t, repo, "teem/project_manager-ada") {
+		t.Errorf("teem/project_manager-ada branch exists, want skipped")
+	}
+
+	// No worktree directory created.
+	wtDir := filepath.Join(worktreeBase, id)
+	if _, err := os.Stat(wtDir); err == nil {
+		t.Errorf("worktree dir %s exists, want skipped", wtDir)
+	}
+
+	// And `git worktree list` should not mention the agent.
+	out, err := exec.Command("git", "-C", repo, "worktree", "list", "--porcelain").CombinedOutput()
+	if err != nil {
+		t.Fatalf("git worktree list: %v: %s", err, out)
+	}
+	if strings.Contains(string(out), "teem/project_manager-ada") {
+		t.Errorf("git worktree list mentions agent branch after NoWorktree spawn:\n%s", out)
+	}
+
+	// Skill should reach the worker's Agent.
+	sp.mu.Lock()
+	pa := sp.provisioned[id]
+	sp.mu.Unlock()
+	if pa.agent == nil {
+		t.Fatalf("provisioned record missing agent")
+	}
+	if pa.agent.Skill != "linear" {
+		t.Errorf("agent.Skill = %q, want linear", pa.agent.Skill)
+	}
+	// Working directory should fall back to repo root.
+	if pa.agent.WorkingDir != repo {
+		t.Errorf("agent.WorkingDir = %q, want repo root %q", pa.agent.WorkingDir, repo)
 	}
 }
 

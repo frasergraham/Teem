@@ -57,6 +57,55 @@ team:
 	}
 }
 
+// TestLoad_ArchetypeNoWorktreeAndSkill confirms the YAML fields added
+// for the project_manager archetype round-trip cleanly: no_worktree
+// flips the spawner's worktree-skip path, and skill is forwarded to
+// the claude subprocess via --append-system-prompt. Both are
+// omitempty so archetypes that don't set them parse exactly as before.
+func TestLoad_ArchetypeNoWorktreeAndSkill(t *testing.T) {
+	path := writeTemp(t, `
+team:
+  name: pm
+  leader:
+    system_prompt: "Ship it."
+  archetypes:
+    - role: project_manager
+      placement: local
+      max_concurrent: 1
+      no_worktree: true
+      skill: linear
+    - role: worker
+      placement: local
+      max_concurrent: 2
+`)
+	tm, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	pm := tm.FindArchetypeByRole("project_manager")
+	if pm == nil {
+		t.Fatalf("project_manager archetype missing")
+	}
+	if !pm.NoWorktree {
+		t.Errorf("project_manager NoWorktree = false, want true")
+	}
+	if pm.Skill != "linear" {
+		t.Errorf("project_manager Skill = %q, want \"linear\"", pm.Skill)
+	}
+	// Existing archetypes without the new keys must default to
+	// false / empty so they're unaffected.
+	w := tm.FindArchetypeByRole("worker")
+	if w == nil {
+		t.Fatalf("worker archetype missing")
+	}
+	if w.NoWorktree {
+		t.Errorf("worker NoWorktree = true, want false (unset)")
+	}
+	if w.Skill != "" {
+		t.Errorf("worker Skill = %q, want empty", w.Skill)
+	}
+}
+
 func TestLoad_DefaultsHostname(t *testing.T) {
 	path := writeTemp(t, `
 team:

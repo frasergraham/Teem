@@ -171,6 +171,7 @@ func (w *Worker) runJob(ctx context.Context, job jobMessage) {
 		Prompt:  job.Prompt,
 		Context: jobCtx,
 		MCPs:    w.Agent.MCPs,
+		Skill:   w.Agent.Skill,
 	})
 	res := resultMessage{JobID: job.JobID, Output: output}
 	if err != nil {

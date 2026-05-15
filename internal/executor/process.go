@@ -72,6 +72,15 @@ func (p *ProcessExecutor) Execute(ctx context.Context, job Job) (string, error) 
 	if mcpPath != "" {
 		args = append(args, "--mcp-config", mcpPath)
 	}
+	// Skill loading: claude has no --load-skill flag, so the next
+	// best thing is a system-prompt instruction that tells the
+	// assistant to invoke the named skill via the Skill tool. Skills
+	// auto-discover from ~/.claude/skills/ and the plugin install
+	// path; this just nudges the worker to use the right one.
+	if job.Skill != "" {
+		args = append(args, "--append-system-prompt",
+			fmt.Sprintf("You have the %q skill available. Invoke it via the Skill tool when it applies to the task at hand.", job.Skill))
+	}
 	prompt := job.Prompt
 	if job.Context != "" {
 		prompt = job.Context + "\n\n" + prompt

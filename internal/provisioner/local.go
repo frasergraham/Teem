@@ -112,13 +112,26 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 			Lifecycle:   spec.Lifecycle,
 			TailnetHost: "teem-" + spec.ID,
 			MCPs:        spec.MCPs,
+			Skill:       spec.Skill,
 		}, nil
 	}
 
 	// Resolve the work directory: explicit YAML wins; otherwise an
-	// isolated git worktree on a per-agent branch.
+	// isolated git worktree on a per-agent branch. Archetypes that
+	// declare no_worktree: true skip the git path entirely — used by
+	// roles whose work lives outside the codebase (e.g.
+	// project_manager). They get the leader's repo root as cwd when
+	// available, or os.TempDir() so the subprocess still has a real
+	// directory to chdir into.
 	workDir := spec.WorkingDir
 	var branch string
+	if workDir == "" && spec.NoWorktree {
+		if p.RepoRoot != "" {
+			workDir = p.RepoRoot
+		} else {
+			workDir = os.TempDir()
+		}
+	}
 	if workDir == "" {
 		if p.RepoRoot == "" || p.WorktreeBase == "" {
 			return nil, ErrLocalNoWorkingDir
@@ -156,6 +169,7 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 			Lifecycle:  spec.Lifecycle,
 			Transport:  transport.LocalTransport{},
 			MCPs:       spec.MCPs,
+			Skill:      spec.Skill,
 		}
 		if branch != "" {
 			a.Cloud = &CloudPlacement{TaskARN: workDir}
@@ -239,6 +253,7 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 		Lifecycle:  spec.Lifecycle,
 		SocketPath: socketPath,
 		MCPs:       spec.MCPs,
+		Skill:      spec.Skill,
 	}
 	if branch != "" {
 		// Stash the worktree path on Cloud so Teardown knows what to

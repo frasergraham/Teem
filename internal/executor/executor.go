@@ -19,10 +19,14 @@ import (
 // jobMessage that the spawner publishes — kept here so the bus topic schema
 // stays in one place (internal/agent) and Executors stay decoupled from it.
 type Job struct {
-	ID      string         `json:"job_id"`
-	Prompt  string         `json:"prompt"`
-	Context string         `json:"context,omitempty"`
-	MCPs    []team.MCPRef  `json:"mcps,omitempty"`
+	ID      string        `json:"job_id"`
+	Prompt  string        `json:"prompt"`
+	Context string        `json:"context,omitempty"`
+	MCPs    []team.MCPRef `json:"mcps,omitempty"`
+	// Skill names a Claude Code skill the executor should ask claude
+	// to invoke. ProcessExecutor passes it via --append-system-prompt
+	// since claude has no dedicated --load-skill flag. Empty disables.
+	Skill string `json:"skill,omitempty"`
 }
 
 // Executor runs a single job and returns the final assistant text (or an

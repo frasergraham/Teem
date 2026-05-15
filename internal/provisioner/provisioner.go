@@ -31,6 +31,14 @@ type AgentSpec struct {
 	// across `teem chat` sessions.
 	Lifecycle string
 	MCPs      []team.MCPRef
+	// NoWorktree suppresses LocalProvisioner's per-agent git worktree
+	// creation. The provisioner falls back to RepoRoot (when set) or
+	// os.TempDir() as the agent's WorkingDir.
+	NoWorktree bool
+	// Skill names a Claude Code skill the worker should invoke. Empty
+	// disables. Forwarded onto the resulting Agent so the worker can
+	// pass it through to the claude subprocess.
+	Skill string
 }
 
 // IsPersistent reports whether the spec carries a persistent lifecycle.
@@ -65,6 +73,11 @@ type Agent struct {
 	// when the worker stops; empty for backends that don't own a
 	// per-agent local branch (Fargate, SSH, persistent local).
 	WorktreeBranch string
+	// Skill names a Claude Code skill the worker should invoke for
+	// every job. Empty disables. Used by the in-process Worker to
+	// build the right --append-system-prompt instruction for the
+	// claude subprocess.
+	Skill string
 	// Stopped is true when the worker has already terminated under
 	// its own steam (typically the self-exit-after-idle path). The
 	// LocalProvisioner uses this to skip the /shutdown POST and
@@ -114,6 +127,8 @@ func FromTeamSpec(a team.AgentSpec) AgentSpec {
 		SSHTarget:  a.SSHTarget,
 		Lifecycle:  a.LifecycleOrDefault(),
 		MCPs:       a.MCPs,
+		NoWorktree: a.NoWorktree,
+		Skill:      a.Skill,
 	}
 	switch {
 	case a.Backend != "":

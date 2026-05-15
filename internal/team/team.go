@@ -71,6 +71,19 @@ type ArchetypeSpec struct {
 	// matching hostnames.
 	Lifecycle string   `yaml:"lifecycle,omitempty"`
 	MCPs      []MCPRef `yaml:"mcps,omitempty"`
+	// NoWorktree, when true, suppresses the spawner's per-agent git
+	// worktree + branch creation. Used by archetypes (e.g.
+	// project_manager) whose work lives outside the codebase. The
+	// worker still gets a working directory — either the explicit
+	// WorkingDir, or the leader's repo root, or os.TempDir() as a
+	// fallback.
+	NoWorktree bool `yaml:"no_worktree,omitempty"`
+	// Skill names a Claude Code skill the worker should load on each
+	// job. Empty means "no skill". The spawner injects a brief
+	// "invoke /<skill> via the Skill tool" instruction into the
+	// claude subprocess's system prompt via --append-system-prompt
+	// (there is no dedicated --load-skill CLI flag upstream).
+	Skill string `yaml:"skill,omitempty"`
 }
 
 // LifecycleOrDefault returns the archetype's lifecycle, defaulting to
@@ -117,6 +130,13 @@ type AgentSpec struct {
 	// launched the first time and reused thereafter.
 	Lifecycle string   `yaml:"lifecycle,omitempty"`
 	MCPs      []MCPRef `yaml:"mcps,omitempty"`
+	// NoWorktree mirrors the archetype field. Propagated by the
+	// spawner so the provisioner can skip git worktree creation for
+	// this agent.
+	NoWorktree bool `yaml:"no_worktree,omitempty"`
+	// Skill mirrors the archetype field. Forwarded to the worker so
+	// the claude subprocess can be told to invoke the named skill.
+	Skill string `yaml:"skill,omitempty"`
 }
 
 // SupportedBackends is the set of cloud backend strings accepted in

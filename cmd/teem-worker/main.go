@@ -465,6 +465,7 @@ type jobRequest struct {
 	Prompt  string        `json:"prompt"`
 	Context string        `json:"context,omitempty"`
 	MCPs    []team.MCPRef `json:"mcps,omitempty"`
+	Skill   string        `json:"skill,omitempty"`
 }
 
 type jobResponse struct {
@@ -545,6 +546,7 @@ func (w *worker) runJob(parent context.Context, req jobRequest, rec *jobRecord) 
 		Prompt:  req.Prompt,
 		Context: req.Context,
 		MCPs:    req.MCPs,
+		Skill:   req.Skill,
 	})
 	var errMsg string
 	if err != nil {
