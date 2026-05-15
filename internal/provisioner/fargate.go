@@ -268,7 +268,8 @@ func (p *FargateProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Ag
 		TailnetHost: hostname,
 		// Transport is intentionally nil for cloud agents; the Spawner
 		// builds an HTTPExecutor in lieu.
-		MCPs: spec.MCPs,
+		MCPs:  spec.MCPs,
+		Skill: spec.Skill,
 		Cloud: &CloudPlacement{
 			TaskARN: taskArn,
 		},
@@ -326,6 +327,7 @@ func (p *FargateProvisioner) tryReuse(ctx context.Context, spec AgentSpec, hostn
 		Lifecycle:   spec.Lifecycle,
 		TailnetHost: hostname,
 		MCPs:        spec.MCPs,
+		Skill:       spec.Skill,
 		Cloud:       &CloudPlacement{TaskARN: rec.TaskARN},
 	}, true, nil
 }
