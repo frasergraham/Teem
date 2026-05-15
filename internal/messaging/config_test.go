@@ -51,6 +51,45 @@ messaging:
 	}
 }
 
+func TestConfig_LoadParsesWebhookPort(t *testing.T) {
+	dir := t.TempDir()
+	writeYAML(t, dir, `
+messaging:
+  enabled: true
+  telegram:
+    enabled: true
+    bot_token_env: MY_BOT
+    chat_id: 1234567
+    webhook_port: 7788
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telegram.WebhookPort != 7788 {
+		t.Fatalf("webhook_port not parsed: got %d want 7788", cfg.Telegram.WebhookPort)
+	}
+}
+
+func TestConfig_LoadWebhookPortDefaultsToZero(t *testing.T) {
+	dir := t.TempDir()
+	writeYAML(t, dir, `
+messaging:
+  enabled: true
+  telegram:
+    enabled: true
+    bot_token_env: MY_BOT
+    chat_id: 1234567
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telegram.WebhookPort != 0 {
+		t.Fatalf("absent webhook_port should default to 0, got %d", cfg.Telegram.WebhookPort)
+	}
+}
+
 func TestConfig_RefusesStartWithoutEnv(t *testing.T) {
 	cfg := Config{
 		Enabled: true,

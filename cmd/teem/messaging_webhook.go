@@ -102,6 +102,22 @@ type telegramReplier interface {
 	SendText(ctx context.Context, chatID int64, text string) error
 }
 
+// newWebhookHandler builds an http.Handler that serves ONLY
+// /messaging/telegram/webhook (delegating to handleTelegramWebhook) and
+// returns 404 for every other path. Used by the daemon when the operator
+// configures telegram.webhook_port — the dedicated port should expose
+// nothing else, so Tailscale Funnel (or any reverse proxy) limits public
+// reach to the webhook endpoint alone.
+func newWebhookHandler(d *daemon) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messaging/telegram/webhook" {
+			http.NotFound(w, r)
+			return
+		}
+		d.handleTelegramWebhook(w, r)
+	})
+}
+
 // handleTelegramWebhook serves POST /messaging/telegram/webhook?token=…
 //
 // Auth: the ?token URL parameter must match the daemon's current

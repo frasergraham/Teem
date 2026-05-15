@@ -26,6 +26,15 @@ type TelegramConfig struct {
 	ChatID           int64  `yaml:"chat_id"`
 	DashboardBaseURL string `yaml:"dashboard_base_url"`
 	DedupWindowStr   string `yaml:"dedup_window"`
+	// WebhookPort, when > 0, makes the daemon bind a second HTTP
+	// listener that serves ONLY /messaging/telegram/webhook. The
+	// operator points Tailscale Funnel (or any reverse proxy) at
+	// this port so the public exposure is limited to the webhook
+	// endpoint — not the dashboard, MCP server, or /control
+	// surface running on the main port. 0 = disabled (webhook
+	// remains on the main port; behaviour unchanged from before
+	// this field was added).
+	WebhookPort int `yaml:"webhook_port"`
 }
 
 // fileShape is the on-disk YAML root: { messaging: { ... } }.

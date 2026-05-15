@@ -316,6 +316,13 @@ type daemon struct {
 	// keyed by replyToken. Used to enforce the 10-minute idle kill and
 	// the /done early-exit.
 	messagingChatSessions *telegramChatSessions
+	// messagingWebhookListener is the dedicated second listener (when
+	// telegram.webhook_port > 0) that exposes ONLY the webhook
+	// endpoint, so Tailscale Funnel can be pointed at it without
+	// also publishing the dashboard / MCP / control routes from the
+	// main listener. Nil when webhook_port is 0.
+	messagingWebhookListener net.Listener
+	messagingWebhookServer   *http.Server
 
 	// usageAgg is the daemon-global daily token-budget tracker.
 	// Spawners consult it before provisioning new workers; the audit
@@ -446,6 +453,24 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		mcpHost = "127.0.0.1"
 	}
 
+	if port := d.messagingCfg.WebhookPort; port > 0 && d.messagingWebhookToken != "" {
+		addr := fmt.Sprintf(":%d", port)
+		var (
+			webhookListener net.Listener
+			err             error
+		)
+		if df.useTailnet && d.tnetNode != nil {
+			webhookListener, err = d.tnetNode.Listen("tcp", addr)
+		} else {
+			webhookListener, err = net.Listen("tcp", "127.0.0.1"+addr)
+		}
+		if err != nil {
+			return fmt.Errorf("messaging webhook listen on %s: %w", addr, err)
+		}
+		d.messagingWebhookListener = webhookListener
+		fmt.Fprintf(os.Stderr, "[teemd] messaging: webhook listener bound on %s\n", addr)
+	}
+
 	d.endpoint = fmt.Sprintf("http://%s%s", mcpHost, normalizePort(df.listenAddr))
 	d.token = os.Getenv("TEEM_WORKER_TOKEN")
 	if d.token == "" {
@@ -483,6 +508,12 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		Handler:           d.handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	if d.messagingWebhookListener != nil {
+		d.messagingWebhookServer = &http.Server{
+			Handler:           newWebhookHandler(d),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+	}
 
 	// Retention GC: spawns only when an operator has explicitly
 	// configured one of the TTL knobs. Default is "never delete"; the
@@ -512,7 +543,7 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		safeGo("prune.sweep", func() { d.runPruneSweep(pruneInterval) })
 	}
 
-	serverErr := make(chan error, 1)
+	serverErr := make(chan error, 2)
 	go func() {
 		err := httpSrv.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -521,11 +552,37 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 			serverErr <- nil
 		}
 	}()
+	if d.messagingWebhookServer != nil {
+		safeGo("messaging.webhook:listener", func() {
+			err := d.messagingWebhookServer.Serve(d.messagingWebhookListener)
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				serverErr <- fmt.Errorf("webhook listener: %w", err)
+			}
+		})
+	}
 	defer func() {
-		// 1. Stop accepting new HTTP requests.
+		// 1. Stop accepting new HTTP requests. Shut the public-facing
+		//    webhook listener down FIRST so in-flight Telegram retries
+		//    don't keep hammering us during drain, then drain the main
+		//    listener in parallel. Both share the same 3s budget but
+		//    run concurrently so a slow main drain doesn't starve the
+		//    webhook of its shutdown deadline.
 		ctx2, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_ = httpSrv.Shutdown(ctx2)
+		var wg sync.WaitGroup
+		if d.messagingWebhookServer != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_ = d.messagingWebhookServer.Shutdown(ctx2)
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = httpSrv.Shutdown(ctx2)
+		}()
+		wg.Wait()
 
 		// 2. Graceful drain — wait up to TEEM_DRAIN_TIMEOUT for
 		//    in-flight worker jobs to finish. After this expires,
