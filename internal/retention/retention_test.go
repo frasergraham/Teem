@@ -77,7 +77,7 @@ func TestSweepTranscripts_RemovesOnlyOldFiles(t *testing.T) {
 	dir := t.TempDir()
 	old := filepath.Join(dir, "worker-ada", "old.jsonl")
 	young := filepath.Join(dir, "worker-ada", "young.jsonl")
-	writeFile(t, old, 48*time.Hour)   // 48h ago
+	writeFile(t, old, 48*time.Hour)     // 48h ago
 	writeFile(t, young, 30*time.Minute) // 30 min ago
 
 	removed, err := SweepTranscripts(dir, time.Now(), 24*time.Hour)

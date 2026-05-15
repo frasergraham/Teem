@@ -318,9 +318,9 @@ func (p *Pulse) effectiveInterval() time.Duration {
 // fast job.
 func (p *Pulse) runDebouncer(ctx context.Context) {
 	var (
-		pending  bool
-		reason   string
-		timer    *time.Timer
+		pending bool
+		reason  string
+		timer   *time.Timer
 	)
 	for {
 		select {
@@ -677,9 +677,9 @@ func parseTickStream(r io.Reader) (tickResult, error) {
 		Content []contentBlock `json:"content"`
 	}
 	type ev struct {
-		Type    string          `json:"type"`
-		Result  string          `json:"result"`
-		Message assistantMsg    `json:"message"`
+		Type    string       `json:"type"`
+		Result  string       `json:"result"`
+		Message assistantMsg `json:"message"`
 	}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)

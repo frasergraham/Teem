@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	defaultSubBuffer  = 64
+	defaultSubBuffer   = 64
 	defaultHistorySize = 128
 )
 

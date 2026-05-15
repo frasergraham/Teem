@@ -24,9 +24,9 @@ func NewUnixClient(socketPath string) *http.Client {
 				return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", socketPath)
 			},
 			// Long-poll friendly: keep connections warm.
-			MaxIdleConns:        4,
-			IdleConnTimeout:     90 * time.Second,
-			DisableCompression:  true,
+			MaxIdleConns:       4,
+			IdleConnTimeout:    90 * time.Second,
+			DisableCompression: true,
 		},
 	}
 }

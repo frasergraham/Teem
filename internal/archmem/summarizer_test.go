@@ -31,7 +31,7 @@ func TestBuildDigestPrompt_IncludesEntriesAndPriorDigest(t *testing.T) {
 	got := buildDigestPrompt(entries, prev)
 
 	for _, want := range []string{
-		"You distill activity logs",        // system framing
+		"You distill activity logs",         // system framing
 		"may be stale",                      // caveat on prev digest
 		"Previous focus: executor refactor", // prev digest body
 		"Recent entries (oldest first)",     // section header
@@ -39,7 +39,7 @@ func TestBuildDigestPrompt_IncludesEntriesAndPriorDigest(t *testing.T) {
 		"touched executor.go",
 		"worker-blake",
 		"added pulse_test cases",
-		"4-6 line markdown digest",          // task instruction
+		"4-6 line markdown digest", // task instruction
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt missing %q\n--- prompt ---\n%s", want, got)

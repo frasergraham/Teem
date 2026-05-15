@@ -312,10 +312,10 @@ func TestRoster_DedupOnOpen(t *testing.T) {
 // worker isn't silently retired by dedup.
 func TestRoster_DedupOnOpen_InUseORMerge(t *testing.T) {
 	for _, tc := range []struct {
-		name              string
-		bareInUse         bool
-		canonicalInUse    bool
-		wantMergedInUse   bool
+		name            string
+		bareInUse       bool
+		canonicalInUse  bool
+		wantMergedInUse bool
 	}{
 		{"bare-live", true, false, true},
 		{"canonical-live", false, true, true},
