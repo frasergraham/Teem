@@ -216,7 +216,7 @@ func runPruneBranches(args []string) error {
 	if *force {
 		var unmerged int
 		for _, c := range cls {
-			if c.Action == pruner.ActionDelete && c.Reason != pruner.ReasonMerged {
+			if c.Action == pruner.ActionDelete && c.Reason != pruner.ReasonMerged && c.Reason != pruner.ReasonSquashMerged {
 				unmerged++
 			}
 		}

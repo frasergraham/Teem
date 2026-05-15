@@ -528,6 +528,160 @@ func TestExternalWorktreesForBranch_InBaseIsNotExternal(t *testing.T) {
 	}
 }
 
+// makeSquashedBranch creates `branch` off main with one commit, then
+// applies the same patch on main as a separate commit (different sha,
+// same patch-id). This is the shape `git cherry` recognises as
+// "equivalent on the other side" — the squash-merge case.
+func makeSquashedBranch(t *testing.T, repo, branch, filename, body string) {
+	t.Helper()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	// Branch with the patch.
+	run("checkout", "-q", "-b", branch, "main")
+	if err := os.WriteFile(filepath.Join(repo, filename), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", filename)
+	run("commit", "-q", "-m", "feature: "+filename)
+	// Back to main; reapply identical patch as a "squash" commit. Same
+	// diff → same patch-id → git cherry treats them as equivalent.
+	run("checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(repo, filename), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", filename)
+	run("commit", "-q", "-m", "squash: "+filename)
+}
+
+func TestClassify_SquashMergedDetectedAsSafe(t *testing.T) {
+	repo := initRepo(t)
+	makeSquashedBranch(t, repo, "teem/worker-squashed", "f.txt", "hello")
+
+	branches, err := LoadCandidates(context.Background(), repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branches) != 1 {
+		t.Fatalf("expected 1 branch, got %+v", branches)
+	}
+	b := branches[0]
+	if b.Merged {
+		t.Errorf("squash-merged branch is not ancestry-merged; Merged should be false")
+	}
+	if !b.SquashMerged {
+		t.Errorf("expected SquashMerged=true for squash-merged branch, got %+v", b)
+	}
+
+	cls := Classify(Inputs{Branches: branches, Now: time.Now()})
+	if len(cls) != 1 || cls[0].Reason != ReasonSquashMerged || cls[0].Action != ActionDelete {
+		t.Fatalf("expected squash-merged/delete, got %+v", cls)
+	}
+
+	// Apply with Force=false: squash-merged is treated like merged,
+	// uses `git branch -d`, no --force required.
+	res := Apply(context.Background(), cls, SweepOpts{RepoRoot: repo, Force: false})
+	if len(res.Deleted) != 1 || res.Deleted[0] != "teem/worker-squashed" {
+		t.Errorf("expected branch deleted without --force, got %+v", res)
+	}
+	if branchExists(t, repo, "teem/worker-squashed") {
+		t.Errorf("squash-merged branch should be gone")
+	}
+}
+
+func TestClassify_TrulyOrphanStillRequiresForce(t *testing.T) {
+	repo := initRepo(t)
+	makeBranchUnmerged(t, repo, "teem/worker-realorphan") // commit is NOT on main
+
+	branches, err := LoadCandidates(context.Background(), repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branches) != 1 {
+		t.Fatalf("expected 1 branch, got %+v", branches)
+	}
+	if branches[0].Merged || branches[0].SquashMerged {
+		t.Errorf("truly-orphan branch should be neither Merged nor SquashMerged, got %+v", branches[0])
+	}
+
+	// No roster entry → orphan; without Force → skip.
+	cls := Classify(Inputs{Branches: branches, Now: time.Now()})
+	if cls[0].Reason != ReasonOrphan || cls[0].Action != ActionSkip {
+		t.Fatalf("expected orphan/skip, got %+v", cls[0])
+	}
+
+	// Apply without Force keeps the branch (ForceSkipped after a
+	// hand-crafted ActionDelete; safer: just confirm the Action=skip
+	// path doesn't delete).
+	res := Apply(context.Background(), cls, SweepOpts{RepoRoot: repo, Force: false})
+	if len(res.Deleted) != 0 {
+		t.Errorf("orphan must not be deleted without --force, got %+v", res)
+	}
+	if !branchExists(t, repo, "teem/worker-realorphan") {
+		t.Errorf("orphan branch should be retained")
+	}
+}
+
+func TestClassify_PartialSquashFallsThrough(t *testing.T) {
+	// Two commits on the branch: one whose patch is on main, one whose
+	// patch isn't. `git cherry` emits a "-" line and a "+" line — the
+	// "+" means we can't be sure all of the work shipped, so we fall
+	// through to orphan/unmerged handling.
+	repo := initRepo(t)
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	// Branch with two commits.
+	run("checkout", "-q", "-b", "teem/worker-partial", "main")
+	if err := os.WriteFile(filepath.Join(repo, "shared.txt"), []byte("shared"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "shared.txt")
+	run("commit", "-q", "-m", "shared commit")
+	if err := os.WriteFile(filepath.Join(repo, "only-on-branch.txt"), []byte("solo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "only-on-branch.txt")
+	run("commit", "-q", "-m", "branch-only commit")
+	// Reapply only the first patch on main.
+	run("checkout", "-q", "main")
+	if err := os.WriteFile(filepath.Join(repo, "shared.txt"), []byte("shared"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "shared.txt")
+	run("commit", "-q", "-m", "main: shared commit")
+
+	branches, err := LoadCandidates(context.Background(), repo, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branches) != 1 {
+		t.Fatalf("expected 1 branch, got %+v", branches)
+	}
+	if branches[0].Merged {
+		t.Errorf("partial branch should not be ancestry-merged")
+	}
+	if branches[0].SquashMerged {
+		t.Errorf("partial branch must NOT be flagged squash-merged (one commit still only on branch), got %+v", branches[0])
+	}
+
+	cls := Classify(Inputs{Branches: branches, Now: time.Now()})
+	if cls[0].Reason != ReasonOrphan {
+		t.Errorf("partial squash should fall through to orphan, got reason %q", cls[0].Reason)
+	}
+	if cls[0].Action != ActionSkip {
+		t.Errorf("partial orphan should require --force (Action=skip), got %q", cls[0].Action)
+	}
+}
+
 func TestLoadCandidatesVerbose_LogsFiltered(t *testing.T) {
 	repo := initRepo(t)
 	run := func(args ...string) {

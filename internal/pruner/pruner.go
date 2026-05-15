@@ -42,6 +42,13 @@ type Reason string
 const (
 	// ReasonMerged: branch tip is reachable from main. Safe to drop.
 	ReasonMerged Reason = "merged"
+	// ReasonSquashMerged: branch tip is not an ancestor of main, but
+	// every commit on the branch has a patch-id equivalent already on
+	// main (typical squash-merge outcome). Action=delete without
+	// --force; the patch-id check in isSquashMerged is the safety
+	// gate. Apply uses `git branch -D` here because `branch -d`'s
+	// ancestry check would reject the (already-shipped) work.
+	ReasonSquashMerged Reason = "squash-merged"
 	// ReasonRetired: roster says the agent is no longer in use and
 	// hasn't been seen for at least RetiredAge.
 	ReasonRetired Reason = "retired"
@@ -112,6 +119,11 @@ type Branch struct {
 	Name    string // refs/heads/teem/worker-ada → "teem/worker-ada"
 	AgentID string // "worker-ada"
 	Merged  bool   // reachable from main
+	// SquashMerged is true when Merged is false but every commit on
+	// the branch has a patch-id equivalent on main — i.e. the work
+	// was integrated via squash-merge. Same safety semantics as
+	// Merged for deletion purposes.
+	SquashMerged bool
 }
 
 // RosterView is the slice of roster.Entry data Classify needs. We don't
@@ -179,6 +191,9 @@ func Classify(in Inputs) []Classification {
 			c.Action = ActionSkip
 		case b.Merged:
 			c.Reason = ReasonMerged
+			c.Action = ActionDelete
+		case b.SquashMerged:
+			c.Reason = ReasonSquashMerged
 			c.Action = ActionDelete
 		default:
 			entry, ok := rosterByID[b.AgentID]
@@ -249,10 +264,15 @@ func LoadCandidatesVerbose(ctx context.Context, repoRoot, mainRef string, logf f
 			continue
 		}
 		merged := isMerged(ctx, repoRoot, name, mainRef)
+		squashMerged := false
+		if !merged {
+			squashMerged = isSquashMerged(ctx, repoRoot, name, mainRef)
+		}
 		branches = append(branches, Branch{
-			Name:    name,
-			AgentID: strings.TrimPrefix(name, "teem/"),
-			Merged:  merged,
+			Name:         name,
+			AgentID:      strings.TrimPrefix(name, "teem/"),
+			Merged:       merged,
+			SquashMerged: squashMerged,
 		})
 	}
 	return branches, nil
@@ -266,6 +286,38 @@ func isMerged(ctx context.Context, repoRoot, branch, mainRef string) bool {
 	// git merge-base --is-ancestor exits 0 iff branch ⊆ mainRef.
 	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "merge-base", "--is-ancestor", branch, mainRef)
 	return cmd.Run() == nil
+}
+
+// isSquashMerged returns true iff every commit on branch has a
+// patch-id equivalent already on mainRef — git's signal for "this
+// work shipped via squash-merge." Implemented with `git cherry`:
+// each line is "+ <sha>" (no equivalent on the other side) or
+// "- <sha>" (equivalent found). All "-" → squash-merged; any "+" →
+// not. Empty output means the branch has no commits ahead of main,
+// which the caller has already handled via isMerged. False on any
+// error — we'd rather miss a squash-merged branch (operator falls
+// back to --force) than mis-classify a truly unmerged one as safe.
+func isSquashMerged(ctx context.Context, repoRoot, branch, mainRef string) bool {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "cherry", mainRef, branch)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	out := strings.TrimSpace(stdout.String())
+	if out == "" {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "- ") {
+			return false
+		}
+	}
+	return true
 }
 
 // SweepOpts is the side-effecting half of the pruner. Apply takes a
@@ -334,6 +386,14 @@ func Apply(ctx context.Context, cls []Classification, opts SweepOpts) SweepResul
 		switch c.Reason {
 		case ReasonMerged:
 			// safe: `git branch -d` refuses if not merged.
+		case ReasonSquashMerged:
+			// Uses `git branch -D` because `branch -d`'s safety
+			// check is ancestry-based and would reject the branch
+			// even though every patch is already on main. The
+			// safety gate for this path is the patch-id check in
+			// isSquashMerged — false positives there would drop
+			// genuinely-unmerged work, so the bar is "all `git
+			// cherry` lines start with `-`".
 		case ReasonRetired, ReasonOrphan, ReasonUnmerged:
 			if !opts.Force {
 				res.ForceSkipped = append(res.ForceSkipped, c.Name)
@@ -389,7 +449,7 @@ func Apply(ctx context.Context, cls []Classification, opts SweepOpts) SweepResul
 		if externals, err := externalWorktreesForBranch(ctx, opts.RepoRoot, c.Name, opts.WorktreeBase); err == nil && len(externals) > 0 {
 			blocked := false
 			for _, path := range externals {
-				if c.Reason == ReasonMerged {
+				if c.Reason == ReasonMerged || c.Reason == ReasonSquashMerged {
 					res.Errors[c.Name] = fmt.Errorf("worktree at %s blocks deletion (run 'git worktree remove %s' first)", path, path)
 					logf("pruner: cannot delete %s — worktree at %s blocks deletion (run 'git worktree remove %s' first)", c.Name, path, path)
 					blocked = true
@@ -410,7 +470,11 @@ func Apply(ctx context.Context, cls []Classification, opts SweepOpts) SweepResul
 		}
 		flag := "-d"
 		if c.Reason != ReasonMerged {
-			flag = "-D" // gated above by opts.Force
+			// ReasonSquashMerged: -d would refuse (ancestry check
+			// fails); the patch-id detection in isSquashMerged is
+			// the safety gate, not `git branch -d`'s own check.
+			// ReasonRetired/Orphan/Unmerged: gated by opts.Force.
+			flag = "-D"
 		}
 		if err := runGit(ctx, opts.RepoRoot, "branch", flag, c.Name); err != nil {
 			res.Errors[c.Name] = err
