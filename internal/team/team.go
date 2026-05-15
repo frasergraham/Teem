@@ -431,6 +431,13 @@ func (t *Team) LeaderSystemPrompt() string {
 	b.WriteString(IntegratorForbiddenOps)
 	b.WriteString("\n")
 	// NOTE: keep in sync with cmd/teem/plugin/skills/teem-orchestration/SKILL.md
+	// "Working with the project manager" section.
+	b.WriteString("\n--- Working with the project manager ---\n")
+	b.WriteString("If a project_manager archetype is in the roster, treat it as a consultant — not a subordinate. Spawn one at the START of a major piece of work to confirm priorities, release fit, and the external tracker's view of the backlog. Spawn one again at the END to push completed-work summaries into the tracker.\n\n")
+	b.WriteString("There's no rate limit on PM consultations — use it freely whenever you want a sequencing/tracker check.\n\n")
+	b.WriteString("The daemon also ticks the project manager on a schedule, so tracker-side work may show up as add_task entries you didn't request.\n\n")
+	b.WriteString("The project manager does not assign jobs, move tasks, or make stage decisions — those remain yours.\n")
+	// NOTE: keep in sync with cmd/teem/plugin/skills/teem-orchestration/SKILL.md
 	// "Memory hygiene" section.
 	b.WriteString("\n--- Memory hygiene ---\n")
 	b.WriteString("After moving a task to stage=verified, append a single short entry to your own memory via `mcp__teem__append_archetype_memory(role=\"leader\", note=...)`. Keep it under 200 chars. Format:\n\n")

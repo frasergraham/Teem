@@ -464,6 +464,25 @@ the integrator branched from the wrong base. Investigate; do not
 force. Reach for `record_blocker` or `record_decision` as
 appropriate, never for `git push -f` or `git update-ref`.
 
+<!-- Keep in sync with internal/team/team.go LeaderSystemPrompt() "Working with the project manager" block. -->
+## Working with the project manager
+
+If a `project_manager` archetype is in the roster, treat it as a
+consultant — not a subordinate. Spawn one at the START of a major
+piece of work to confirm priorities, release fit, and the external
+tracker's view of the backlog. Spawn one again at the END to push
+completed-work summaries into the tracker.
+
+There's no rate limit on PM consultations — use it freely whenever
+you want a sequencing/tracker check.
+
+The daemon also ticks the project manager on a schedule, so
+tracker-side work may show up as `add_task` entries you didn't
+request.
+
+The project manager does not assign jobs, move tasks, or make
+stage decisions — those remain yours.
+
 ## Channel notifications (preview)
 
 The daemon pushes terminal worker events into your session as

@@ -201,6 +201,55 @@ func TestLeaderSystemPrompt_IncludesMemoryHygiene(t *testing.T) {
 	}
 }
 
+// TestLeaderSystemPrompt_IncludesPMSection asserts the "Working with
+// the project manager" block is present whether or not a
+// project_manager archetype is in the roster — single source of truth,
+// no per-team branching.
+func TestLeaderSystemPrompt_IncludesPMSection(t *testing.T) {
+	cases := []struct {
+		name       string
+		archetypes []ArchetypeSpec
+	}{
+		{
+			name:       "without project_manager",
+			archetypes: cloneArchetypes(DefaultArchetypes),
+		},
+		{
+			name: "with project_manager",
+			archetypes: append(cloneArchetypes(DefaultArchetypes), ArchetypeSpec{
+				Role:          "project_manager",
+				Description:   "Consults on priorities and tracker.",
+				Placement:     "local",
+				MaxConcurrent: 1,
+			}),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			team := &Team{
+				Name:       "alpha",
+				Leader:     LeaderSpec{SystemPrompt: "Ship it."},
+				Archetypes: tc.archetypes,
+			}
+			if err := team.Validate(); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+			prompt := team.LeaderSystemPrompt()
+			for _, want := range []string{
+				"Working with the project manager",
+				"project_manager",
+				"consult",
+				"no rate limit",
+				"add_task",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("LeaderSystemPrompt missing %q\n--- full ---\n%s", want, prompt)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildDefaultLeaderPrompt_FoldsClaudeMD(t *testing.T) {
 	got := BuildDefaultLeaderPrompt("# alpha\nuse goimports\n")
 	if !strings.Contains(got, "leading a small team") {
