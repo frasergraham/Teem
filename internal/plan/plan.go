@@ -448,6 +448,36 @@ func (p *Plan) UpdateTaskIfStage(id string, expected Stage, in UpdateInput) (Tas
 	return p.updateTaskLocked(id, existing, in)
 }
 
+// MutateTaskIfStage is the callback form of UpdateTaskIfStage for
+// state-dependent mutations. Under the plan lock it checks the stage
+// precondition, invokes fn with a copy of the current task, and applies
+// the returned UpdateInput. Use this when the mutation depends on the
+// live task state — e.g., appending to Notes — so the read-modify-write
+// happens atomically and two concurrent callers can't both build their
+// update from the same pre-race snapshot.
+//
+// Errors: same shape as UpdateTaskIfStage.
+func (p *Plan) MutateTaskIfStage(id string, expected Stage, fn func(Task) UpdateInput) (Task, error) {
+	if id == "" {
+		return Task{}, errors.New("plan: id is required")
+	}
+	if fn == nil {
+		return Task{}, errors.New("plan: fn is required")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	existing, ok := p.tasks[id]
+	if !ok {
+		return Task{}, ErrTaskNotFound
+	}
+	if existing.Stage != expected {
+		return Task{}, ErrStageChanged
+	}
+	in := fn(cloneTask(*existing))
+	in.Stage = NormalizeStage(in.Stage)
+	return p.updateTaskLocked(id, existing, in)
+}
+
 // updateTaskLocked is the shared body for UpdateTask and
 // UpdateTaskIfStage. Caller must hold p.mu.
 func (p *Plan) updateTaskLocked(id string, existing *Task, in UpdateInput) (Task, error) {

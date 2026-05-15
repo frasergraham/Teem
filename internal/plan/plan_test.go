@@ -4,10 +4,15 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 )
+
+func strPtr(s string) *string { return &s }
+
+func itoa(i int) string { return strconv.Itoa(i) }
 
 func TestPlan_AddAndGet(t *testing.T) {
 	p := openTest(t)
@@ -340,6 +345,82 @@ func TestPlan_UpdateTaskIfStage_TaskNotFound(t *testing.T) {
 	p := openTest(t)
 	defer p.Close()
 	_, err := p.UpdateTaskIfStage("t-nope", StageAwaitingApproval, UpdateInput{Stage: StageCoding})
+	if !errors.Is(err, ErrTaskNotFound) {
+		t.Errorf("want ErrTaskNotFound, got %v", err)
+	}
+}
+
+// TestPlan_MutateTaskIfStage_ConcurrentAppendsAllLand fires N goroutines
+// that each append a unique line to a task's Notes via the callback
+// form. With the read-modify-write under the plan lock, every appended
+// line must survive in the final notes. Without it the second writer
+// would clobber the first's append (the COMMENT+COMMENT race).
+func TestPlan_MutateTaskIfStage_ConcurrentAppendsAllLand(t *testing.T) {
+	p := openTest(t)
+	defer p.Close()
+
+	task, _ := p.AddTask(NewTaskInput{Title: "append race"})
+	if _, err := p.UpdateTask(task.ID, UpdateInput{Stage: StageSpecced}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.UpdateTask(task.ID, UpdateInput{Notes: strPtr("initial"), Stage: StageAwaitingApproval}); err != nil {
+		t.Fatal(err)
+	}
+
+	const N = 50
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, err := p.MutateTaskIfStage(task.ID, StageAwaitingApproval, func(cur Task) UpdateInput {
+				newNotes := cur.Notes + "\nline-" + itoa(i)
+				return UpdateInput{Stage: StageAwaitingApproval, Notes: &newNotes}
+			})
+			if err != nil {
+				t.Errorf("appender %d: %v", i, err)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	got, _ := p.Get(task.ID)
+	for i := 0; i < N; i++ {
+		want := "line-" + itoa(i)
+		if !strings.Contains(got.Notes, want) {
+			t.Errorf("notes missing %q (concurrent append clobbered)", want)
+		}
+	}
+	// Newline-delimited: one "initial" line + N appended lines.
+	if lines := strings.Count(got.Notes, "\n"); lines != N {
+		t.Errorf("expected %d newlines (one per appended line), got %d (notes=%q)", N, lines, got.Notes)
+	}
+}
+
+// TestPlan_MutateTaskIfStage_StageMismatch and _TaskNotFound mirror the
+// error-surface tests for UpdateTaskIfStage so callers can rely on the
+// same shape from both APIs.
+func TestPlan_MutateTaskIfStage_StageMismatch(t *testing.T) {
+	p := openTest(t)
+	defer p.Close()
+	task, _ := p.AddTask(NewTaskInput{Title: "mismatch"}) // proposed
+	_, err := p.MutateTaskIfStage(task.ID, StageAwaitingApproval, func(Task) UpdateInput {
+		return UpdateInput{Notes: strPtr("x")}
+	})
+	if !errors.Is(err, ErrStageChanged) {
+		t.Errorf("want ErrStageChanged, got %v", err)
+	}
+}
+
+func TestPlan_MutateTaskIfStage_TaskNotFound(t *testing.T) {
+	p := openTest(t)
+	defer p.Close()
+	_, err := p.MutateTaskIfStage("t-nope", StageAwaitingApproval, func(Task) UpdateInput {
+		return UpdateInput{Notes: strPtr("x")}
+	})
 	if !errors.Is(err, ErrTaskNotFound) {
 		t.Errorf("want ErrTaskNotFound, got %v", err)
 	}

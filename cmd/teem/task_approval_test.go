@@ -390,6 +390,69 @@ func TestControlTaskAction_ConcurrentApproveOneWinsOne409(t *testing.T) {
 	}
 }
 
+// TestControlTaskAction_ConcurrentCommentsBothLand fires two COMMENT
+// actions at the same awaiting_approval task simultaneously. Both must
+// succeed (200, stage stays awaiting_approval), and both comment bodies
+// must appear in the final notes. Without the read-modify-write under
+// the plan lock the second writer would clobber the first's appended
+// COMMENT line — the lost-update race that t-dfb9554b round 2 missed
+// (UpdateTaskIfStage caught APPROVE/REJECT because those change stage,
+// but COMMENT stays in awaiting_approval so both writers pass).
+func TestControlTaskAction_ConcurrentCommentsBothLand(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, token: "test-token"}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	task := putTaskInAwaiting(t, rt, "race for comment")
+
+	const (
+		bodyA = "first concurrent comment — unique-marker-aaa"
+		bodyB = "second concurrent comment — unique-marker-bbb"
+	)
+	comments := []string{bodyA, bodyB}
+	var ok int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for _, c := range comments {
+		wg.Add(1)
+		go func(c string) {
+			defer wg.Done()
+			body, _ := json.Marshal(map[string]string{"comment": c})
+			req := httptest.NewRequest(http.MethodPost,
+				"/control/teams/alpha/tasks/"+task.ID+"/comment",
+				bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer test-token")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			<-start
+			d.handler().ServeHTTP(w, req)
+			if w.Code == http.StatusOK {
+				atomic.AddInt32(&ok, 1)
+			} else {
+				t.Errorf("comment %q got code=%d body=%s", c, w.Code, w.Body.String())
+			}
+		}(c)
+	}
+	close(start)
+	wg.Wait()
+
+	if ok != 2 {
+		t.Fatalf("want 2 OK comments, got %d", ok)
+	}
+	got, _ := rt.plan.Get(task.ID)
+	if got.Stage != plan.StageAwaitingApproval {
+		t.Errorf("post-comment stage = %q want awaiting_approval", got.Stage)
+	}
+	if !strings.Contains(got.Notes, "unique-marker-aaa") {
+		t.Errorf("notes missing first comment: %q", got.Notes)
+	}
+	if !strings.Contains(got.Notes, "unique-marker-bbb") {
+		t.Errorf("notes missing second comment: %q", got.Notes)
+	}
+	if c := strings.Count(got.Notes, "COMMENT"); c != 2 {
+		t.Errorf("notes should contain exactly two COMMENT lines, got %d (notes=%q)", c, got.Notes)
+	}
+}
+
 // TestDashboard_AwaitingApprovalSortedNewestFirst asserts the
 // awaiting-approval section orders rows by StageEnteredAt descending,
 // not by random task id.

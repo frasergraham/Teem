@@ -49,6 +49,11 @@ func decideTask(rt *registeredTeam, taskID string, d decision, comment string) (
 	if rt == nil || rt.plan == nil {
 		return plan.Task{}, errors.New("plan unavailable")
 	}
+	switch d {
+	case decisionApprove, decisionReject, decisionComment:
+	default:
+		return plan.Task{}, fmt.Errorf("unknown decision: %q", d)
+	}
 	current, ok := rt.plan.Get(taskID)
 	if !ok {
 		return plan.Task{}, plan.ErrTaskNotFound
@@ -57,31 +62,28 @@ func decideTask(rt *registeredTeam, taskID string, d decision, comment string) (
 		return plan.Task{}, errNotAwaitingApproval
 	}
 
-	// Compose the new notes body. Existing notes are preserved; we
-	// append a timestamped, prefixed line so the audit story stays
-	// in the task itself for anyone reading the task flow page.
-	newNotes := appendDecisionNote(current.Notes, d, comment)
-	in := plan.UpdateInput{Notes: &newNotes}
-	switch d {
-	case decisionApprove:
-		in.Stage = plan.StageCoding
-	case decisionReject:
-		in.Stage = plan.StageShelved
-		in.Status = plan.StatusShelved
-	case decisionComment:
-		// Stay in awaiting_approval — self-transition is allowed by
-		// the matrix; UpdateTask will leave StageEnteredAt alone since
-		// the stage didn't actually change.
-		in.Stage = plan.StageAwaitingApproval
-	default:
-		return plan.Task{}, fmt.Errorf("unknown decision: %q", d)
-	}
-
-	// UpdateTaskIfStage holds the plan mutex across the stage check
-	// and the write. Without it, two concurrent approvals can both pass
-	// the pre-check above, both build newNotes from pre-A notes, and
-	// the second write clobbers the first's appended decision line.
-	updated, err := rt.plan.UpdateTaskIfStage(taskID, plan.StageAwaitingApproval, in)
+	// MutateTaskIfStage holds the plan mutex across the stage check,
+	// the read of the live task, and the write. Without the in-lock read
+	// of t.Notes, two concurrent decisions (esp. COMMENT+COMMENT, where
+	// stage doesn't change) can both build newNotes from the pre-race
+	// snapshot and the second write clobbers the first's appended line.
+	updated, err := rt.plan.MutateTaskIfStage(taskID, plan.StageAwaitingApproval, func(t plan.Task) plan.UpdateInput {
+		newNotes := appendDecisionNote(t.Notes, d, comment)
+		in := plan.UpdateInput{Notes: &newNotes}
+		switch d {
+		case decisionApprove:
+			in.Stage = plan.StageCoding
+		case decisionReject:
+			in.Stage = plan.StageShelved
+			in.Status = plan.StatusShelved
+		case decisionComment:
+			// Stay in awaiting_approval — self-transition is allowed by
+			// the matrix; UpdateTask leaves StageEnteredAt alone since
+			// the stage didn't actually change.
+			in.Stage = plan.StageAwaitingApproval
+		}
+		return in
+	})
 	if errors.Is(err, plan.ErrStageChanged) {
 		return plan.Task{}, errStageRaced
 	}
