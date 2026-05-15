@@ -302,6 +302,11 @@ type daemon struct {
 	// `claude -p` invocation; tests inject a fake. Nil ⇒ defaultChatRunner.
 	chatRunner chatRunner
 
+	// chatTimeout overrides the chat handler's per-request deadline.
+	// Zero means 5 minutes (matches pulse.TickTimeout). Tests set this
+	// to a small value so the timeout path is reachable in milliseconds.
+	chatTimeout time.Duration
+
 	mu    sync.Mutex
 	teams map[string]*registeredTeam
 }

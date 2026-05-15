@@ -4,15 +4,19 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/pulse"
+	"github.com/frasergraham/teem/internal/usage"
 )
 
 // chatRequest is the JSON body posted by the dashboard's chat panel.
@@ -70,8 +74,18 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Cap body size so an oversized POST can't OOM the decoder. 64 KiB
+	// is plenty for an operator-typed chat message; anything larger is
+	// either abuse or a misbehaving client.
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -101,15 +115,28 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 		time.Now().UTC().Format(time.RFC3339),
 	)
 
-	ctx := r.Context()
+	// Per-request 5-minute deadline matches pulse's TickTimeout — a
+	// stuck subprocess is SIGKILLed via context cancel rather than
+	// pinning a goroutine forever. chatTimeout overrides it for tests.
+	timeout := d.chatTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	startedAt := time.Now().UTC()
 	stdout, wait, err := runner(ctx, mcpConfig, rt.repoRoot, contextBody, msg)
 	if err != nil {
 		writeSSE(w, flusher, "error", err.Error())
 		return
 	}
 
-	parseErr := streamChatResponse(stdout, w, flusher)
-	if waitErr := wait(); waitErr != nil && parseErr == nil {
+	cap := usage.NewCapture(startedAt)
+	parseErr := streamChatResponse(stdout, w, flusher, cap)
+	waitErr := wait()
+	d.recordChatUsage(rt, cap.Summary())
+	if waitErr != nil && parseErr == nil {
 		writeSSE(w, flusher, "error", waitErr.Error())
 		return
 	}
@@ -120,11 +147,37 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 	writeSSE(w, flusher, "done", "")
 }
 
+// recordChatUsage emits a KindUsageEvent for an operator chat turn and
+// updates the daemon-global aggregator so chat spend hits the same
+// budget gate as pulse ticks and worker jobs. agent_id is "leader-chat"
+// — distinct from "leader" (pulse) so dashboards can tell who burned
+// the tokens. Direct auditSink.Write bypasses the HTTP audit hooks, so
+// we have to call usageAgg.Record explicitly (the audit hook chain only
+// fires for events that come in over the /audit endpoint).
+func (d *daemon) recordChatUsage(rt *registeredTeam, s usage.UsageSummary) {
+	if rt != nil && rt.auditSink != nil {
+		_ = rt.auditSink.Write(audit.Event{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "leader-chat",
+			Kind:      audit.KindUsageEvent,
+			Meta:      usage.AuditMeta(s, "leader-chat", ""),
+		})
+	}
+	if d.usageAgg != nil {
+		if err := d.usageAgg.Record(s); err != nil {
+			fmt.Fprintf(os.Stderr, "[teemd] chat: usage record: %v\n", err)
+		}
+	}
+}
+
 // streamChatResponse parses Claude Code's stream-json output and
 // forwards each assistant text chunk to the SSE writer as a default
 // (unnamed) data event. Tool-use blocks and result events are dropped
-// so the chat panel only sees user-visible prose.
-func streamChatResponse(r io.Reader, w http.ResponseWriter, f http.Flusher) error {
+// so the chat panel only sees user-visible prose. Each raw line is
+// also fed through the supplied usage.Capture so the shared usage
+// extractor remains the single source of truth (see
+// docs/usage-capture.md). cap may be nil for tests that don't care.
+func streamChatResponse(r io.Reader, w http.ResponseWriter, f http.Flusher, cap *usage.Capture) error {
 	type contentBlock struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -143,6 +196,9 @@ func streamChatResponse(r io.Reader, w http.ResponseWriter, f http.Flusher) erro
 	var resultText string
 	for sc.Scan() {
 		line := sc.Bytes()
+		if cap != nil {
+			cap.Feed(line)
+		}
 		var e ev
 		if err := json.Unmarshal(line, &e); err != nil {
 			continue
