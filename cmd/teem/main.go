@@ -657,4 +657,3 @@ func normalizePort(addr string) string {
 	}
 	return addr
 }
-
