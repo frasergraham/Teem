@@ -93,12 +93,16 @@ type Pulse struct {
 	// never block.
 	nudgeCh chan string
 
-	// channelsLive gates the audit-nudge path: when true, Claude Code
-	// channels are delivering wake events to the leader directly, so
-	// NudgeFromAudit/runDebouncer suppress (double-wake avoidance).
-	// The timer loop, manual ping, idle backoff and budget gate are
-	// unaffected — they remain always-on as the headless fallback.
-	// See docs/wake-strategy.md §5.
+	// channelsLive gates ALL pulse wake paths (timer, audit-nudge,
+	// manual ping). When true, an operator chat session is active:
+	// Claude Code is delivering wake events to the leader directly,
+	// and the operator's TUI is already writing the leader session
+	// file. Two writers on that file is a concurrent-write hazard, so
+	// pulse stays out of the way while the chat is live. The timer
+	// loop, debouncer and NudgeFromAudit each consult this flag; the
+	// daemon's /control/teams/<id>/ping handler refuses manual pings
+	// the same way. On disconnect the flag clears and pulse resumes
+	// as the headless fallback. See docs/wake-strategy.md §5.
 	channelsLive atomic.Bool
 }
 
@@ -285,9 +289,14 @@ func (p *Pulse) Resume() error {
 
 func (p *Pulse) run(ctx context.Context) {
 	// Fire one tick immediately so a freshly-started Pulse doesn't
-	// wait Interval before doing anything.
-	if err := p.Tick(ctx, "timer"); err != nil && !errors.Is(err, context.Canceled) {
-		p.logErr(err)
+	// wait Interval before doing anything — unless an operator chat
+	// session is already live, in which case the operator is the
+	// wake mechanism and a startup tick would race the chat's own
+	// session writer.
+	if !p.channelsLive.Load() {
+		if err := p.Tick(ctx, "timer"); err != nil && !errors.Is(err, context.Canceled) {
+			p.logErr(err)
+		}
 	}
 	for {
 		// effective interval honors idle backoff: after a streak of
@@ -298,6 +307,14 @@ func (p *Pulse) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(wait):
+		}
+		// Skip the work (but don't disable the timer) when channels
+		// are live: two writers on the same Claude session file is a
+		// concurrent-write hazard, and the operator's chat is itself
+		// driving the leader. On chat disconnect channelsLive flips
+		// back and the next interval resumes the timer path.
+		if p.channelsLive.Load() {
+			continue
 		}
 		if err := p.Tick(ctx, "timer"); err != nil && !errors.Is(err, context.Canceled) {
 			p.logErr(err)
@@ -379,11 +396,13 @@ func debounceFire(t *time.Timer) <-chan time.Time {
 	return t.C
 }
 
-// SetChannelsLive flips the audit-nudge gate. When true the daemon has
-// observed at least one teem-channel SSE subscriber (Claude Code is
-// receiving channel notifications), so NudgeFromAudit becomes a no-op
-// to avoid double-waking the leader. Callers: the daemon's
-// channel-events SSE handler on subscribe/unsubscribe transitions.
+// SetChannelsLive flips the pulse-wide gate. When true the daemon has
+// observed at least one teem-channel SSE subscriber (an operator chat
+// session is active), so the timer loop skips, NudgeFromAudit is a
+// no-op, and the daemon refuses manual pings — all three to avoid
+// racing the chat's writer on the leader session file. Callers: the
+// daemon's channel-events SSE handler on subscribe/unsubscribe
+// transitions.
 func (p *Pulse) SetChannelsLive(live bool) { p.channelsLive.Store(live) }
 
 // ChannelsLive reports the current gate state. Exposed for status
@@ -397,8 +416,9 @@ func (p *Pulse) ChannelsLive() bool { return p.channelsLive.Load() }
 //
 // When channels-live is set, this path is a no-op — the leader is
 // receiving the same events via the Claude Code channel block and
-// firing pulse here would double-wake. The timer + manual ping stay
-// always-on as the headless fallback (see docs/wake-strategy.md).
+// firing pulse here would race the chat's session writer. The timer
+// loop and the daemon's manual-ping handler suppress in the same
+// situation (see docs/wake-strategy.md).
 func (p *Pulse) NudgeFromAudit(events []audit.Event) {
 	if !p.Running() {
 		return

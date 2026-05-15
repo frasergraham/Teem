@@ -322,6 +322,95 @@ func TestTeamPage_FlashStaysPingedUntilOutcome(t *testing.T) {
 	}
 }
 
+// TestPing_RefusedWhenChannelsLive verifies that the manual-ping
+// handler returns 409 with the prescribed message when an operator
+// chat session is active. Two writers on the leader's session file
+// would race; the chat is already driving the leader anyway.
+func TestPing_RefusedWhenChannelsLive(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newPingTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	rt.channelsLive = true
+
+	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/ping", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("code=%d want %d body=%s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "operator chat session is active") {
+		t.Errorf("body=%q want operator-chat-active message", w.Body.String())
+	}
+	// No pulse_tick / operator audit should have been written.
+	events, _ := rt.auditSink.Query("", time.Now().Add(-time.Minute), 16)
+	for _, e := range events {
+		if e.Kind == audit.Kind("pulse_tick") && e.AgentID == "operator" {
+			t.Errorf("refused ping should not write a manual pulse_tick audit event; got %+v", e)
+		}
+	}
+}
+
+// TestPing_HTMLRefusedWhenChannelsLive verifies the form-POST variant:
+// Accept: text/html clients get a 303 redirect with the
+// ping_skipped_chat_active flash tag, so the team page can render a
+// friendly banner instead of dumping a JSON body in the browser.
+func TestPing_HTMLRefusedWhenChannelsLive(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newPingTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	rt.channelsLive = true
+
+	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/ping", nil)
+	req.Header.Set("Accept", "text/html")
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("code=%d want 303 body=%s", w.Code, w.Body.String())
+	}
+	got := w.Header().Get("Location")
+	if !strings.Contains(got, "flash=ping_skipped_chat_active") {
+		t.Errorf("Location=%q want flash=ping_skipped_chat_active", got)
+	}
+}
+
+// TestPing_ResumesWhenChannelsCleared verifies the path returns to
+// normal (200 / ping queued) once the operator's chat disconnects and
+// the channels-live flag is cleared.
+func TestPing_ResumesWhenChannelsCleared(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newPingTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	rt.channelsLive = false
+
+	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/ping", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "ping queued") {
+		t.Errorf("body=%q want 'ping queued'", w.Body.String())
+	}
+}
+
+// TestTeamPage_RendersPingSkippedChatActiveFlash verifies the dashboard
+// renders the friendly banner when redirected with the new flash tag.
+func TestTeamPage_RendersPingSkippedChatActiveFlash(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newPingTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha?flash=ping_skipped_chat_active", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "leader is already awake via your chat session") {
+		t.Errorf("expected chat-active banner; body excerpt:\n%s", flashExcerpt(w.Body.String()))
+	}
+}
+
 // flashExcerpt slices out the area around the dashboard's flash div so
 // test failure output stays small and readable.
 func flashExcerpt(body string) string {

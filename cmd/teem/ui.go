@@ -456,7 +456,7 @@ func teamTileSnapshot(rt *registeredTeam) summaryTile {
 // flash rendered).
 func flashFromQuery(v string) string {
 	switch v {
-	case "pinged", "busy", "paused",
+	case "pinged", "busy", "paused", "ping_skipped_chat_active",
 		"task_approved", "task_rejected", "task_commented":
 		return v
 	default:

@@ -576,10 +576,53 @@ func TestPulse_DebouncerReChecksChannelsLive(t *testing.T) {
 	}
 }
 
-// TestPulse_TimerNotGatedByChannels: even with channels-live the
-// always-on timer path must still produce ticks. The gate is for the
-// audit-nudge path only.
-func TestPulse_TimerNotGatedByChannels(t *testing.T) {
+// TestPulse_TimerSkippedWhenChannelsLive verifies the t-ee3df7c6 gate
+// extension: once channels-live is set the timer loop must NOT call
+// Tick (two writers on the leader session file is a concurrent-write
+// hazard). Flipping back to fallback resumes the timer path on the
+// next interval.
+func TestPulse_TimerSkippedWhenChannelsLive(t *testing.T) {
+	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
+	p.cfg.Interval = 50 * time.Millisecond
+	// Start with channels-live so the immediate startup tick is also
+	// suppressed; otherwise the loop's first tick fires before we get
+	// a chance to flip the flag.
+	p.SetChannelsLive(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+	defer p.Stop()
+
+	// Several intervals' worth of wall-time. No tick should land.
+	time.Sleep(300 * time.Millisecond)
+	events, _ := sink.Query("leader", time.Time{}, 0)
+	if len(events) != 0 {
+		t.Fatalf("timer ticks under channels-live should be suppressed; got %d", len(events))
+	}
+
+	// Drop the gate: the next interval expiry should fire normally.
+	// Poll up to ~1s to absorb scheduler / fake-claude jitter.
+	p.SetChannelsLive(false)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		events, _ = sink.Query("leader", time.Time{}, 0)
+		if len(events) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(events) == 0 {
+		t.Errorf("timer should resume once channels-live clears; got 0 ticks within 1s")
+	}
+}
+
+// TestPulse_TickStillFiresWhenInvokedDirectlyUnderChannelsLive guards
+// that the gating policy lives in the timer loop / daemon handler, not
+// inside Tick itself. Direct programmatic Tick callers (tests, future
+// callers) bypass the operator-chat gate; the gate is policy applied
+// by the loop and the ping handler.
+func TestPulse_TickStillFiresWhenInvokedDirectlyUnderChannelsLive(t *testing.T) {
 	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
 	p.SetChannelsLive(true)
 
@@ -588,15 +631,6 @@ func TestPulse_TimerNotGatedByChannels(t *testing.T) {
 	}
 	events, _ := sink.Query("leader", time.Time{}, 0)
 	if len(events) != 1 {
-		t.Errorf("timer Tick under channels-live should still fire; got %d events", len(events))
-	}
-
-	// Manual ping path is the same as timer (direct Tick): also unaffected.
-	if err := p.Tick(context.Background(), "manual"); err != nil {
-		t.Fatalf("manual Tick: %v", err)
-	}
-	events, _ = sink.Query("leader", time.Time{}, 0)
-	if len(events) != 2 {
-		t.Errorf("manual Tick under channels-live should still fire; got %d events", len(events))
+		t.Errorf("direct Tick should not be gated by channels-live; got %d events", len(events))
 	}
 }

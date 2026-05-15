@@ -658,7 +658,8 @@
   {{ else if eq .Flash "tick_ok" }}<div class="flash tick-ok">Leader turn done{{ if .FlashDetail }} ({{ .FlashDetail }}){{ end }}.</div>
   {{ else if eq .Flash "tick_failed" }}<div class="flash tick-failed">Leader turn FAILED{{ if .FlashDetail }}: {{ .FlashDetail }}{{ end }}</div>
   {{ else if eq .Flash "busy" }}<div class="flash busy">A tick is already in progress; this ping was ignored.</div>
-  {{ else if eq .Flash "paused" }}<div class="flash paused">Pulse is paused — run <code>teem pulse resume</code> before pinging.</div>{{ end }}
+  {{ else if eq .Flash "paused" }}<div class="flash paused">Pulse is paused — run <code>teem pulse resume</code> before pinging.</div>
+  {{ else if eq .Flash "ping_skipped_chat_active" }}<div class="flash paused">Ping skipped — leader is already awake via your chat session.</div>{{ end }}
 
   {{ with .Team }}
     <section class="team">

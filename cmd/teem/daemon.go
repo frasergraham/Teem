@@ -1161,6 +1161,18 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pulse not configured", http.StatusInternalServerError)
 		return
 	}
+	// channels-live = operator chat is active and already driving the
+	// leader. Two writers on the same session file is a concurrent-
+	// write hazard, and the ping is redundant. Read under detectionMu
+	// so we serialize against the SSE handler's flag flips.
+	rt.detectionMu.Lock()
+	live := rt.channelsLive
+	rt.detectionMu.Unlock()
+	if live {
+		d.pingRespond(w, r, id, http.StatusConflict, "ping_skipped_chat_active",
+			"operator chat session is active — leader is already awake via channels; ping is unnecessary", 0)
+		return
+	}
 	if rt.pulse.Paused() {
 		d.pingRespond(w, r, id, http.StatusConflict, "paused",
 			"pulse paused; `teem pulse resume` first", 0)
