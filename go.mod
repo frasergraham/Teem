@@ -6,6 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.79.1
 	github.com/mark3labs/mcp-go v0.52.0
+	github.com/yuin/goldmark v1.8.2
 	golang.org/x/crypto v0.51.0
 	gopkg.in/yaml.v3 v3.0.1
 	tailscale.com v1.98.1

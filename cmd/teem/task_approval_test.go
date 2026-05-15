@@ -704,6 +704,166 @@ func writeAuditJobReceived(t *testing.T, rt *registeredTeam, agentID, jobID, pro
 	}
 }
 
+// seedRepoWithDocsBranchContent is like seedRepoWithDocsBranch but
+// lets the caller pick the markdown content — used by the inline-
+// render tests to seed `# Heading\n\nbody\n`, an oversize file for
+// truncation, and a hostile `<script>` payload for the
+// no-unsafe-HTML check.
+func seedRepoWithDocsBranchContent(t *testing.T, agentID, docFile, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, dir, "init", "--initial-branch=main", ".")
+	runGit(t, dir, "commit", "--allow-empty", "-m", "initial commit on main")
+	runGit(t, dir, "checkout", "-b", "teem/"+agentID)
+	full := filepath.Join(dir, docFile)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", docFile)
+	runGit(t, dir, "commit", "-m", agentID+": add "+docFile)
+	runGit(t, dir, "checkout", "main")
+	return dir
+}
+
+// TestPlanArtifact_RenderMarkdownInline_DocsBranch asserts that an
+// awaiting-approval card whose evidence-branch carries a markdown
+// plan doc renders that doc's HTML inline (not just the file path).
+// The stable <details id="details-task-...-plan-..."> wrapper must
+// be present so the sessionStorage script can persist its expanded
+// state across the 10s auto-refresh.
+func TestPlanArtifact_RenderMarkdownInline_DocsBranch(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	rt.repoRoot = seedRepoWithDocsBranchContent(t, "worker-una", "docs/foo.md",
+		"# Heading\n\nbody\n")
+	d.teams["alpha"] = rt
+
+	writeAuditJobReceived(t, rt, "worker-una", "j1", "go do the thing")
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Review the plan"})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{
+		Stage:       plan.StageAwaitingApproval,
+		AddEvidence: []string{"j1"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+
+	if !strings.Contains(body, "<h1>Heading</h1>") {
+		t.Errorf("rendered HTML missing <h1>Heading</h1>; body=%s", body)
+	}
+	wantID := `id="details-task-` + task.ID + `-plan-docs-foo-md"`
+	if !strings.Contains(body, wantID) {
+		t.Errorf("plan-artifact <details> missing stable id %q", wantID)
+	}
+	// The raw markdown source must not leak through outside of the
+	// rendered HTML — the literal "# Heading" line should not appear.
+	if strings.Contains(body, "# Heading") {
+		t.Errorf("raw markdown leaked into rendered body; got %q", body)
+	}
+}
+
+// TestPlanArtifact_RenderMarkdown_TruncateLargeFile seeds a >50KB
+// markdown file on the worker branch and asserts the dashboard
+// surfaces a "(truncated)" indicator in the summary and clips the
+// rendered body at the cap.
+func TestPlanArtifact_RenderMarkdown_TruncateLargeFile(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	// 60KB of body content; well over the 50KB planFileSizeCap. The
+	// content is mostly the unique marker "BLOATBLOATBLOAT" so the
+	// truncation note's "more bytes" hint stays accurate.
+	huge := "# Big doc\n\n" + strings.Repeat("BLOATBLOATBLOAT\n", 4000)
+	rt.repoRoot = seedRepoWithDocsBranchContent(t, "worker-big", "docs/big.md", huge)
+	d.teams["alpha"] = rt
+
+	writeAuditJobReceived(t, rt, "worker-big", "jbig", "ship the big doc")
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Review the big doc"})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{
+		Stage:       plan.StageAwaitingApproval,
+		AddEvidence: []string{"jbig"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+
+	if !strings.Contains(body, "(truncated)") {
+		t.Errorf("summary missing (truncated) marker; body=%s", body)
+	}
+	if !strings.Contains(body, "[truncated") {
+		t.Errorf("rendered body missing inline truncation note")
+	}
+	// Sanity: the rendered HTML for this card should be smaller than
+	// the source (~60KB markdown shouldn't survive intact). Worst case
+	// the response carries up to planFileSizeCap of source ≈ 50KB.
+	if len(body) > 200*1024 {
+		t.Errorf("dashboard body too large (%d bytes) — file was not clipped", len(body))
+	}
+}
+
+// TestPlanArtifact_RenderMarkdown_NoUnsafeHTML asserts that goldmark
+// is configured with WithUnsafe=false: a literal <script> tag in the
+// markdown source must be escaped, not passed through to the
+// dashboard HTML. The markdown comes from worker-controlled branches
+// so trusting raw HTML would be an XSS hole on the unauthenticated
+// localhost dashboard.
+func TestPlanArtifact_RenderMarkdown_NoUnsafeHTML(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	hostile := "# Plan\n\n<script>alert(1)</script>\n\nbody\n"
+	rt.repoRoot = seedRepoWithDocsBranchContent(t, "worker-evil", "docs/evil.md", hostile)
+	d.teams["alpha"] = rt
+
+	writeAuditJobReceived(t, rt, "worker-evil", "jevil", "hostile payload")
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Review the evil doc"})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
+	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{
+		Stage:       plan.StageAwaitingApproval,
+		AddEvidence: []string{"jevil"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d", w.Code)
+	}
+	body := w.Body.String()
+
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Errorf("raw <script> leaked through goldmark; body=%s", body)
+	}
+	// Goldmark with WithUnsafe=false omits raw HTML blocks entirely
+	// and substitutes a comment marker — the marker's presence is the
+	// positive signal that the unsafe-HTML guard fired.
+	if !strings.Contains(body, "raw HTML omitted") {
+		t.Errorf("expected goldmark's raw-HTML-omitted marker in output; body=%s", body)
+	}
+	// The literal payload string must not appear anywhere in the
+	// rendered output, escaped or not — goldmark drops the tag, so
+	// "alert(1)" should not survive.
+	if strings.Contains(body, "alert(1)") {
+		t.Errorf("script payload leaked through; body=%s", body)
+	}
+}
+
 // TestTaskActionForm_RejectFromCommentField asserts the dashboard form
 // can reject a task using the single `comment` input — the form has
 // only one text field that doubles as the optional approve comment AND
