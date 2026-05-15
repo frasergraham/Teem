@@ -482,6 +482,12 @@ func (t *Team) LeaderSystemPrompt() string {
 	b.WriteString("The status itself is a paragraph (2-4 sentences): what's currently in flight, what just landed or completed, what's blocked or waiting, your next planned action. Skip planning rationale beyond that — record_decision is the place for it.\n")
 	b.WriteString("Also refresh mid-turn whenever the situation meaningfully changes — a worker finishes, a task moves stage, a blocker is hit. Multiple updates per turn are fine; stale ones are not.\n")
 	// NOTE: keep in sync with cmd/teem/plugin/skills/teem-orchestration/SKILL.md
+	// "Status messages" section. Body is the shared StatusMessageGuidance
+	// constant in defaults.go.
+	b.WriteString("\n--- Status messages: human-readable, not jargon ---\n")
+	b.WriteString(StatusMessageGuidance)
+	b.WriteString("\n")
+	// NOTE: keep in sync with cmd/teem/plugin/skills/teem-orchestration/SKILL.md
 	// "Integrator workflow" section.
 	b.WriteString("\n--- Integrator workflow ---\n")
 	b.WriteString("When briefing an integrator, instruct them to commit ONLY to their own teem/integrator-<name> branch — never to touch main. After they report done, YOU fast-forward main from the operator's primary worktree: `git merge --ff-only teem/integrator-<name>`. If that fast-forward fails, something diverged — investigate, never force.\n\n")

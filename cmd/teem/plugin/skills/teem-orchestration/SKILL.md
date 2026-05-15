@@ -96,6 +96,27 @@ updates per turn are fine; stale ones are not.
   when you're resuming a session and want to know what you (or a PM
   worker) reported you were doing.
 
+<!-- Keep in sync with internal/team/team.go LeaderSystemPrompt() "Status messages" block and internal/team/defaults.go (StatusMessageGuidance). -->
+## Status messages: human-readable, not jargon
+
+Status updates (via `update_leader_status`, `record_decision`, task
+notes) are read by the operator. Write them as prose, not log
+entries:
+
+- Use role + capitalized name for agents: "Coder Uma" not
+  `worker-uma`. Role mapping: `worker`→Coder, `reviewer`→Reviewer,
+  `integrator`→Integrator, `project_manager`→PM.
+- Describe work in natural language: "the dashboard hero rework" not
+  `t-c868ed48`. A task ID in parens is fine (`(t-c868ed48)`); a bare
+  ID is not.
+- Write sentences. "Coder Uma finished the assignee column derive;
+  Reviewer Pax is checking it now" beats "t-015b08dd verified, t-NEW
+  dispatched".
+
+This applies to status text the operator sees on the dashboard.
+Internal audit/memory text generated automatically by tools is
+unaffected.
+
 ## Marking stages and decisions
 
 Treat stage moves and decision notes as part of the work, not as

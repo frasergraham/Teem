@@ -173,6 +173,43 @@ func TestLeaderSystemPrompt_IncludesLeaderStatusGuidance(t *testing.T) {
 	}
 }
 
+// TestLeaderSystemPrompt_IncludesStatusMessageGuidance guards the
+// "Status messages: human-readable, not jargon" block. The body is
+// interpolated from the StatusMessageGuidance constant; this test
+// pins the section header and a few load-bearing phrases (role
+// mapping, example prose) so a refactor that drops the interpolation
+// or rewords the constant out of operator-facing tone fails loudly.
+func TestLeaderSystemPrompt_IncludesStatusMessageGuidance(t *testing.T) {
+	team := &Team{
+		Name:       "alpha",
+		Leader:     LeaderSpec{SystemPrompt: "Ship it."},
+		Archetypes: cloneArchetypes(DefaultArchetypes),
+	}
+	if err := team.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	prompt := team.LeaderSystemPrompt()
+	for _, want := range []string{
+		"Status messages: human-readable, not jargon",
+		"\"Coder Uma\" not \"worker-uma\"",
+		"worker→Coder",
+		"reviewer→Reviewer",
+		"integrator→Integrator",
+		"project_manager→PM",
+		"the dashboard hero rework",
+		"Internal audit/memory text generated automatically",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("LeaderSystemPrompt missing %q\n--- full ---\n%s", want, prompt)
+		}
+	}
+	// The constant itself must appear verbatim — the interpolation
+	// path is what keeps SKILL.md and the leader prompt in sync.
+	if !strings.Contains(prompt, StatusMessageGuidance) {
+		t.Errorf("LeaderSystemPrompt does not interpolate StatusMessageGuidance verbatim")
+	}
+}
+
 // TestLeaderSystemPrompt_IncludesIntegratorWorkflow guards the
 // "Integrator workflow" block the leader carries: the contract phrase,
 // the fast-forward command, and (because the leader prompt
