@@ -739,14 +739,15 @@
   Layered on top of ui_styles for the per-team detail page only. Adds:
     - the dark "bridge" ground with a subtle dotted-grid texture,
     - typography (Fraunces / Bricolage Grotesque / JetBrains Mono),
-    - amber engineering-drawing corner ticks on .hero/.section,
     - the status-panel headline + breathing lamp,
     - the active-workers manifest grid + role-tag colour modifiers.
 
+  Panels are rounded rects (10–12px) with breathing-room padding —
+  no engineering-drawing corner ticks. Operator feedback: the L-bracket
+  aesthetic was hard to read.
+
   Scoped under `body.team-detail-page` so the summary index keeps its
-  light system-font look. Chunk 1 of the docs/dashboard-redesign.html
-  rollout — future chunks restyle the remaining sections on top of this
-  baseline.
+  light system-font look.
 */}}
 {{ define "bridge_console_styles" }}
 <style>
@@ -843,45 +844,12 @@
   body.team-detail-page .muted,
   body.team-detail-page .empty { color: var(--c-text-muted); }
 
-  /* Engineering-drawing corner ticks on the major panels — small amber
-     L-brackets at top-left and bottom-right. Pure decoration; the
-     section's heading and body do the work. */
-  body.team-detail-page .hero,
-  body.team-detail-page .workers-panel,
-  body.team-detail-page .pulse-panel,
-  body.team-detail-page .section {
-    position: relative;
-  }
-  body.team-detail-page .hero::before,
-  body.team-detail-page .workers-panel::before,
-  body.team-detail-page .pulse-panel::before,
-  body.team-detail-page .section::before,
-  body.team-detail-page .hero::after,
-  body.team-detail-page .workers-panel::after,
-  body.team-detail-page .pulse-panel::after,
-  body.team-detail-page .section::after {
-    content: "";
-    position: absolute;
-    width: 8px; height: 8px;
-    pointer-events: none;
-    border-color: var(--c-signal);
-  }
-  body.team-detail-page .hero::before,
-  body.team-detail-page .workers-panel::before,
-  body.team-detail-page .pulse-panel::before,
-  body.team-detail-page .section::before {
-    top: -1px; left: -1px;
-    border-left: 1px solid; border-top: 1px solid;
-  }
-  body.team-detail-page .hero::after,
-  body.team-detail-page .workers-panel::after,
-  body.team-detail-page .pulse-panel::after,
-  body.team-detail-page .section::after {
-    bottom: -1px; right: -1px;
-    border-right: 1px solid; border-bottom: 1px solid;
-  }
-
   /* --- Status panel (the hero gets a `status-panel` modifier) -------- */
+  body.team-detail-page .hero {
+    border-radius: 12px;
+    padding: 20px 22px;
+    margin: 0 0 18px 0;
+  }
   body.team-detail-page .hero.status-panel {
     background: linear-gradient(135deg, var(--c-panel) 0%, var(--c-panel-alt) 100%);
     border: 1px solid var(--c-border);
@@ -928,9 +896,18 @@
   .workers-panel {
     background: var(--c-panel);
     border: 1px solid var(--c-border);
-    border-radius: 4px;
-    padding: 16px 20px 14px;
-    margin: 0 0 14px 0;
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin: 0 0 18px 0;
+  }
+
+  /* --- Pulse panel --------------------------------------------------- */
+  body.team-detail-page .pulse-panel {
+    background: var(--c-panel);
+    border: 1px solid var(--c-border);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin: 0 0 18px 0;
   }
   .workers-panel .panel-label {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1014,26 +991,9 @@
   body.team-detail-page .decisions-section {
     background: var(--c-panel);
     border: 1px solid var(--c-border);
-    border-radius: 4px;
-    padding: 16px 20px 14px;
-    margin: 0 0 14px 0;
-    position: relative;
-  }
-  body.team-detail-page .decisions-section::before,
-  body.team-detail-page .decisions-section::after {
-    content: "";
-    position: absolute;
-    width: 8px; height: 8px;
-    pointer-events: none;
-    border-color: var(--c-signal);
-  }
-  body.team-detail-page .decisions-section::before {
-    top: -1px; left: -1px;
-    border-left: 1px solid; border-top: 1px solid;
-  }
-  body.team-detail-page .decisions-section::after {
-    bottom: -1px; right: -1px;
-    border-right: 1px solid; border-bottom: 1px solid;
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin: 0 0 18px 0;
   }
   body.team-detail-page .decisions-section h3.panel-label {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1129,7 +1089,7 @@
     flex: 1; min-width: 200px;
     padding: 6px 10px;
     border: 1px solid var(--c-border);
-    border-radius: 4px;
+    border-radius: 8px;
     background: var(--c-bg);
     color: var(--c-text);
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1138,7 +1098,7 @@
   .decision-actions input[type=text]::placeholder { color: var(--c-text-dim); }
   button.decision-action {
     padding: 6px 14px;
-    border-radius: 4px;
+    border-radius: 8px;
     border: 1px solid var(--c-border-2);
     background: transparent;
     color: var(--c-text);
@@ -1147,8 +1107,12 @@
     font-weight: 600;
     letter-spacing: 0.06em;
     cursor: pointer;
+    transition: box-shadow 160ms ease, background-color 160ms ease;
   }
-  button.decision-action:hover { border-color: var(--c-border-hover); }
+  button.decision-action:hover {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-signal) 30%, transparent);
+    border-color: var(--c-border-hover);
+  }
   button.decision-action.primary.action-approval { background: var(--c-signal); color: var(--c-on-signal); border-color: var(--c-signal); }
   button.decision-action.primary.action-question { background: var(--c-azure); color: var(--c-on-signal); border-color: var(--c-azure); }
   button.decision-action.primary.action-blocker  { background: var(--c-plum); color: var(--c-on-signal); border-color: var(--c-plum); }
@@ -1249,7 +1213,7 @@
     background: var(--c-bg);
     border: 1px solid var(--c-border-2);
     color: var(--c-text);
-    border-radius: 3px;
+    border-radius: 8px;
     padding: 6px 8px;
     width: 80px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1259,7 +1223,7 @@
     background: var(--c-bg);
     border: 1px solid var(--c-border-2);
     color: var(--c-text);
-    border-radius: 3px;
+    border-radius: 8px;
     padding: 6px 8px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 12px;
@@ -1283,7 +1247,7 @@
     background: var(--c-bg);
     border: 1px solid var(--c-border-2);
     color: var(--c-text);
-    border-radius: 3px;
+    border-radius: 8px;
     padding: 8px 10px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 12px;
@@ -1297,16 +1261,20 @@
     background: var(--c-tile);
     border: 1px solid var(--c-border-2);
     color: var(--c-signal-text);
-    border-radius: 3px;
+    border-radius: 8px;
     padding: 7px 16px;
     cursor: pointer;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 11px;
     letter-spacing: 0.18em;
     text-transform: uppercase;
-    transition: background 160ms ease, border-color 160ms ease;
+    transition: box-shadow 160ms ease, background-color 160ms ease;
   }
-  .pulse-save:hover { background: var(--c-tile-hover); border-color: var(--c-signal); }
+  .pulse-save:hover {
+    background: var(--c-tile-hover);
+    border-color: var(--c-signal);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-signal) 30%, transparent);
+  }
   @media (max-width: 720px) {
     .pulse-grid { grid-template-columns: 1fr; }
   }
@@ -1318,26 +1286,9 @@
   body.team-detail-page .usage-panel {
     background: var(--c-panel);
     border: 1px solid var(--c-border);
-    border-radius: 4px;
-    padding: 16px 20px 14px;
-    margin: 0 0 14px 0;
-    position: relative;
-  }
-  body.team-detail-page .usage-panel::before,
-  body.team-detail-page .usage-panel::after {
-    content: "";
-    position: absolute;
-    width: 8px; height: 8px;
-    pointer-events: none;
-    border-color: var(--c-signal);
-  }
-  body.team-detail-page .usage-panel::before {
-    top: -1px; left: -1px;
-    border-left: 1px solid; border-top: 1px solid;
-  }
-  body.team-detail-page .usage-panel::after {
-    bottom: -1px; right: -1px;
-    border-right: 1px solid; border-bottom: 1px solid;
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin: 0 0 18px 0;
   }
   body.team-detail-page .usage-panel .panel-label {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1468,26 +1419,9 @@
   body.team-detail-page .chat-panel {
     background: var(--c-panel);
     border: 1px solid var(--c-border);
-    border-radius: 4px;
-    padding: 16px 20px 14px;
-    margin: 0 0 14px 0;
-    position: relative;
-  }
-  body.team-detail-page .chat-panel::before,
-  body.team-detail-page .chat-panel::after {
-    content: "";
-    position: absolute;
-    width: 8px; height: 8px;
-    pointer-events: none;
-    border-color: var(--c-signal);
-  }
-  body.team-detail-page .chat-panel::before {
-    top: -1px; left: -1px;
-    border-left: 1px solid; border-top: 1px solid;
-  }
-  body.team-detail-page .chat-panel::after {
-    bottom: -1px; right: -1px;
-    border-right: 1px solid; border-bottom: 1px solid;
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin: 0 0 18px 0;
   }
   body.team-detail-page .chat-panel h3.panel-label {
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1589,7 +1523,7 @@
     flex: 1;
     background: var(--c-bg);
     border: 1px solid var(--c-border);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 10px 12px;
     color: var(--c-text);
     font-family: 'Bricolage Grotesque', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
@@ -1610,7 +1544,7 @@
     background: var(--c-signal);
     color: var(--c-on-signal-warm);
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 0 22px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
     font-size: 12px;
