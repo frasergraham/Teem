@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -363,6 +364,50 @@ func TestPulse_RunningFlagFile(t *testing.T) {
 	p3 := New(cfg)
 	if !p3.WasRunning() {
 		t.Error("after a Start without Stop (simulated crash), a fresh Pulse should see WasRunning=true")
+	}
+}
+
+// TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels guards
+// against a regression where `--channels server:teem-channel` (variadic)
+// consumed the trailing prompt arg, leaving claude with no prompt.
+// claude -p --resume <id> then errored with "No deferred tool marker
+// found in the resumed session." Pulse failed every tick.
+//
+// Invariant: the trailing prompt must be preceded by a `--…` flag (or
+// its single-arg value), never by a value that belongs to a variadic
+// option like --channels.
+func TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels(t *testing.T) {
+	args := buildClaudeArgs("00000000-0000-0000-0000-000000000001", "/tmp/mcp.json", "ctx")
+	if len(args) == 0 {
+		t.Fatal("empty args")
+	}
+	prompt := args[len(args)-1]
+	if prompt != "Take your next turn." {
+		t.Errorf("last arg should be the prompt, got %q", prompt)
+	}
+	// Walk the args; locate --channels (if present) and assert there's
+	// at least one non-channel-token --flag between it and the prompt.
+	channelIdx := -1
+	for i, a := range args {
+		if a == "--channels" || a == "--dangerously-load-development-channels" {
+			channelIdx = i
+			break
+		}
+	}
+	if channelIdx < 0 {
+		return // no channels flag in this build; nothing to guard
+	}
+	// Find the next --flag after channelIdx+1. That flag must come
+	// before the trailing prompt slot.
+	foundTerminator := false
+	for i := channelIdx + 2; i < len(args)-1; i++ { // skip channel token at +1; stop before prompt
+		if strings.HasPrefix(args[i], "--") {
+			foundTerminator = true
+			break
+		}
+	}
+	if !foundTerminator {
+		t.Errorf("--channels variadic is followed only by positionals; the prompt %q will be swallowed.\nargs: %v", prompt, args)
 	}
 }
 

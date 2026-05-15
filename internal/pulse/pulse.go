@@ -593,17 +593,7 @@ func (p *Pulse) invokeClaude(ctx context.Context, sessionID, contextBody string)
 		}
 		claudePath = path
 	}
-	args := []string{
-		"-p",
-		"--resume", sessionID,
-		"--output-format", "stream-json",
-		"--verbose",
-		"--mcp-config", p.cfg.MCPConfig,
-		"--append-system-prompt", contextBody,
-		"--dangerously-skip-permissions",
-	}
-	args = append(args, claudeflags.ChannelFlags()...)
-	args = append(args, "Take your next turn.")
+	args := buildClaudeArgs(sessionID, p.cfg.MCPConfig, contextBody)
 	cmd := exec.CommandContext(ctx, claudePath, args...)
 	cmd.Dir = p.cfg.RepoRoot
 	cmd.Stdin = nil
@@ -624,6 +614,31 @@ func (p *Pulse) invokeClaude(ctx context.Context, sessionID, contextBody string)
 		return res, parseErr
 	}
 	return res, nil
+}
+
+// buildClaudeArgs assembles the argv passed to `claude` for one tick.
+//
+// Arg order matters: `--channels <channels...>` is variadic and will
+// swallow any positional argument that follows it (including the
+// trailing prompt). ChannelFlags are placed BEFORE another flag so the
+// next `--…` token terminates the variadic, leaving the prompt at the
+// end intact. Without a prompt, `claude -p --resume` errors with "No
+// deferred tool marker found in the resumed session."
+func buildClaudeArgs(sessionID, mcpConfig, contextBody string) []string {
+	args := []string{
+		"-p",
+		"--resume", sessionID,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--mcp-config", mcpConfig,
+	}
+	args = append(args, claudeflags.ChannelFlags()...)
+	args = append(args,
+		"--append-system-prompt", contextBody,
+		"--dangerously-skip-permissions",
+	)
+	args = append(args, "Take your next turn.")
+	return args
 }
 
 // parseTickStream consumes Claude Code's stream-json and returns the
