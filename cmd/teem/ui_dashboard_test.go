@@ -1277,6 +1277,96 @@ func TestDecisionsList_SortedNewestFirst(t *testing.T) {
 	}
 }
 
+func TestDecisionsList_QuestionDismissedAfterReply(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "What pattern?"})
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC().Add(-2 * time.Minute),
+		AgentID:   "worker-uma",
+		Kind:      audit.KindDecisionNote,
+		Message:   "QUESTION_BODY_MARKER",
+		Meta:      map[string]any{"task_id": task.ID, "severity": "question"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if !strings.Contains(decisionsSection(t, w.Body.String()), "QUESTION_BODY_MARKER") {
+		t.Fatalf("expected QUESTION row present before reply")
+	}
+
+	// Operator REPLY lands as a newer decision_note (any severity).
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "operator",
+		Kind:      audit.KindDecisionNote,
+		Message:   "Use sync.Map.",
+		Meta:      map[string]any{"task_id": task.ID, "severity": "info"},
+	})
+
+	w2 := httptest.NewRecorder()
+	d.handler().ServeHTTP(w2, req)
+	if strings.Contains(decisionsSection(t, w2.Body.String()), "QUESTION_BODY_MARKER") {
+		t.Errorf("QUESTION row should be dismissed after operator REPLY lands")
+	}
+}
+
+func TestDecisionsList_UnansweredQuestionStillRenders(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Still open"})
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "worker-uma",
+		Kind:      audit.KindDecisionNote,
+		Message:   "UNANSWERED_QUESTION_MARKER",
+		Meta:      map[string]any{"task_id": task.ID, "severity": "question"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if !strings.Contains(decisionsSection(t, w.Body.String()), "UNANSWERED_QUESTION_MARKER") {
+		t.Errorf("unanswered QUESTION row should still render")
+	}
+}
+
+func TestDecisionsList_ReplyForDifferentTask_DoesNotDismiss(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	taskA, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Task A"})
+	taskB, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Task B"})
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC().Add(-2 * time.Minute),
+		AgentID:   "worker-uma",
+		Kind:      audit.KindDecisionNote,
+		Message:   "TASK_A_QUESTION_MARKER",
+		Meta:      map[string]any{"task_id": taskA.ID, "severity": "question"},
+	})
+	// A reply, but for task B — must not dismiss task A's question.
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "operator",
+		Kind:      audit.KindDecisionNote,
+		Message:   "Reply for B.",
+		Meta:      map[string]any{"task_id": taskB.ID, "severity": "info"},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if !strings.Contains(decisionsSection(t, w.Body.String()), "TASK_A_QUESTION_MARKER") {
+		t.Errorf("task A's question should still render — reply was for task B")
+	}
+}
+
 func TestDecisionsList_EmptyState(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}}
 	rt := newFullTestTeam(t, "alpha")

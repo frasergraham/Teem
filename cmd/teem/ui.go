@@ -1016,6 +1016,25 @@ func buildDecisions(rt *registeredTeam, team *dashboardTeam) []decisionRow {
 			if taskID == "" || seenQuestion[taskID] {
 				continue
 			}
+			// A later decision_note for the same task (any severity)
+			// is the operator's REPLY landing — dismiss the question.
+			// events is chronological (oldest first), so indices > i
+			// are newer than the question at i.
+			answered := false
+			for j := i + 1; j < len(events); j++ {
+				ne := events[j]
+				if ne.Kind != audit.KindDecisionNote {
+					continue
+				}
+				if ntid, _ := ne.Meta["task_id"].(string); ntid == taskID {
+					answered = true
+					break
+				}
+			}
+			if answered {
+				seenQuestion[taskID] = true
+				continue
+			}
 			seenQuestion[taskID] = true
 			out = append(out, buildQuestionRow(rt.team.ID, taskID, e, rt.plan))
 		case audit.KindBlockerNote:
