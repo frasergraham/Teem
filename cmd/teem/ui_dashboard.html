@@ -259,6 +259,97 @@
   .summary .stat .n { font-weight: 600; }
   .summary .stat .lbl { color: var(--muted); }
 
+  /* --- Hero band (top of team-detail page) -------------------------
+     Communicates two things at a glance, from across the room:
+       1. Active-agents total + open-tasks total as big bold numerals.
+       2. Today's task pipeline as a horizontal stacked bar.
+     Sits above the existing .summary line; .summary is kept for the
+     in-flight counter the hero doesn't surface. */
+  .hero {
+    margin: 0 0 14px 0;
+    padding: 14px 16px 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .hero-numbers {
+    display: flex; gap: 28px; align-items: baseline; flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .hero-numbers .stat { display: flex; align-items: baseline; gap: 8px; }
+  .hero-numbers .stat .n {
+    font-weight: 700; letter-spacing: -0.02em; line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .hero-numbers .stat.big .n { font-size: 48px; }
+  .hero-numbers .stat.secondary .n { font-size: 24px; }
+  .hero-numbers .stat .lbl {
+    color: var(--muted);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  .hero-chips {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    margin-bottom: 10px;
+  }
+  .hero-chips .chip {
+    display: inline-flex; align-items: baseline; gap: 6px;
+    background: var(--pill-bg);
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 12px;
+  }
+  .hero-chips .chip .role { color: var(--muted); }
+  .hero-chips .chip .count {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    font-weight: 600;
+    color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .hero-chips .chip.zero .count { color: var(--muted); }
+  .stage-bar {
+    display: flex;
+    width: 100%;
+    height: 28px;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--pill-bg);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .stage-bar .segment {
+    min-width: 40px;
+    padding: 0 8px;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    color: #0c0a09;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-right: 1px solid rgba(255,255,255,0.5);
+  }
+  .stage-bar .segment:last-child { border-right: none; }
+  .stage-bar .segment .count {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+  }
+  .stage-bar-empty {
+    color: var(--muted); font-style: italic; font-size: 13px;
+    padding: 6px 0;
+  }
+  .hero-bar-label {
+    color: var(--muted); font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    margin: 0 0 4px 0;
+  }
+  @media (max-width: 720px) {
+    .hero-numbers .stat.big .n { font-size: 40px; }
+    .hero-numbers .stat.secondary .n { font-size: 22px; }
+    .stage-bar { height: 32px; font-size: 10px; }
+    .stage-bar .segment { min-width: 36px; padding: 0 6px; }
+  }
+
   /* --- Tile grid (summary index page) -----------------------------
      Tiles are full-bleed links so the entire card is tappable. Big
      bold numerals dominate so the dashboard reads at a glance from
@@ -548,10 +639,38 @@
         {{ if .PulseRunning }}· tick every {{ .PulseInterval }} · last {{ .PulseLastTick }} · {{ .PulseTickCount }} ticks{{ end }}
       </div>
 
+      <section class="hero" aria-label="team summary">
+        <div class="hero-numbers">
+          <div class="stat big">
+            <span class="n">{{ .Hero.ActiveAgentsTotal }}</span>
+            <span class="lbl">active agent{{ if ne .Hero.ActiveAgentsTotal 1 }}s{{ end }}</span>
+          </div>
+          <div class="stat secondary">
+            <span class="n">{{ .Hero.OpenTasksTotal }}</span>
+            <span class="lbl">open task{{ if ne .Hero.OpenTasksTotal 1 }}s{{ end }}</span>
+          </div>
+        </div>
+        <div class="hero-chips" aria-label="agents by archetype">
+          {{ range .Hero.AgentChips }}
+            <span class="chip{{ if eq .Count 0 }} zero{{ end }}"><span class="role">{{ .Role }}</span><span class="count">· {{ .Count }}</span></span>
+          {{ end }}
+        </div>
+        <div class="hero-bar-label">Today's pipeline</div>
+        {{ if .Hero.HasStageActivity }}
+          <div class="stage-bar" role="img" aria-label="task stage breakdown for today">
+            {{ range .Hero.StageBar }}
+              <div class="segment" style="width: {{ printf "%.2f" .WidthPct }}%; background:{{ .ColorHex }};" title="{{ .Stage }} ({{ .Count }}): {{ .TaskIDList }}">
+                <span class="count">{{ .Count }}</span><span class="stage-name">{{ .Stage }}</span>
+              </div>
+            {{ end }}
+          </div>
+        {{ else }}
+          <div class="stage-bar-empty">no stage activity today</div>
+        {{ end }}
+      </section>
+
       <div class="summary">
-        <span class="stat"><span class="n">{{ len .Agents }}</span><span class="lbl">active agent{{ if ne (len .Agents) 1 }}s{{ end }}</span></span>
         <span class="stat"><span class="n">{{ .InFlight }}</span><span class="lbl">in flight</span></span>
-        <span class="stat"><span class="n">{{ .OpenTaskCount }}</span><span class="lbl">open task{{ if ne .OpenTaskCount 1 }}s{{ end }}</span></span>
       </div>
 
       {{ if .Flash }}<div class="flash">{{ .Flash }}</div>{{ end }}

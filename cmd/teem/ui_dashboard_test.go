@@ -294,19 +294,34 @@ func TestDashboard_MarksOrphanedAssigneeStale(t *testing.T) {
 // for asserting per-row classes in the dashboard tests.
 func extractTaskRow(t *testing.T, body, taskID string) string {
 	t.Helper()
-	idx := strings.Index(body, taskID)
-	if idx < 0 {
-		t.Fatalf("task %q not found in body", taskID)
+	// Task ids can appear in non-row contexts now (e.g. the hero
+	// stage bar's title= tooltip lists today's task ids). Walk the
+	// body looking for the occurrence that's actually inside a <tr>.
+	pos := 0
+	for {
+		off := strings.Index(body[pos:], taskID)
+		if off < 0 {
+			break
+		}
+		idx := pos + off
+		start := strings.LastIndex(body[:idx], "<tr")
+		if start >= 0 {
+			end := strings.Index(body[idx:], "</tr>")
+			if end < 0 {
+				t.Fatalf("no </tr> after task %q", taskID)
+			}
+			row := body[start : idx+end+len("</tr>")]
+			// Skip "occurrences" outside an actual row: if there's a
+			// closing </tr> between the candidate <tr and the id,
+			// the id isn't inside that row.
+			if !strings.Contains(body[start:idx], "</tr>") {
+				return row
+			}
+		}
+		pos = idx + len(taskID)
 	}
-	start := strings.LastIndex(body[:idx], "<tr")
-	if start < 0 {
-		t.Fatalf("no <tr before task %q", taskID)
-	}
-	end := strings.Index(body[idx:], "</tr>")
-	if end < 0 {
-		t.Fatalf("no </tr> after task %q", taskID)
-	}
-	return body[start : idx+end+len("</tr>")]
+	t.Fatalf("task %q not found inside any <tr> row", taskID)
+	return ""
 }
 
 // TestTeamDetail_RendersBranchesSection seeds a real temp git repo with
@@ -582,5 +597,124 @@ func TestResolveTeam_IDTakesPrecedence(t *testing.T) {
 
 	if got := d.resolveTeam("t-collidewithname"); got != idTeam {
 		t.Errorf("id match must win over name alias: got %p want %p", got, idTeam)
+	}
+}
+
+// TestTeamDetail_HeroSection seeds a mixed task population + several
+// archetypes and asserts the hero band renders:
+//   - big hero numerals (active-agents total, open-tasks total),
+//   - one chip per archetype declared in the team's roster
+//     (alphabetical, including zero-count entries),
+//   - one stage-bar segment per stage with ≥ 1 transition today.
+func TestTeamDetail_HeroSection(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	// Add an extra archetype so the chip strip exercises sorting +
+	// zero-count rendering.
+	rt.team.Archetypes = append(rt.team.Archetypes,
+		team.ArchetypeSpec{Role: "integrator", Placement: "local", MaxConcurrent: 1},
+		team.ArchetypeSpec{Role: "project_manager", Placement: "local", MaxConcurrent: 1},
+	)
+	d.teams["alpha"] = rt
+
+	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-1", Role: "worker", State: mcpsrv.StateBusy})
+	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-2", Role: "worker", State: mcpsrv.StateRunning})
+	rt.registry.Add(mcpsrv.AgentEntry{ID: "reviewer-1", Role: "reviewer", State: mcpsrv.StateRunning})
+
+	// Seed today's pipeline: one task per stage, all with
+	// StageEnteredAt = now (so they count as "today").
+	t1, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "fresh proposal"})
+	t2, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "in coding"})
+	_, _ = rt.plan.UpdateTask(t2.ID, plan.UpdateInput{Stage: plan.StageCoding})
+	t3, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "awaiting"})
+	_, _ = rt.plan.UpdateTask(t3.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	// Hero numerals
+	if !strings.Contains(body, `class="hero"`) {
+		t.Fatalf("hero section not rendered:\n%s", body)
+	}
+	if !strings.Contains(body, `class="stat big"`) {
+		t.Errorf("hero big numerals missing")
+	}
+	// active-agents total = 3, open-tasks total = 3 (3 open tasks).
+	// Markup wraps across lines; check the numeral and label both
+	// appear inside the big-stat div.
+	bigIdx := strings.Index(body, `class="stat big"`)
+	if bigIdx < 0 {
+		t.Fatalf("big stat div missing")
+	}
+	bigChunk := body[bigIdx : bigIdx+300]
+	if !strings.Contains(bigChunk, `>3</span>`) || !strings.Contains(bigChunk, "active agents") {
+		t.Errorf("expected active-agents total = 3 in hero big chunk:\n%s", bigChunk)
+	}
+
+	// Archetype chips, alphabetical: integrator, project_manager,
+	// reviewer, worker. integrator + project_manager have zero count.
+	for _, role := range []string{"integrator", "project_manager", "reviewer", "worker"} {
+		if !strings.Contains(body, role) {
+			t.Errorf("chip for archetype %q missing in body", role)
+		}
+	}
+	// Zero chip rendered with the .zero modifier.
+	if !strings.Contains(body, `class="chip zero"`) {
+		t.Errorf("zero-count chip class missing")
+	}
+
+	// Stage bar: at least the three seeded stages must appear as
+	// segments (case-insensitive — the template lowercases the stage
+	// constant string and uppercases via CSS).
+	if !strings.Contains(body, `class="stage-bar"`) {
+		t.Fatalf("stage bar not rendered:\n%s", body)
+	}
+	for _, stage := range []string{"proposed", "coding", "awaiting_approval"} {
+		if !strings.Contains(body, `>`+stage+`</span>`) {
+			t.Errorf("stage bar missing segment for %q", stage)
+		}
+	}
+	// Tooltip should list task ids for hover-inspection.
+	if !strings.Contains(body, `title="awaiting_approval (1): `+t3.ID+`"`) {
+		t.Errorf("stage segment title= missing task id:\n%s", body)
+	}
+	// Color: at least the AWAITING_APPROVAL amber should be in the
+	// inline style.
+	if !strings.Contains(body, "#f59e0b") {
+		t.Errorf("expected amber colour for awaiting_approval segment")
+	}
+	_ = t1
+}
+
+// TestTeamDetail_HeroEmptyDay confirms the hero's "no activity today"
+// placeholder kicks in when no task transitioned today and that the
+// chip strip still renders every archetype.
+func TestTeamDetail_HeroEmptyDay(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	// No agents, no tasks → 0 hero numerals, empty stage bar.
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+
+	if !strings.Contains(body, "no stage activity today") {
+		t.Errorf("expected empty-state line in hero:\n%s", body)
+	}
+	// Archetypes from the seed (worker + reviewer) still chip in.
+	for _, role := range []string{"worker", "reviewer"} {
+		if !strings.Contains(body, role) {
+			t.Errorf("chip for archetype %q missing from empty-day hero", role)
+		}
 	}
 }

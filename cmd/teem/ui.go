@@ -184,6 +184,47 @@ type dashboardTeam struct {
 	// root. False ⇒ render "(no repo)" in place of the branches section.
 	HasRepo  bool
 	Branches []dashboardBranch
+	// Hero is the "page-header" summary: big bold counters, agent
+	// chips per archetype, and today's task pipeline as a stacked bar.
+	Hero teamHero
+}
+
+// teamHero is the data behind the prominent at-a-glance hero band at
+// the top of the team-detail page. ActiveAgentsTotal and OpenTasksTotal
+// are large numerals; AgentChips lists every archetype in the team's
+// roster (with count, including zero); StageBar enumerates the stages
+// that had ≥ 1 task transition today, with proportional segment widths.
+type teamHero struct {
+	ActiveAgentsTotal int
+	OpenTasksTotal    int
+	AgentChips        []agentChip
+	StageBar          []stageBarSegment
+	// HasStageActivity is false when no stage had a transition today;
+	// the template renders a "no activity today" placeholder.
+	HasStageActivity bool
+}
+
+// agentChip is one pill in the per-archetype breakdown above the page
+// fold. Count == 0 still renders, so the operator sees the full team
+// shape at a glance (predictable layout).
+type agentChip struct {
+	Role  string
+	Count int
+}
+
+// stageBarSegment is one coloured segment in the horizontal stacked
+// pipeline bar. WidthPct is the relative share of today's task
+// transitions (sums to ≤ 100 across segments). TaskIDs is shown as a
+// hover tooltip so the operator can spot which task is where.
+type stageBarSegment struct {
+	Stage    string
+	Count    int
+	WidthPct float64
+	ColorHex string
+	TaskIDs  []string
+	// TaskIDList is the space-joined TaskIDs for the title= tooltip
+	// (templates can't easily call strings.Join).
+	TaskIDList string
 }
 
 type dashboardAgent struct {
@@ -681,6 +722,11 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		out.UnreadNotes = len(notes)
 	}
 
+	// Hero: active-agent total + agent chips per archetype + today's
+	// stage bar. Computed last so it can read the already-collected
+	// counters and the live agent set.
+	out.Hero = buildTeamHero(rt, &out)
+
 	// Active teem/* branches in the team's working tree. One git
 	// invocation per render is fine at v1 scale; if branches counts
 	// climb into the hundreds we can layer a small TTL cache here.
@@ -689,6 +735,112 @@ func teamSnapshot(rt *registeredTeam) dashboardTeam {
 		out.Branches = listTeemBranches(rt.repoRoot, rt.registry, rt.team.ID)
 	}
 	return out
+}
+
+// stageBarColors maps each canonical stage to the hex colour the hero
+// pipeline bar paints its segment with. Kept here (not in CSS) so the
+// template can use inline style="background:#…" — segments are
+// generated dynamically, so we'd need per-stage classes otherwise.
+// AWAITING_APPROVAL is amber to pop ("operator needed"); active stages
+// step up the saturation; terminal stages are green / red / grey.
+var stageBarColors = map[plan.Stage]string{
+	plan.StageProposed:         "#cbd5e1",
+	plan.StageSpecced:          "#94a3b8",
+	plan.StageAwaitingApproval: "#f59e0b",
+	plan.StagePlanning:         "#7dd3fc",
+	plan.StageCoding:           "#3b82f6",
+	plan.StageReviewing:        "#a78bfa",
+	plan.StageIntegrating:      "#fb923c",
+	plan.StageVerified:         "#22c55e",
+	plan.StageBlocked:          "#ef4444",
+	plan.StageShelved:          "#cbd5e1",
+}
+
+// buildTeamHero computes the hero band shown at the top of the
+// team-detail page: active-agents total, open-tasks total, one
+// alphabetically-sorted chip per archetype declared in the team's
+// roster (always including 0-count entries), and a stacked stage bar
+// for tasks that entered their current stage today. ABANDONED is
+// omitted from the bar entirely (operator-set noise).
+func buildTeamHero(rt *registeredTeam, team *dashboardTeam) teamHero {
+	h := teamHero{
+		ActiveAgentsTotal: len(team.Agents),
+		OpenTasksTotal:    team.OpenTaskCount,
+	}
+
+	// Agent chips: every archetype from the team YAML, alphabetical,
+	// counted from the active-agent set we just collected. Always
+	// including zero so the layout is predictable across page loads.
+	counts := make(map[string]int, len(rt.team.Archetypes))
+	for _, a := range rt.team.Archetypes {
+		counts[a.Role] = 0
+	}
+	for _, da := range team.Agents {
+		counts[da.Role]++
+	}
+	roles := make([]string, 0, len(counts))
+	for r := range counts {
+		roles = append(roles, r)
+	}
+	sort.Strings(roles)
+	for _, r := range roles {
+		h.AgentChips = append(h.AgentChips, agentChip{Role: r, Count: counts[r]})
+	}
+
+	// Stage bar: a task is "today" if its current StageEnteredAt is
+	// at-or-after local midnight. We can't replay every transition
+	// per task (the Plan snapshot keeps only the latest), but for the
+	// hero the current-stage-today view answers the operator's
+	// question well enough ("which lanes saw movement today?").
+	if rt.plan == nil {
+		return h
+	}
+	midnight := startOfLocalDay(time.Now())
+	type bucket struct {
+		count int
+		ids   []string
+	}
+	buckets := map[plan.Stage]*bucket{}
+	total := 0
+	for _, t := range rt.plan.List(plan.Filter{}) {
+		if t.Stage == plan.StageAbandoned {
+			continue
+		}
+		if t.StageEnteredAt.IsZero() || t.StageEnteredAt.Before(midnight) {
+			continue
+		}
+		b := buckets[t.Stage]
+		if b == nil {
+			b = &bucket{}
+			buckets[t.Stage] = b
+		}
+		b.count++
+		b.ids = append(b.ids, t.ID)
+		total++
+	}
+	if total == 0 {
+		return h
+	}
+	h.HasStageActivity = true
+	for _, s := range plan.AllStages {
+		b, ok := buckets[s]
+		if !ok || b.count == 0 {
+			continue
+		}
+		color := stageBarColors[s]
+		if color == "" {
+			color = "#cbd5e1"
+		}
+		h.StageBar = append(h.StageBar, stageBarSegment{
+			Stage:      string(s),
+			Count:      b.count,
+			WidthPct:   100 * float64(b.count) / float64(total),
+			ColorHex:   color,
+			TaskIDs:    b.ids,
+			TaskIDList: strings.Join(b.ids, " "),
+		})
+	}
+	return h
 }
 
 // taskToDashboardTask converts a plan.Task to the row shape rendered
