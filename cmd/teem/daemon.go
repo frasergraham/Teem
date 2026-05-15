@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -453,22 +454,32 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		mcpHost = "127.0.0.1"
 	}
 
-	if port := d.messagingCfg.WebhookPort; port > 0 && d.messagingWebhookToken != "" {
-		addr := fmt.Sprintf(":%d", port)
-		var (
-			webhookListener net.Listener
-			err             error
-		)
-		if df.useTailnet && d.tnetNode != nil {
-			webhookListener, err = d.tnetNode.Listen("tcp", addr)
-		} else {
-			webhookListener, err = net.Listen("tcp", "127.0.0.1"+addr)
+	if d.messagingWebhookToken != "" {
+		port, defaulted := effectiveWebhookPort(d.messagingCfg, df.listenAddr)
+		if port > 0 {
+			addr := fmt.Sprintf(":%d", port)
+			var (
+				webhookListener net.Listener
+				err             error
+			)
+			if df.useTailnet && d.tnetNode != nil {
+				webhookListener, err = d.tnetNode.Listen("tcp", addr)
+			} else {
+				webhookListener, err = net.Listen("tcp", "127.0.0.1"+addr)
+			}
+			if err != nil {
+				if defaulted {
+					return fmt.Errorf("messaging: webhook listener default port %d in use; set messaging.telegram.webhook_port explicitly in ~/.teem/messaging.yaml", port)
+				}
+				return fmt.Errorf("messaging webhook listen on %s: %w", addr, err)
+			}
+			d.messagingWebhookListener = webhookListener
+			origin := "configured"
+			if defaulted {
+				origin = "default"
+			}
+			fmt.Fprintf(os.Stderr, "[teemd] messaging: webhook listener on %s (%s)\n", addr, origin)
 		}
-		if err != nil {
-			return fmt.Errorf("messaging webhook listen on %s: %w", addr, err)
-		}
-		d.messagingWebhookListener = webhookListener
-		fmt.Fprintf(os.Stderr, "[teemd] messaging: webhook listener bound on %s\n", addr)
 	}
 
 	d.endpoint = fmt.Sprintf("http://%s%s", mcpHost, normalizePort(df.listenAddr))
@@ -558,6 +569,11 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				serverErr <- fmt.Errorf("webhook listener: %w", err)
 			}
+		})
+	}
+	if d.messagingTelegram != nil && d.messagingCfg.PublicURL != "" && d.messagingWebhookToken != "" {
+		safeGo("messaging.webhook:auto-register", func() {
+			d.autoRegisterTelegramWebhook(d.baseCtx)
 		})
 	}
 	defer func() {
@@ -2104,6 +2120,30 @@ func (d *daemon) initMessaging() error {
 	d.messagingChatSessions = newTelegramChatSessions()
 	fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram enabled (chat_id=%d)\n", cfg.Telegram.ChatID)
 	return nil
+}
+
+// autoRegisterTelegramWebhook compares the Telegram bot's currently
+// registered webhook URL against the daemon's expected hookURL (built
+// from messaging.telegram.public_url + the freshly-minted webhook
+// token), and POSTs setWebhook only when they differ. Logged failures
+// are non-fatal — a slow or transient Telegram API call must never
+// stop the daemon coming up.
+func (d *daemon) autoRegisterTelegramWebhook(ctx context.Context) {
+	if d.messagingTelegram == nil || d.messagingCfg.PublicURL == "" || d.messagingWebhookToken == "" {
+		return
+	}
+	base := strings.TrimRight(d.messagingCfg.PublicURL, "/")
+	hookURL := base + "/messaging/telegram/webhook?token=" + url.QueryEscape(d.messagingWebhookToken)
+	changed, err := d.messagingTelegram.EnsureWebhook(ctx, hookURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram auto-register failed: %v\n", err)
+		return
+	}
+	if changed {
+		fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram webhook updated -> %s\n", redactToken(hookURL))
+	} else {
+		fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram webhook already registered with bot\n")
+	}
 }
 
 // mintWebhookToken generates 32 hex chars of entropy, writes it to path

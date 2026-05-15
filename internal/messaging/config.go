@@ -31,10 +31,18 @@ type TelegramConfig struct {
 	// operator points Tailscale Funnel (or any reverse proxy) at
 	// this port so the public exposure is limited to the webhook
 	// endpoint — not the dashboard, MCP server, or /control
-	// surface running on the main port. 0 = disabled (webhook
-	// remains on the main port; behaviour unchanged from before
-	// this field was added).
+	// surface running on the main port. 0 means "default to
+	// <main listener port> + 1 when telegram is enabled"; the
+	// daemon refuses to start if that derived port is in use so
+	// the operator knows which port Funnel should target.
 	WebhookPort int `yaml:"webhook_port"`
+	// PublicURL is the operator-supplied base URL Telegram will POST
+	// updates to (e.g. https://my-tailnet.ts.net). When non-empty
+	// the daemon auto-registers the bot's webhook on startup using
+	// PublicURL + "/messaging/telegram/webhook?token=<token>", so
+	// the manual `teem messaging telegram register-webhook` step
+	// becomes unnecessary. Empty leaves registration to the CLI.
+	PublicURL string `yaml:"public_url"`
 }
 
 // fileShape is the on-disk YAML root: { messaging: { ... } }.

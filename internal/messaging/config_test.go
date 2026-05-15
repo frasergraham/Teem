@@ -71,6 +71,45 @@ messaging:
 	}
 }
 
+func TestConfig_LoadParsesPublicURL(t *testing.T) {
+	dir := t.TempDir()
+	writeYAML(t, dir, `
+messaging:
+  enabled: true
+  telegram:
+    enabled: true
+    bot_token_env: MY_BOT
+    chat_id: 1234567
+    public_url: "https://x.ts.net"
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telegram.PublicURL != "https://x.ts.net" {
+		t.Fatalf("public_url not parsed: got %q want %q", cfg.Telegram.PublicURL, "https://x.ts.net")
+	}
+}
+
+func TestConfig_LoadPublicURLDefaultsToEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writeYAML(t, dir, `
+messaging:
+  enabled: true
+  telegram:
+    enabled: true
+    bot_token_env: MY_BOT
+    chat_id: 1234567
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telegram.PublicURL != "" {
+		t.Fatalf("absent public_url should default to empty, got %q", cfg.Telegram.PublicURL)
+	}
+}
+
 func TestConfig_LoadWebhookPortDefaultsToZero(t *testing.T) {
 	dir := t.TempDir()
 	writeYAML(t, dir, `

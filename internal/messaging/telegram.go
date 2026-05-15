@@ -123,6 +123,63 @@ func (n *TelegramNotifier) SendText(ctx context.Context, chatID int64, text stri
 	return nil
 }
 
+// GetWebhookInfo asks Telegram for the bot's currently-registered
+// webhook URL. Returns "" when no webhook is set. The Telegram API
+// shape is `{"ok":true,"result":{"url":"...","has_custom_certificate":...}}`;
+// a non-ok response is surfaced as an error carrying the API's
+// description so the operator can act on it.
+func (n *TelegramNotifier) GetWebhookInfo(ctx context.Context) (string, error) {
+	endpoint := fmt.Sprintf("%s/bot%s/getWebhookInfo", n.baseURL, n.token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("telegram: new request: %s", sanitizeURLError(err))
+	}
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("telegram: get: %s", sanitizeURLError(err))
+	}
+	defer resp.Body.Close()
+	buf, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("telegram: getWebhookInfo status %d: %s", resp.StatusCode, strings.TrimSpace(string(buf)))
+	}
+	var parsed struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      struct {
+			URL string `json:"url"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(buf, &parsed); err != nil {
+		return "", fmt.Errorf("telegram: getWebhookInfo decode: %w", err)
+	}
+	if !parsed.OK {
+		return "", fmt.Errorf("telegram: getWebhookInfo: %s", parsed.Description)
+	}
+	return parsed.Result.URL, nil
+}
+
+// EnsureWebhook makes the Telegram bot's registered webhook match
+// hookURL: it calls GetWebhookInfo first and only POSTs setWebhook when
+// the URL differs. Returns changed=true when SetWebhook was called,
+// changed=false when the bot was already pointed at hookURL. Any API
+// error short-circuits and is returned to the caller — the daemon's
+// goroutine wrapper logs and swallows so a transient Telegram outage
+// doesn't fail startup.
+func (n *TelegramNotifier) EnsureWebhook(ctx context.Context, hookURL string) (changed bool, err error) {
+	current, err := n.GetWebhookInfo(ctx)
+	if err != nil {
+		return false, err
+	}
+	if current == hookURL {
+		return false, nil
+	}
+	if err := n.SetWebhook(ctx, hookURL); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // SetWebhook calls Telegram's setWebhook endpoint pointing the bot at
 // url. Used by the `teem messaging telegram register-webhook` CLI.
 func (n *TelegramNotifier) SetWebhook(ctx context.Context, url string) error {

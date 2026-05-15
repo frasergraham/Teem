@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +101,49 @@ type telegramUpdate struct {
 // can record outbound posts without a real Telegram server.
 type telegramReplier interface {
 	SendText(ctx context.Context, chatID int64, text string) error
+}
+
+// effectiveWebhookPort decides which TCP port the dedicated Telegram
+// webhook listener should bind. It returns:
+//
+//   - port=0 when telegram is disabled (no listener at all),
+//   - (cfg.WebhookPort, defaulted=false) when the operator configured a
+//     port explicitly, or
+//   - (<main listener port>+1, defaulted=true) when telegram is enabled
+//     and webhook_port is unset — the operator-friendly default so the
+//     listener "just works" once messaging.telegram.enabled flips on.
+//
+// listenAddr is the daemon's --listen flag (":7777" by default). When
+// it doesn't parse as a port number we return (0, false) so the
+// caller can keep the existing main-port behaviour rather than binding
+// something arbitrary.
+func effectiveWebhookPort(cfg messaging.TelegramConfig, listenAddr string) (port int, defaulted bool) {
+	if !cfg.Enabled {
+		return 0, false
+	}
+	if cfg.WebhookPort > 0 {
+		return cfg.WebhookPort, false
+	}
+	main := parsePortNumber(listenAddr)
+	if main <= 0 {
+		return 0, false
+	}
+	return main + 1, true
+}
+
+// parsePortNumber extracts the numeric port from a Go listen address
+// like ":7777" or "0.0.0.0:7777". Returns 0 when the address isn't
+// recognisable.
+func parsePortNumber(addr string) int {
+	norm := normalizePort(addr)
+	if !strings.HasPrefix(norm, ":") {
+		return 0
+	}
+	n, err := strconv.Atoi(norm[1:])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // newWebhookHandler builds an http.Handler that serves ONLY

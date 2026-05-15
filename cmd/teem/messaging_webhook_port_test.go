@@ -7,7 +7,53 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/frasergraham/teem/internal/messaging"
 )
+
+func TestWebhookListener_DefaultsToMainPortPlus1WhenEnabled(t *testing.T) {
+	cfg := messaging.TelegramConfig{Enabled: true}
+	port, defaulted := effectiveWebhookPort(cfg, ":7777")
+	if port != 7778 {
+		t.Errorf("port = %d, want 7778", port)
+	}
+	if !defaulted {
+		t.Error("defaulted should be true when webhook_port is unset")
+	}
+}
+
+func TestWebhookListener_ExplicitPortOverridesDefault(t *testing.T) {
+	cfg := messaging.TelegramConfig{Enabled: true, WebhookPort: 9001}
+	port, defaulted := effectiveWebhookPort(cfg, ":7777")
+	if port != 9001 {
+		t.Errorf("port = %d, want 9001", port)
+	}
+	if defaulted {
+		t.Error("defaulted should be false when operator pinned a port")
+	}
+}
+
+func TestWebhookListener_DisabledWhenTelegramDisabled(t *testing.T) {
+	cfg := messaging.TelegramConfig{Enabled: false, WebhookPort: 9001}
+	port, defaulted := effectiveWebhookPort(cfg, ":7777")
+	if port != 0 {
+		t.Errorf("port = %d, want 0 when telegram is disabled", port)
+	}
+	if defaulted {
+		t.Error("defaulted should be false when telegram is disabled")
+	}
+}
+
+func TestWebhookListener_DefaultGivesUpWhenListenAddrUnparseable(t *testing.T) {
+	cfg := messaging.TelegramConfig{Enabled: true}
+	port, defaulted := effectiveWebhookPort(cfg, "garbage")
+	if port != 0 {
+		t.Errorf("port = %d, want 0 when listen addr can't be parsed", port)
+	}
+	if defaulted {
+		t.Error("defaulted should be false when we can't derive a port")
+	}
+}
 
 // TestWebhookHandler_404OnOtherPaths confirms the dedicated webhook
 // handler only serves /messaging/telegram/webhook and 404s everything
