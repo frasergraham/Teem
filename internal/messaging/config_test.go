@@ -110,6 +110,45 @@ messaging:
 	}
 }
 
+func TestConfig_LoadParsesFunnelViaTsnet(t *testing.T) {
+	dir := t.TempDir()
+	writeYAML(t, dir, `
+messaging:
+  enabled: true
+  telegram:
+    enabled: true
+    bot_token_env: MY_BOT
+    chat_id: 1234567
+    funnel_via_tsnet: true
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Telegram.FunnelViaTsnet {
+		t.Fatalf("funnel_via_tsnet not parsed: %+v", cfg.Telegram)
+	}
+}
+
+func TestConfig_LoadFunnelViaTsnetDefaultsToFalse(t *testing.T) {
+	dir := t.TempDir()
+	writeYAML(t, dir, `
+messaging:
+  enabled: true
+  telegram:
+    enabled: true
+    bot_token_env: MY_BOT
+    chat_id: 1234567
+`)
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Telegram.FunnelViaTsnet {
+		t.Fatalf("absent funnel_via_tsnet should default to false, got true")
+	}
+}
+
 func TestConfig_LoadWebhookPortDefaultsToZero(t *testing.T) {
 	dir := t.TempDir()
 	writeYAML(t, dir, `

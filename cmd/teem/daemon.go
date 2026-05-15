@@ -324,6 +324,10 @@ type daemon struct {
 	// main listener. Nil when webhook_port is 0.
 	messagingWebhookListener net.Listener
 	messagingWebhookServer   *http.Server
+	// messagingWebhookPort is the local port the webhook listener bound
+	// to. Captured so the tsnet Funnel goroutine can target it without
+	// reaching back into messagingWebhookListener.Addr().
+	messagingWebhookPort int
 
 	// usageAgg is the daemon-global daily token-budget tracker.
 	// Spawners consult it before provisioning new workers; the audit
@@ -462,10 +466,17 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 				webhookListener net.Listener
 				err             error
 			)
-			if df.useTailnet && d.tnetNode != nil {
-				webhookListener, err = d.tnetNode.Listen("tcp", addr)
-			} else {
+			// When FunnelViaTsnet is on, tsnet's serve config will
+			// terminate HTTPS at the tsnet node and proxy to
+			// http://127.0.0.1:<port>. The webhook listener must be on
+			// host loopback for that proxy to reach it; binding on the
+			// tsnet node here would put it on the wrong side of the
+			// proxy.
+			bindLoopback := !df.useTailnet || d.tnetNode == nil || d.messagingCfg.FunnelViaTsnet
+			if bindLoopback {
 				webhookListener, err = net.Listen("tcp", "127.0.0.1"+addr)
+			} else {
+				webhookListener, err = d.tnetNode.Listen("tcp", addr)
 			}
 			if err != nil {
 				if defaulted {
@@ -474,11 +485,16 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 				return fmt.Errorf("messaging webhook listen on %s: %w", addr, err)
 			}
 			d.messagingWebhookListener = webhookListener
+			d.messagingWebhookPort = port
 			origin := "configured"
 			if defaulted {
 				origin = "default"
 			}
-			fmt.Fprintf(os.Stderr, "[teemd] messaging: webhook listener on %s (%s)\n", addr, origin)
+			where := "tailnet"
+			if bindLoopback {
+				where = "127.0.0.1"
+			}
+			fmt.Fprintf(os.Stderr, "[teemd] messaging: webhook listener on %s%s (%s, bound %s)\n", where, addr, origin, where)
 		}
 	}
 
@@ -576,6 +592,14 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 			d.autoRegisterTelegramWebhook(d.baseCtx)
 		})
 	}
+	if d.messagingTelegram != nil && d.messagingCfg.FunnelViaTsnet && d.tnetNode == nil {
+		fmt.Fprintf(os.Stderr, "[teemd] messaging: funnel_via_tsnet=true but tsnet disabled — ignoring (start daemon with tailnet to use Funnel)\n")
+	}
+	if d.messagingTelegram != nil && d.messagingCfg.FunnelViaTsnet && d.tnetNode != nil && d.messagingWebhookPort > 0 {
+		safeGo("messaging.webhook:funnel", func() {
+			d.enableTelegramFunnel(d.baseCtx)
+		})
+	}
 	defer func() {
 		// 1. Stop accepting new HTTP requests. Shut the public-facing
 		//    webhook listener down FIRST so in-flight Telegram retries
@@ -585,6 +609,16 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		//    webhook of its shutdown deadline.
 		ctx2, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
+		// Tear down the public-facing Funnel mapping FIRST so the
+		// tsnet node stops proxying inbound HTTPS to a webhook we're
+		// about to kill. Best-effort: failure here just means Telegram
+		// retries during drain land on a dead listener, the same as
+		// the no-funnel path.
+		if d.tnetNode != nil && d.messagingCfg.FunnelViaTsnet && d.messagingWebhookPort > 0 {
+			if err := d.tnetNode.DisableFunnel(ctx2); err != nil {
+				fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel teardown failed: %v\n", err)
+			}
+		}
 		var wg sync.WaitGroup
 		if d.messagingWebhookServer != nil {
 			wg.Add(1)
@@ -2144,6 +2178,32 @@ func (d *daemon) autoRegisterTelegramWebhook(ctx context.Context) {
 	} else {
 		fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram webhook already registered with bot\n")
 	}
+}
+
+// enableTelegramFunnel configures Tailscale Funnel on the tsnet node so
+// https://<node-fqdn>/messaging/telegram/webhook reaches the dedicated
+// webhook listener on host loopback. Non-fatal: any failure here is
+// logged and the daemon continues — the operator can fall back to the
+// host-side `tailscale funnel` command, and unrelated daemon
+// functionality (dashboard, MCP, control) is unaffected.
+func (d *daemon) enableTelegramFunnel(ctx context.Context) {
+	if d.tnetNode == nil || d.messagingWebhookPort <= 0 {
+		return
+	}
+	const path = "/messaging/telegram/webhook"
+	fqdn, ferr := d.tnetNode.FQDN(ctx)
+	if err := d.tnetNode.EnableFunnel(ctx, path, d.messagingWebhookPort); err != nil {
+		fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel setup failed: %v\n", err)
+		return
+	}
+	if ferr != nil || fqdn == "" {
+		// Funnel succeeded but we couldn't read the FQDN back — log
+		// without it. Shouldn't happen since EnableFunnel just used it,
+		// but the log is for the operator, not the code path.
+		fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel enabled for %s -> :%d\n", path, d.messagingWebhookPort)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel enabled for %s -> :%d (https://%s%s)\n", path, d.messagingWebhookPort, fqdn, path)
 }
 
 // mintWebhookToken generates 32 hex chars of entropy, writes it to path

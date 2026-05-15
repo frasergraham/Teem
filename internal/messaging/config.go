@@ -43,6 +43,15 @@ type TelegramConfig struct {
 	// the manual `teem messaging telegram register-webhook` step
 	// becomes unnecessary. Empty leaves registration to the CLI.
 	PublicURL string `yaml:"public_url"`
+	// FunnelViaTsnet, when true, makes the daemon auto-configure
+	// Tailscale Funnel on its own tsnet node so the webhook is
+	// reachable from the public internet at PublicURL with no
+	// host-side `tailscale funnel` command involved. Requires
+	// Funnel to be enabled for this node in the tailnet admin UI
+	// (https://login.tailscale.com/admin/acls). When true the
+	// dedicated webhook listener is bound on 127.0.0.1 so tsnet's
+	// serve config can proxy https://<node-fqdn>/<path> to it.
+	FunnelViaTsnet bool `yaml:"funnel_via_tsnet"`
 }
 
 // fileShape is the on-disk YAML root: { messaging: { ... } }.
