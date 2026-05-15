@@ -297,6 +297,11 @@ type daemon struct {
 	// Nil-OK in tests that don't wire usage.
 	usageAgg *usage.Aggregator
 
+	// chatRunner is the subprocess seam the chat handler uses to spawn
+	// the leader subprocess. Production wires it to the real
+	// `claude -p` invocation; tests inject a fake. Nil ⇒ defaultChatRunner.
+	chatRunner chatRunner
+
 	mu    sync.Mutex
 	teams map[string]*registeredTeam
 }
@@ -576,6 +581,11 @@ func (d *daemon) handler() http.Handler {
 			// can't carry the bearer token. The GET on /pulse stays
 			// auth'd; only the action sub-paths are exempt.
 			d.handleControlTeamsItem(w, r)
+		case strings.HasPrefix(path, "/control/teams/") && strings.HasSuffix(path, "/chat"):
+			// Dashboard chat panel. Same tailnet-boundary auth model as
+			// /ping; spawns a one-shot leader `claude -p` and streams
+			// the response as SSE.
+			d.handleChatTeam(w, r)
 		case strings.HasPrefix(path, "/control/teams/"):
 			d.requireAuth(w, r, d.handleControlTeamsItem)
 		case strings.HasPrefix(path, "/teams/"):

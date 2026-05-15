@@ -1395,6 +1395,183 @@
     text-align: left;
     color: #e8e6df;
   }
+  /* --- Chat panel: LLM-style direct chat with the leader. Each send is
+     a one-shot `claude -p` call (no resumed session) — see chat_handler.go.
+     Bridge-console aesthetic mirrors the workers / decisions panels. */
+  body.team-detail-page .chat-panel {
+    background: #11151c;
+    border: 1px solid #1f2632;
+    border-radius: 4px;
+    padding: 16px 20px 14px;
+    margin: 0 0 14px 0;
+    position: relative;
+  }
+  body.team-detail-page .chat-panel::before,
+  body.team-detail-page .chat-panel::after {
+    content: "";
+    position: absolute;
+    width: 8px; height: 8px;
+    pointer-events: none;
+    border-color: #ffb347;
+  }
+  body.team-detail-page .chat-panel::before {
+    top: -1px; left: -1px;
+    border-left: 1px solid; border-top: 1px solid;
+  }
+  body.team-detail-page .chat-panel::after {
+    bottom: -1px; right: -1px;
+    border-right: 1px solid; border-bottom: 1px solid;
+  }
+  body.team-detail-page .chat-panel h3.panel-label {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #6a7280;
+    margin: 0 0 12px 0;
+    display: flex; align-items: center; gap: 10px;
+  }
+  body.team-detail-page .chat-panel h3.panel-label::after {
+    content: "";
+    flex: 1; height: 1px;
+    background: linear-gradient(to right, #1f2632, transparent);
+  }
+  body.team-detail-page .chat-panel h3.panel-label .count {
+    color: #6a7280; font-weight: 400; letter-spacing: 0.08em;
+    text-transform: lowercase;
+  }
+  .chat-log {
+    display: flex; flex-direction: column;
+    gap: 12px;
+    max-height: 340px;
+    overflow-y: auto;
+    padding: 4px 6px 18px 0;
+    margin-bottom: 12px;
+    /* fade-bottom mask hints at scrollability */
+    mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 22px), transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 22px), transparent 100%);
+  }
+  .chat-log::-webkit-scrollbar { width: 6px; }
+  .chat-log::-webkit-scrollbar-thumb { background: #1f2632; border-radius: 3px; }
+  .chat-log:empty::before {
+    content: "No messages yet — send something to wake the leader.";
+    color: #6a7280; font-style: italic; font-size: 13px;
+  }
+  .chat-msg {
+    display: flex; gap: 10px;
+    max-width: 88%;
+  }
+  .chat-msg .avatar {
+    flex: 0 0 auto;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+  .chat-msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  .chat-msg.user .avatar {
+    background: rgba(125,211,252,0.12); color: #7dd3fc;
+    border: 1px solid rgba(125,211,252,0.30);
+  }
+  .chat-msg.leader .avatar {
+    background: rgba(255,179,71,0.12); color: #ffb347;
+    border: 1px solid rgba(255,179,71,0.30);
+  }
+  .chat-msg .body {
+    background: #161b24;
+    border: 1px solid #1f2632;
+    border-radius: 10px;
+    padding: 9px 12px;
+    font-size: 14px;
+    line-height: 1.5;
+    color: #e8e6df;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .chat-msg.user .body {
+    background: linear-gradient(180deg, rgba(125,211,252,0.08), rgba(125,211,252,0.02));
+    border-color: rgba(125,211,252,0.20);
+    border-top-right-radius: 2px;
+  }
+  .chat-msg.leader .body {
+    border-top-left-radius: 2px;
+  }
+  .chat-msg.leader.pending .body {
+    color: #6a7280; font-style: italic;
+  }
+  .chat-msg.error .body {
+    border-color: rgba(239,68,68,0.40); color: #fca5a5;
+  }
+  .chat-msg .stamp {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    color: #6a7280;
+    margin-top: 4px;
+    letter-spacing: 0.02em;
+  }
+  .chat-msg.user .stamp { text-align: right; }
+  .chat-compose {
+    display: flex; gap: 10px; align-items: stretch;
+    border-top: 1px dashed #181d26;
+    padding-top: 12px;
+  }
+  .chat-input {
+    flex: 1;
+    background: #0a0d12;
+    border: 1px solid #1f2632;
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: #e8e6df;
+    font-family: 'Bricolage Grotesque', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+    resize: vertical;
+    min-height: 44px;
+    max-height: 180px;
+  }
+  .chat-input:focus {
+    outline: none;
+    border-color: #ffb347;
+    box-shadow: 0 0 0 3px rgba(255,179,71,0.12);
+  }
+  .chat-input::placeholder { color: #6a7280; font-style: italic; }
+  .chat-send {
+    appearance: none;
+    background: #ffb347;
+    color: #1a1409;
+    border: none;
+    border-radius: 6px;
+    padding: 0 22px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .chat-send:hover { background: #ffc070; }
+  .chat-send:disabled { opacity: 0.45; cursor: not-allowed; }
+  .chat-hint {
+    margin-top: 8px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    color: #6a7280;
+    letter-spacing: 0.04em;
+  }
+  .chat-hint kbd {
+    background: #1f2632;
+    border: 1px solid #1f2632;
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    color: #9aa1ad;
+  }
+  }
 </style>
 {{ end }}
 
@@ -1588,6 +1765,16 @@
       </div>
 
       {{ if .Flash }}<div class="flash">{{ .Flash }}</div>{{ end }}
+
+      <section class="chat-panel" aria-label="chat with leader" data-team-id="{{ .ID }}">
+        <h3 class="panel-label">Chat with leader <span class="count">one-shot</span></h3>
+        <div class="chat-log" id="chat-log-{{ .ID }}" aria-live="polite"></div>
+        <form class="chat-compose" id="chat-form-{{ .ID }}" onsubmit="return teemChatSubmit(event, '{{ .ID }}')">
+          <textarea class="chat-input" id="chat-input-{{ .ID }}" placeholder="Ask the leader something — or hand it a one-shot directive. Each send is a fresh turn." rows="2"></textarea>
+          <button type="submit" class="chat-send">SEND</button>
+        </form>
+        <div class="chat-hint">Each send opens a fresh leader turn (no resumed session). <kbd>&#8984;</kbd>+<kbd>&#8629;</kbd> to submit.</div>
+      </section>
 
       <section class="decisions-section" aria-label="decisions awaiting operator">
         <h3 class="panel-label">Decisions <span class="count">{{ len .Decisions }}</span></h3>
@@ -1848,6 +2035,162 @@
           if (d.open) sessionStorage.setItem('expanded:' + d.id, '1');
           else sessionStorage.removeItem('expanded:' + d.id);
         });
+      });
+    })();
+  </script>
+  <script>
+    // Chat panel: per-tab persistence via sessionStorage, SSE streaming
+    // from POST /control/teams/<id>/chat. Each send is a fresh leader turn.
+    (function() {
+      var panel = document.querySelector('.chat-panel[data-team-id]');
+      if (!panel) return;
+      var teamID = panel.getAttribute('data-team-id');
+      var storageKey = 'teem.chat.' + teamID;
+      var log = document.getElementById('chat-log-' + teamID);
+      var input = document.getElementById('chat-input-' + teamID);
+
+      function loadHistory() {
+        try {
+          var raw = sessionStorage.getItem(storageKey);
+          return raw ? JSON.parse(raw) : [];
+        } catch (e) { return []; }
+      }
+      function saveHistory(msgs) {
+        try { sessionStorage.setItem(storageKey, JSON.stringify(msgs)); }
+        catch (e) {}
+      }
+      function fmtStamp(d) {
+        var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+        return pad(d.getHours()) + ':' + pad(d.getMinutes());
+      }
+      function renderMsg(m) {
+        var row = document.createElement('div');
+        row.className = 'chat-msg ' + m.role + (m.error ? ' error' : '');
+        var avatar = document.createElement('div');
+        avatar.className = 'avatar';
+        avatar.textContent = m.role === 'user' ? 'YOU' : 'LDR';
+        var bodyWrap = document.createElement('div');
+        var body = document.createElement('div');
+        body.className = 'body';
+        body.textContent = m.text;
+        var stamp = document.createElement('div');
+        stamp.className = 'stamp';
+        stamp.textContent = m.stamp || '';
+        bodyWrap.appendChild(body);
+        bodyWrap.appendChild(stamp);
+        row.appendChild(avatar);
+        row.appendChild(bodyWrap);
+        log.appendChild(row);
+        return body;
+      }
+      function scrollDown() { log.scrollTop = log.scrollHeight; }
+
+      var history = loadHistory();
+      history.forEach(renderMsg);
+      scrollDown();
+
+      function appendUser(text) {
+        var m = { role: 'user', text: text, stamp: fmtStamp(new Date()) + ' · sent' };
+        history.push(m); saveHistory(history); renderMsg(m); scrollDown();
+      }
+      function appendLeaderPending() {
+        var m = { role: 'leader', text: '', stamp: 'thinking…', pending: true };
+        var bodyEl = renderMsg(m);
+        bodyEl.parentElement.parentElement.classList.add('pending');
+        scrollDown();
+        return { msg: m, bodyEl: bodyEl };
+      }
+      function finalizeLeader(holder, errMsg) {
+        holder.bodyEl.parentElement.parentElement.classList.remove('pending');
+        if (errMsg) {
+          holder.bodyEl.parentElement.parentElement.classList.add('error');
+          holder.msg.text = (holder.msg.text || '') + (holder.msg.text ? '\n\n' : '') + 'error: ' + errMsg;
+          holder.bodyEl.textContent = holder.msg.text;
+          holder.msg.error = true;
+        }
+        var stampEl = holder.bodyEl.nextElementSibling;
+        var stamp = fmtStamp(new Date()) + (errMsg ? ' · failed' : ' · turn complete');
+        if (stampEl) stampEl.textContent = stamp;
+        holder.msg.stamp = stamp;
+        history.push(holder.msg); saveHistory(history); scrollDown();
+      }
+
+      window.teemChatSubmit = function(ev, _teamID) {
+        ev.preventDefault();
+        var text = input.value.trim();
+        if (!text) return false;
+        input.value = '';
+        appendUser(text);
+        var holder = appendLeaderPending();
+        var btn = panel.querySelector('.chat-send');
+        if (btn) btn.disabled = true;
+        fetch('/control/teams/' + teamID + '/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text }),
+        }).then(function(resp) {
+          if (!resp.ok || !resp.body) {
+            return resp.text().then(function(t) { throw new Error(t || ('HTTP ' + resp.status)); });
+          }
+          var reader = resp.body.getReader();
+          var decoder = new TextDecoder();
+          var buf = '';
+          function pump() {
+            return reader.read().then(function(r) {
+              if (r.done) return;
+              buf += decoder.decode(r.value, { stream: true });
+              var idx;
+              while ((idx = buf.indexOf('\n\n')) >= 0) {
+                var frame = buf.slice(0, idx);
+                buf = buf.slice(idx + 2);
+                handleFrame(frame, holder);
+              }
+              return pump();
+            });
+          }
+          return pump();
+        }).then(function() {
+          finalizeLeader(holder, null);
+        }).catch(function(err) {
+          finalizeLeader(holder, err.message || String(err));
+        }).then(function() {
+          if (btn) btn.disabled = false;
+          input.focus();
+        });
+        return false;
+      };
+
+      function handleFrame(frame, holder) {
+        var event = '';
+        var dataLines = [];
+        frame.split('\n').forEach(function(line) {
+          if (line.indexOf('event:') === 0) event = line.slice(6).trim();
+          else if (line.indexOf('data:') === 0) dataLines.push(line.slice(5).replace(/^ /, ''));
+        });
+        var data = dataLines.join('\n');
+        if (event === 'done') return;
+        if (event === 'error') {
+          holder.msg.text = (holder.msg.text || '') + (holder.msg.text ? '\n\n' : '') + data;
+          holder.msg.error = true;
+          holder.bodyEl.textContent = holder.msg.text;
+          holder.bodyEl.parentElement.parentElement.classList.add('error');
+          holder.bodyEl.parentElement.parentElement.classList.remove('pending');
+          scrollDown();
+          return;
+        }
+        // default channel: append assistant text
+        holder.msg.text += data;
+        holder.bodyEl.textContent = holder.msg.text;
+        holder.bodyEl.parentElement.parentElement.classList.remove('pending');
+        scrollDown();
+      }
+
+      // Cmd/Ctrl+Enter submits.
+      input.addEventListener('keydown', function(e) {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+          e.preventDefault();
+          panel.querySelector('.chat-compose').requestSubmit();
+        }
       });
     })();
   </script>

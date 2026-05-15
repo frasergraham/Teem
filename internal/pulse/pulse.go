@@ -878,6 +878,20 @@ func buildClaudeArgs(mcpConfig, contextBody, wakePrompt string) []string {
 	if wakePrompt == "" {
 		wakePrompt = defaultWakePrompt
 	}
+	return assembleClaudeArgs(mcpConfig, contextBody, wakePrompt)
+}
+
+// BuildChatArgs is the exported chat-panel sibling of buildClaudeArgs:
+// the dashboard's POST /control/teams/<id>/chat handler calls it to
+// build the leader subprocess argv with the operator's message as the
+// final prompt instead of the autonomous wake prompt. Same MCP config,
+// same channel-flag ordering, same --append-system-prompt context body
+// — only the trailing prompt changes.
+func BuildChatArgs(mcpConfig, contextBody, userMessage string) []string {
+	return assembleClaudeArgs(mcpConfig, contextBody, userMessage)
+}
+
+func assembleClaudeArgs(mcpConfig, contextBody, prompt string) []string {
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -889,7 +903,7 @@ func buildClaudeArgs(mcpConfig, contextBody, wakePrompt string) []string {
 		"--append-system-prompt", contextBody,
 		"--dangerously-skip-permissions",
 	)
-	args = append(args, wakePrompt)
+	args = append(args, prompt)
 	return args
 }
 
