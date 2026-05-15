@@ -81,6 +81,20 @@ const (
 	// Consumed by `teem status`, the dashboard, and (transitively) by
 	// pulse's audit-nudge gate. See docs/wake-strategy.md §5.
 	KindChannelsState Kind = "channels_state"
+	// KindUsageEvent is the per-subprocess token-usage rollup emitted
+	// at the end of every claude -p invocation (workers, pulse ticks,
+	// PM ticks). One event per subprocess, never per-turn.
+	//
+	// Meta carries: agent_id, job_id (omitted on pulse ticks), model,
+	// input_tokens, output_tokens, cache_create_tokens,
+	// cache_read_tokens, started_at, ended_at, plus optional
+	// total_cost_usd (raw passthrough) and partial=true when the
+	// subprocess died before a result rollup landed.
+	//
+	// Pulse's isInterestingKind must NOT wake on this kind — it would
+	// be an infinite loop (pulse spawns claude → usage emit → wake →
+	// pulse spawns claude). See docs/usage-capture.md.
+	KindUsageEvent Kind = "usage_event"
 )
 
 // PMOutcomeXxx are the values the project-manager loop writes into

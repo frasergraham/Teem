@@ -35,6 +35,7 @@ import (
 	"github.com/frasergraham/teem/internal/tailnet"
 	"github.com/frasergraham/teem/internal/team"
 	"github.com/frasergraham/teem/internal/transport"
+	"github.com/frasergraham/teem/internal/usage"
 )
 
 type jobStatus string
@@ -250,6 +251,18 @@ func run() error {
 	}
 	defer ob.Close()
 	w.outbox = ob
+
+	// Wire the per-job token-usage rollup as a KindUsageEvent audit
+	// event (one per claude invocation, never per-turn — see
+	// docs/usage-capture.md). The closure captures w so we can pick
+	// up the outbox after it was attached above.
+	procExec.OnUsage = func(jobID string, s usage.UsageSummary) {
+		_ = w.outbox.Emit(audit.Event{
+			JobID: jobID,
+			Kind:  audit.KindUsageEvent,
+			Meta:  usage.AuditMeta(s, w.agentID, jobID),
+		})
+	}
 
 	// Shutdown channel: hit POST /shutdown to stop the worker, or
 	// arm-and-fire the idle-exit timer. Closed by either path; the

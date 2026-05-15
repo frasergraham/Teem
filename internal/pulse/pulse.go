@@ -33,6 +33,7 @@ import (
 	"github.com/frasergraham/teem/internal/claudeflags"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/plan"
+	"github.com/frasergraham/teem/internal/usage"
 )
 
 // SessionLoader reports whether the operator has run `teem chat` at
@@ -453,6 +454,10 @@ func (p *Pulse) NudgeFromAudit(events []audit.Event) {
 // isInterestingKind decides whether an audit event should wake the
 // leader. Lifecycle and error signals matter; heartbeats and
 // pulse_tick echoes don't (we'd loop on our own audit writes).
+//
+// KindUsageEvent is deliberately excluded: every pulse tick now emits
+// one of those, and waking on it would loop forever (tick → usage →
+// nudge → tick → …). See docs/usage-capture.md §10.
 func isInterestingKind(k audit.Kind) bool {
 	switch k {
 	case audit.KindJobComplete, audit.KindJobError, audit.KindNote, audit.KindWorkerStopped:
@@ -535,6 +540,21 @@ func (p *Pulse) Tick(ctx context.Context, trigger string) error {
 	}
 	_ = p.cfg.Audit.Write(ev)
 
+	// Emit the per-tick usage rollup as its own audit event so the
+	// usage-monitor throttle and the token-cost attribution code can
+	// read one canonical shape across pulse + worker subprocesses
+	// (see docs/usage-capture.md). One event per tick, never per
+	// assistant turn. Pulse ticks carry no job_id; trigger is
+	// surfaced in Meta for monitor consumers.
+	usageMeta := usage.AuditMeta(result.usage, "leader", "")
+	usageMeta["trigger"] = trigger
+	_ = p.cfg.Audit.Write(audit.Event{
+		Timestamp: now,
+		AgentID:   "leader",
+		Kind:      audit.KindUsageEvent,
+		Meta:      usageMeta,
+	})
+
 	// Idle streak: only count toward backoff on successful ticks
 	// (errors might be transient). Tool calls reset the streak;
 	// no-tool-call success bumps it.
@@ -557,6 +577,7 @@ func (p *Pulse) Tick(ctx context.Context, trigger string) error {
 type tickResult struct {
 	text      string
 	toolCalls int
+	usage     usage.UsageSummary
 }
 
 // consumeBudget atomically checks whether a new tick fits in the
@@ -688,10 +709,13 @@ func (p *Pulse) invokeClaude(ctx context.Context, contextBody string) (tickResul
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	startedAt := time.Now().UTC()
 	if err := cmd.Start(); err != nil {
 		return tickResult{}, fmt.Errorf("start claude: %w", err)
 	}
-	res, parseErr := parseTickStream(stdout)
+	cap := usage.NewCapture(startedAt)
+	res, parseErr := parseTickStream(stdout, cap)
+	res.usage = cap.Summary()
 	if err := cmd.Wait(); err != nil {
 		return res, fmt.Errorf("claude exit: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
@@ -753,7 +777,12 @@ func buildClaudeArgs(mcpConfig, contextBody string) []string {
 // executor.ParseClaudeStreamJSON because we care about the
 // (intermediate) tool-call shape that the executor variant
 // intentionally ignores.
-func parseTickStream(r io.Reader) (tickResult, error) {
+//
+// Each line is also fed through the supplied usage.Capture so the
+// shared usage-extraction code in internal/usage stays the single
+// source of truth for stream-json schema decisions (see
+// docs/usage-capture.md). cap may be nil for tests that don't care.
+func parseTickStream(r io.Reader, cap *usage.Capture) (tickResult, error) {
 	type contentBlock struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -770,8 +799,12 @@ func parseTickStream(r io.Reader) (tickResult, error) {
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var res tickResult
 	for sc.Scan() {
+		line := sc.Bytes()
+		if cap != nil {
+			cap.Feed(line)
+		}
 		var e ev
-		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+		if err := json.Unmarshal(line, &e); err != nil {
 			continue
 		}
 		switch e.Type {

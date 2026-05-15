@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/frasergraham/teem/internal/usage"
 )
 
 // canned stream-json mirrors the shape Claude Code emits with
@@ -16,9 +19,16 @@ const cannedStream = `{"type":"system","subtype":"init"}
 {"type":"result","result":"hello world"}
 `
 
+// cannedStreamWithUsage carries the same shape plus an init `model`
+// and a result `usage` rollup so the capture path can be asserted.
+const cannedStreamWithUsage = `{"type":"system","subtype":"init","model":"claude-opus-4-7"}
+{"type":"assistant","message":{"model":"claude-opus-4-7","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":15,"output_tokens":7}}}
+{"type":"result","result":"hi","usage":{"input_tokens":15,"output_tokens":7},"total_cost_usd":0.0012}
+`
+
 func TestParseClaudeStreamJSON_SinkCapturesVerbatim(t *testing.T) {
 	var sink bytes.Buffer
-	res, err := ParseClaudeStreamJSON(strings.NewReader(cannedStream), &sink)
+	res, err := ParseClaudeStreamJSON(strings.NewReader(cannedStream), &sink, nil)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -34,12 +44,30 @@ func TestParseClaudeStreamJSON_SinkCapturesVerbatim(t *testing.T) {
 }
 
 func TestParseClaudeStreamJSON_NilSinkParsesOnly(t *testing.T) {
-	res, err := ParseClaudeStreamJSON(strings.NewReader(cannedStream), nil)
+	res, err := ParseClaudeStreamJSON(strings.NewReader(cannedStream), nil, nil)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	if res.FinalText != "hello world" || res.EventCount != 3 {
 		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+func TestParseClaudeStreamJSON_FeedsUsageCapture(t *testing.T) {
+	cap := usage.NewCapture(time.Now())
+	_, err := ParseClaudeStreamJSON(strings.NewReader(cannedStreamWithUsage), nil, cap)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	s := cap.Summary()
+	if s.Model != "claude-opus-4-7" {
+		t.Errorf("model: %q", s.Model)
+	}
+	if s.InputTokens != 15 || s.OutputTokens != 7 {
+		t.Errorf("tokens: in=%d out=%d", s.InputTokens, s.OutputTokens)
+	}
+	if s.Partial {
+		t.Errorf("Partial should be false (result rollup landed)")
 	}
 }
 
@@ -49,7 +77,7 @@ not json — should be skipped
 {"type":"result","result":"after the garbage"}
 `
 	var sink bytes.Buffer
-	res, err := ParseClaudeStreamJSON(strings.NewReader(stream), &sink)
+	res, err := ParseClaudeStreamJSON(strings.NewReader(stream), &sink, nil)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

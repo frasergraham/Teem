@@ -28,9 +28,9 @@ func writeFakeClaude(t *testing.T, finalText string) string {
 	script := filepath.Join(dir, "claude")
 	body := `#!/bin/sh
 cat <<JSON
-{"type":"system","subtype":"init"}
-{"type":"assistant","message":{"content":[{"type":"text","text":` + jsonEscape(finalText) + `}]}}
-{"type":"result","result":` + jsonEscape(finalText) + `}
+{"type":"system","subtype":"init","model":"claude-opus-4-7"}
+{"type":"assistant","message":{"model":"claude-opus-4-7","content":[{"type":"text","text":` + jsonEscape(finalText) + `}],"usage":{"input_tokens":11,"output_tokens":22}}}
+{"type":"result","result":` + jsonEscape(finalText) + `,"usage":{"input_tokens":11,"output_tokens":22},"total_cost_usd":0.0042}
 JSON
 `
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
@@ -118,19 +118,48 @@ func TestPulse_TickEmitsAuditEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 {
-		t.Fatalf("audit events: got %d, want 1", len(events))
+	// Each successful tick emits two events: pulse_tick + usage_event
+	// (the shared per-subprocess token rollup, see docs/usage-capture.md).
+	tick := findEvent(events, "pulse_tick")
+	if tick == nil {
+		t.Fatalf("no pulse_tick event in: %v", events)
 	}
-	e := events[0]
-	if e.Kind != "pulse_tick" {
-		t.Errorf("kind = %q", e.Kind)
-	}
-	if e.Message == "" {
+	if tick.Message == "" {
 		t.Errorf("expected assistant message in audit event")
 	}
-	if trig, _ := e.Meta["trigger"].(string); trig != "timer" {
-		t.Errorf("trigger meta = %v", e.Meta["trigger"])
+	if trig, _ := tick.Meta["trigger"].(string); trig != "timer" {
+		t.Errorf("trigger meta = %v", tick.Meta["trigger"])
 	}
+	usageEv := findEvent(events, "usage_event")
+	if usageEv == nil {
+		t.Fatalf("no usage_event in: %v", events)
+	}
+	if trig, _ := usageEv.Meta["trigger"].(string); trig != "timer" {
+		t.Errorf("usage_event trigger = %v", usageEv.Meta["trigger"])
+	}
+	if _, ok := usageEv.Meta["job_id"]; ok {
+		t.Errorf("pulse usage_event must not carry a job_id")
+	}
+}
+
+// findEvent returns a pointer to the first event matching kind, or nil.
+func findEvent(events []audit.Event, kind audit.Kind) *audit.Event {
+	for i := range events {
+		if events[i].Kind == kind {
+			return &events[i]
+		}
+	}
+	return nil
+}
+
+func countKind(events []audit.Event, kind audit.Kind) int {
+	n := 0
+	for _, e := range events {
+		if e.Kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 func TestPulse_TickSkippedWhenPaused(t *testing.T) {
@@ -155,8 +184,12 @@ func TestPulse_TickSkippedWhenPaused(t *testing.T) {
 		t.Fatalf("Tick after resume: %v", err)
 	}
 	events, _ = sink.Query("", time.Time{}, 0)
-	if len(events) != 1 {
-		t.Errorf("tick after resume: got %d events", len(events))
+	// A successful tick now emits pulse_tick + usage_event.
+	if got := countKind(events, "pulse_tick"); got != 1 {
+		t.Errorf("pulse_tick events after resume: got %d, want 1", got)
+	}
+	if got := countKind(events, audit.KindUsageEvent); got != 1 {
+		t.Errorf("usage_event events after resume: got %d, want 1", got)
 	}
 }
 
@@ -508,13 +541,46 @@ func TestPulse_DefaultWakePrompt_IsDirective(t *testing.T) {
 	}
 }
 
+// TestPulse_TickEmitsUsageEvent verifies the t-cc22531c integration:
+// every successful pulse tick emits a KindUsageEvent with the
+// expected Meta shape, alongside the existing pulse_tick event.
+func TestPulse_TickEmitsUsageEvent(t *testing.T) {
+	claudePath := writeFakeClaude(t, "ok")
+	p, sink := newTestPulse(t, claudePath, true)
+
+	if err := p.Tick(context.Background(), "timer"); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	events, _ := sink.Query("leader", time.Time{}, 0)
+	ev := findEvent(events, audit.KindUsageEvent)
+	if ev == nil {
+		t.Fatalf("no usage_event emitted; got %v", events)
+	}
+	if ev.AgentID != "leader" {
+		t.Errorf("agent_id = %q", ev.AgentID)
+	}
+	if model, _ := ev.Meta["model"].(string); model != "claude-opus-4-7" {
+		t.Errorf("model meta = %v", ev.Meta["model"])
+	}
+	// Numbers come back as float64 after JSON round-trip via FileSink.
+	if in, _ := ev.Meta["input_tokens"].(float64); int64(in) != 11 {
+		t.Errorf("input_tokens meta = %v", ev.Meta["input_tokens"])
+	}
+	if out, _ := ev.Meta["output_tokens"].(float64); int64(out) != 22 {
+		t.Errorf("output_tokens meta = %v", ev.Meta["output_tokens"])
+	}
+	if trig, _ := ev.Meta["trigger"].(string); trig != "timer" {
+		t.Errorf("trigger meta = %v", ev.Meta["trigger"])
+	}
+}
+
 func TestPulse_IsInterestingKind(t *testing.T) {
 	for _, k := range []audit.Kind{audit.KindJobComplete, audit.KindJobError, audit.KindNote, audit.KindWorkerStopped} {
 		if !isInterestingKind(k) {
 			t.Errorf("%q should be interesting", k)
 		}
 	}
-	for _, k := range []audit.Kind{audit.KindHeartbeat, audit.KindJobReceived, "pulse_tick"} {
+	for _, k := range []audit.Kind{audit.KindHeartbeat, audit.KindJobReceived, "pulse_tick", audit.KindUsageEvent} {
 		if isInterestingKind(k) {
 			t.Errorf("%q should NOT be interesting (causes feedback loop)", k)
 		}
@@ -652,7 +718,8 @@ func TestPulse_TickStillFiresWhenInvokedDirectlyUnderChannelsLive(t *testing.T) 
 		t.Fatalf("Tick: %v", err)
 	}
 	events, _ := sink.Query("leader", time.Time{}, 0)
-	if len(events) != 1 {
-		t.Errorf("direct Tick should not be gated by channels-live; got %d events", len(events))
+	// A successful direct Tick now emits pulse_tick + usage_event.
+	if got := countKind(events, "pulse_tick"); got != 1 {
+		t.Errorf("direct Tick should not be gated by channels-live; pulse_tick events=%d", got)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/frasergraham/teem/internal/inflight"
 	mcpsrv "github.com/frasergraham/teem/internal/mcp"
 	"github.com/frasergraham/teem/internal/provisioner"
+	"github.com/frasergraham/teem/internal/usage"
 )
 
 // jobMessage is the on-bus payload published to agent.<id>.jobs.
@@ -96,6 +97,21 @@ func (w *Worker) Start(ctx context.Context) error {
 	w.startedAt = time.Now()
 	if w.BodyCap == 0 {
 		w.BodyCap = 64 * 1024
+	}
+	// Wire the executor's usage callback so per-subprocess token
+	// rollups land as audit.KindUsageEvent events (shared design in
+	// docs/usage-capture.md). Only applies to the in-process
+	// ProcessExecutor; HTTPExecutor goes through the teem-worker
+	// daemon which wires its own callback there.
+	if pe, ok := w.Executor.(*executor.ProcessExecutor); ok && w.Audit != nil {
+		pe.OnUsage = func(jobID string, s usage.UsageSummary) {
+			w.emit(audit.Event{
+				AgentID: w.Agent.ID,
+				JobID:   jobID,
+				Kind:    audit.KindUsageEvent,
+				Meta:    usage.AuditMeta(s, w.Agent.ID, jobID),
+			})
+		}
 	}
 	ch, err := w.Bus.Subscribe(ctx, w.jobsTopic)
 	if err != nil {

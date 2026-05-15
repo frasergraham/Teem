@@ -8,9 +8,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/frasergraham/teem/internal/team"
 	"github.com/frasergraham/teem/internal/transport"
+	"github.com/frasergraham/teem/internal/usage"
 )
 
 // ProcessExecutor runs `claude -p ...` as a subprocess via a transport. It
@@ -28,6 +30,14 @@ type ProcessExecutor struct {
 	// raw stream-json transcript is written as <agent_id>/<job_id>.jsonl.
 	// Empty disables transcript capture.
 	TranscriptDir string
+
+	// OnUsage, when set, is called once per Execute with the
+	// per-subprocess token-usage rollup parsed out of the stream-json.
+	// Wired by the in-process worker (agent.Worker) and the
+	// teem-worker daemon to emit an audit.KindUsageEvent.
+	// docs/usage-capture.md is the shared design. Optional — nil
+	// disables the callback (e.g. unit tests).
+	OnUsage func(jobID string, summary usage.UsageSummary)
 }
 
 // NewProcess constructs a ProcessExecutor.
@@ -115,9 +125,16 @@ func (p *ProcessExecutor) Execute(ctx context.Context, job Job) (string, error) 
 		sink = tf
 	}
 
-	res, parseErr := ParseClaudeStreamJSON(proc.Stdout(), sink)
-	if err := proc.Wait(); err != nil {
-		return res.FinalText, fmt.Errorf("claude exit: %w", err)
+	cap := usage.NewCapture(time.Now())
+	res, parseErr := ParseClaudeStreamJSON(proc.Stdout(), sink, cap)
+	waitErr := proc.Wait()
+	// Emit usage even on error — partial counts still inform the
+	// throttle and the cost-attribution view marks them visibly.
+	if p.OnUsage != nil {
+		p.OnUsage(job.ID, cap.Summary())
+	}
+	if waitErr != nil {
+		return res.FinalText, fmt.Errorf("claude exit: %w", waitErr)
 	}
 	if parseErr != nil {
 		return res.FinalText, parseErr
@@ -137,7 +154,12 @@ type StreamResult struct {
 // verbatim — callers can capture the full transcript without buffering
 // it all in memory. Tolerates unrecognised event types because the
 // schema evolves; only "result" and "assistant" are read.
-func ParseClaudeStreamJSON(r io.Reader, sink io.Writer) (StreamResult, error) {
+//
+// Each line is also fed through cap (when non-nil) so the shared
+// internal/usage parser stays the single source of truth for
+// stream-json schema decisions — see docs/usage-capture.md. cap is
+// optional; tests that don't care pass nil.
+func ParseClaudeStreamJSON(r io.Reader, sink io.Writer, cap *usage.Capture) (StreamResult, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var res StreamResult
@@ -150,6 +172,9 @@ func ParseClaudeStreamJSON(r io.Reader, sink io.Writer) (StreamResult, error) {
 			if _, err := sink.Write([]byte{'\n'}); err != nil {
 				return res, fmt.Errorf("transcript write: %w", err)
 			}
+		}
+		if cap != nil {
+			cap.Feed(line)
 		}
 		res.EventCount++
 		var ev struct {
