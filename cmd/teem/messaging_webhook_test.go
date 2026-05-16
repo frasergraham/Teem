@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/frasergraham/teem/internal/audit"
 	"github.com/frasergraham/teem/internal/messaging"
@@ -102,7 +103,7 @@ func TestWebhook_WrongMethodReturns405(t *testing.T) {
 	}
 }
 
-func TestWebhook_AcceptsValidToken_UnknownCommand(t *testing.T) {
+func TestWebhook_BareTextWithNoTeamReplies(t *testing.T) {
 	d, rep := newWebhookTestDaemon(t)
 
 	body := strings.NewReader(`{"message":{"chat":{"id":42},"text":"hello bot"}}`)
@@ -113,11 +114,8 @@ func TestWebhook_AcceptsValidToken_UnknownCommand(t *testing.T) {
 		t.Fatalf("code=%d want 200 body=%s", w.Code, w.Body.String())
 	}
 	calls := rep.snapshot()
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 reply about command shape, got %d", len(calls))
-	}
-	if !strings.Contains(calls[0].Text, "/reply") {
-		t.Errorf("hint missing /reply shape: %q", calls[0].Text)
+	if len(calls) != 1 || !strings.Contains(calls[0].Text, "No team") {
+		t.Fatalf("expected 'No team' hint, got %+v", calls)
 	}
 }
 
@@ -434,6 +432,261 @@ func TestHandleTelegramWebhook_NativeReplyUnknownMessageID(t *testing.T) {
 	if strings.Contains(got, "/reply") || strings.Contains(got, "<token>") {
 		t.Errorf("native-reply expiry hint should not include the /reply <token> usage string; got %q", got)
 	}
+}
+
+func TestHandleTelegramWebhook_BareMessageStartsLeaderChat(t *testing.T) {
+	d, rep := newWebhookTestDaemon(t)
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	gotPrompt := make(chan string, 1)
+	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+		gotPrompt <- userMessage
+		stream := strings.Join([]string{
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"queue is empty"}]}}`,
+			`{"type":"result","result":"queue is empty"}`,
+		}, "\n") + "\n"
+		return io.NopCloser(strings.NewReader(stream)), func() error { return nil }, nil
+	}
+
+	body := strings.NewReader(`{"message":{"chat":{"id":42},"text":"what's the queue look like?"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", body)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+
+	select {
+	case prompt := <-gotPrompt:
+		if prompt != "what's the queue look like?" {
+			t.Errorf("user prompt=%q want verbatim bare text", prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("chat runner never invoked for bare text")
+	}
+
+	waitFor(t, func() bool {
+		for _, c := range rep.snapshot() {
+			if c.ChatID == 42 && strings.Contains(c.Text, "queue is empty") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestHandleTelegramWebhook_BareMessageWhileSessionInFlight(t *testing.T) {
+	d, rep := newWebhookTestDaemon(t)
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+		// Signal start once, then block until the test releases us so
+		// the second bare-text request can race against the live
+		// session.
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		pr, pw := io.Pipe()
+		go func() {
+			<-release
+			_ = pw.Close()
+		}()
+		return pr, func() error { return nil }, nil
+	}
+
+	first := strings.NewReader(`{"message":{"chat":{"id":42},"text":"first message"}}`)
+	req1 := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", first)
+	w1 := httptest.NewRecorder()
+	d.handler().ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first code=%d", w1.Code)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("chat runner never started")
+	}
+
+	second := strings.NewReader(`{"message":{"chat":{"id":42},"text":"second message"}}`)
+	req2 := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", second)
+	w2 := httptest.NewRecorder()
+	d.handler().ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second code=%d", w2.Code)
+	}
+
+	waitFor(t, func() bool {
+		for _, c := range rep.snapshot() {
+			if strings.Contains(c.Text, "still responding") {
+				return true
+			}
+		}
+		return false
+	})
+
+	close(release)
+}
+
+func TestHandleTelegramWebhook_DoneEndsBareSession(t *testing.T) {
+	d, rep := newWebhookTestDaemon(t)
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+		close(started)
+		pr, pw := io.Pipe()
+		go func() {
+			<-ctx.Done()
+			close(cancelled)
+			_ = pw.CloseWithError(ctx.Err())
+		}()
+		return pr, func() error {
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return ctx.Err()
+			}
+			return nil
+		}, nil
+	}
+
+	body := strings.NewReader(`{"message":{"chat":{"id":42},"text":"long-running query"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", body)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("bare-text code=%d", w.Code)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("chat runner never started")
+	}
+
+	doneBody := strings.NewReader(`{"message":{"chat":{"id":42},"text":"/done"}}`)
+	doneReq := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", doneBody)
+	dw := httptest.NewRecorder()
+	d.handler().ServeHTTP(dw, doneReq)
+	if dw.Code != http.StatusOK {
+		t.Fatalf("/done code=%d body=%s", dw.Code, dw.Body.String())
+	}
+
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("leader subprocess context was not cancelled by /done")
+	}
+
+	waitFor(t, func() bool {
+		for _, c := range rep.snapshot() {
+			if strings.Contains(strings.ToLower(c.Text), "cancelled") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func TestHandleTelegramWebhook_BareMessageRejectedFromUnauthorisedChatID(t *testing.T) {
+	d, rep := newWebhookTestDaemon(t)
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	d.messagingCfg = messaging.TelegramConfig{ChatID: 12345}
+
+	invoked := false
+	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+		invoked = true
+		return io.NopCloser(strings.NewReader("")), func() error { return nil }, nil
+	}
+
+	body := strings.NewReader(`{"message":{"chat":{"id":42},"text":"hi"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", body)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	if invoked {
+		t.Fatal("chat runner should NOT be invoked for unauthorised chat_id")
+	}
+	calls := rep.snapshot()
+	if len(calls) != 1 || !strings.Contains(strings.ToLower(calls[0].Text), "not authorised") {
+		t.Fatalf("expected 'not authorised' reply, got %+v", calls)
+	}
+}
+
+func TestChunkForTelegram(t *testing.T) {
+	t.Run("short input passthrough", func(t *testing.T) {
+		if got := chunkForTelegram("hello"); len(got) != 1 || got[0] != "hello" {
+			t.Errorf("short input not returned verbatim: %+v", got)
+		}
+	})
+
+	t.Run("no-newline hard cut reassembles", func(t *testing.T) {
+		long := strings.Repeat("x", telegramMaxMessageBytes+200)
+		chunks := chunkForTelegram(long)
+		if len(chunks) < 2 {
+			t.Fatalf("expected ≥2 chunks for %d-byte input, got %d", len(long), len(chunks))
+		}
+		for i, c := range chunks {
+			if len(c) > telegramMaxMessageBytes {
+				t.Errorf("chunk %d exceeds limit: %d > %d", i, len(c), telegramMaxMessageBytes)
+			}
+		}
+		if rebuilt := strings.Join(chunks, ""); rebuilt != long {
+			t.Errorf("chunks did not reassemble to original input")
+		}
+	})
+
+	t.Run("newline-split round-trips with newline rejoin", func(t *testing.T) {
+		// Newline lands in the upper half of the window, so chunkForTelegram
+		// cuts at the newline, then strips the leading '\n' from the
+		// remainder via TrimPrefix. Joining with "\n" reproduces the
+		// original input exactly.
+		input := strings.Repeat("a", 4090) + "\n" + strings.Repeat("b", 100)
+		chunks := chunkForTelegram(input)
+		if len(chunks) != 2 {
+			t.Fatalf("expected 2 chunks, got %d", len(chunks))
+		}
+		for i, c := range chunks {
+			if len(c) > telegramMaxMessageBytes {
+				t.Errorf("chunk %d exceeds limit: %d > %d", i, len(c), telegramMaxMessageBytes)
+			}
+		}
+		if got := strings.Join(chunks, "\n"); got != input {
+			t.Errorf("newline-rejoin did not reproduce input:\ngot  %q...\nwant %q...", got[:20], input[:20])
+		}
+	})
+
+	t.Run("multi-byte rune boundary stays valid UTF-8", func(t *testing.T) {
+		// "漢" is 3 bytes in UTF-8. 1366 runes = 4098 bytes, so the hard
+		// cut at byte 4096 lands inside the 1366th rune (bytes 4095-4097).
+		// chunkForTelegram must back the cut up to a rune start.
+		input := strings.Repeat("漢", 1366)
+		chunks := chunkForTelegram(input)
+		if len(chunks) < 2 {
+			t.Fatalf("expected ≥2 chunks for %d-byte input, got %d", len(input), len(chunks))
+		}
+		for i, c := range chunks {
+			if len(c) > telegramMaxMessageBytes {
+				t.Errorf("chunk %d exceeds limit: %d > %d", i, len(c), telegramMaxMessageBytes)
+			}
+			if !utf8.ValidString(c) {
+				t.Errorf("chunk %d is not valid UTF-8", i)
+			}
+		}
+		if rebuilt := strings.Join(chunks, ""); rebuilt != input {
+			t.Errorf("chunks did not reassemble to original input")
+		}
+	})
 }
 
 func TestWebhook_IssueTokenStampsOutboundMessage(t *testing.T) {

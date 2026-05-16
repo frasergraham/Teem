@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/frasergraham/teem/internal/messaging"
 	"github.com/frasergraham/teem/internal/usage"
@@ -50,6 +52,27 @@ func (s *telegramChatSessions) register(token string, cancel context.CancelFunc)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[token] = cancel
+}
+
+// tryRegister installs cancel under key only when no entry already
+// exists. Returns true on success and false if the key was already
+// taken — the caller treats that as a "session in flight" signal.
+func (s *telegramChatSessions) tryRegister(key string, cancel context.CancelFunc) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.sessions[key]; ok {
+		return false
+	}
+	s.sessions[key] = cancel
+	return true
+}
+
+// leaderSessionKey is the session-map key used for bare-text leader
+// chat turns. Distinct from the raw reply-token strings used by the
+// task-scoped /reply path so the two namespaces can coexist in the
+// same map.
+func leaderSessionKey(chatID int64) string {
+	return "leader:" + strconv.FormatInt(chatID, 10)
 }
 
 // unregister removes the entry, but only when it still points at the
@@ -243,14 +266,205 @@ func (d *daemon) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(text, "/reply"):
 		d.handleTelegramReply(w, r.Context(), chatID, strings.TrimSpace(strings.TrimPrefix(text, "/reply")))
 		return
+	case strings.HasPrefix(text, "/help"), strings.HasPrefix(text, "/start"):
+		if rep := d.telegramReplier(); rep != nil && chatID != 0 {
+			_ = rep.SendText(r.Context(), chatID, "Hi! Talk to me in plain text — I'm the Teem leader. `/reply <token> <msg>` for task-scoped replies, `/done` to cancel the current turn.")
+		}
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
-	// Unrecognised text — accept (Telegram retries on non-2xx) but
-	// nudge the operator on what command shape we expect.
-	if rep := d.telegramReplier(); rep != nil && chatID != 0 {
-		_ = rep.SendText(r.Context(), chatID, "Send `/reply <token> <message>` to chat with the leader, or `/done` to end the current thread.")
+	// Bare text: treat as a direct leader-chat turn (parallel to the
+	// dashboard's /control/teams/<id>/chat panel). No task scope, no
+	// token — the operator is initiating a fresh conversation.
+	d.handleTelegramLeaderChat(w, r.Context(), chatID, text)
+}
+
+// handleTelegramLeaderChat spawns a leader chat subprocess scoped to
+// the daemon's first registered team. The bot's response is the
+// leader's response, chunked to Telegram's 4096-char per-message cap.
+//
+// Auth: when messagingCfg.ChatID is set, incoming chatID must match;
+// otherwise the operator is told they're not authorised and no chat is
+// spawned. ChatID==0 (test / pre-config) skips the check.
+//
+// In-flight guard: at most one leader turn per chatID. A new bare
+// message that arrives mid-turn gets a polite "still responding" reply
+// instead of being queued — the operator can retry.
+func (d *daemon) handleTelegramLeaderChat(w http.ResponseWriter, ctx context.Context, chatID int64, text string) {
+	rep := d.telegramReplier()
+
+	if d.messagingCfg.ChatID != 0 && d.messagingCfg.ChatID != chatID {
+		if rep != nil && chatID != 0 {
+			_ = rep.SendText(ctx, chatID, "Not authorised.")
+		}
+		w.WriteHeader(http.StatusOK)
+		return
 	}
+	if strings.TrimSpace(text) == "" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	rt := d.firstRegisteredTeam()
+	if rt == nil {
+		if rep != nil && chatID != 0 {
+			_ = rep.SendText(ctx, chatID, "No team is registered with the daemon yet.")
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	turnCtx, cancel := context.WithTimeout(d.baseCtx, telegramIdleTimeout)
+	key := leaderSessionKey(chatID)
+	if d.messagingChatSessions != nil {
+		if !d.messagingChatSessions.tryRegister(key, cancel) {
+			cancel()
+			if rep != nil && chatID != 0 {
+				_ = rep.SendText(ctx, chatID, "Leader is still responding to your previous message — try again in a sec.")
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
+	go d.runTelegramLeaderTurn(turnCtx, cancel, key, text, chatID, rt)
+}
+
+// firstRegisteredTeam returns the lexicographically-first team by id,
+// or nil when no team is registered. Telegram bare-text chat is
+// daemon-global so it needs to land somewhere; in the single-team
+// usage model this is just "the team". Deterministic ordering keeps
+// behaviour stable across daemon restarts and across test runs.
+func (d *daemon) firstRegisteredTeam() *registeredTeam {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.teams) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(d.teams))
+	for id := range d.teams {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return d.teams[ids[0]]
+}
+
+// runTelegramLeaderTurn is the long-running half of
+// handleTelegramLeaderChat: builds the chat context body, spawns the
+// leader subprocess via the shared chatRunner seam, collects all
+// assistant text, and posts the response back to the operator's chat
+// (chunked to Telegram's 4096-char message limit).
+//
+// usage is captured under agent_id="leader-telegram" — distinct from
+// the /reply path's "leader-telegram-chat" and from the dashboard's
+// "leader-chat" — so the daily budget gate can break down spend per
+// surface.
+func (d *daemon) runTelegramLeaderTurn(turnCtx context.Context, cancel context.CancelFunc, sessionKey, userMessage string, chatID int64, rt *registeredTeam) {
+	rep := d.telegramReplier()
+	defer cancel()
+	if d.messagingChatSessions != nil {
+		defer d.messagingChatSessions.unregister(sessionKey, cancel)
+	}
+
+	runner := d.chatRunner
+	if runner == nil {
+		runner = defaultChatRunner
+	}
+	mcpConfig := filepath.Join(defaultStateDir(rt.team.ID), "pulse-mcp.json")
+	contextBody := fmt.Sprintf(
+		"You are responding to a direct chat message from the operator over Telegram.\n"+
+			"Take one turn — be concise; this lands on the operator's phone.\n"+
+			"Use list_tasks / list_agents / query_audit if you need state.\n"+
+			"Sent at: %s\n",
+		time.Now().UTC().Format(time.RFC3339),
+	)
+
+	startedAt := time.Now().UTC()
+	stdout, wait, err := runner(turnCtx, mcpConfig, rt.repoRoot, contextBody, userMessage)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[messaging-webhook] leader chat start: %v\n", err)
+		if rep != nil && chatID != 0 {
+			_ = rep.SendText(d.baseCtx, chatID, "Leader subprocess failed to start: "+err.Error())
+		}
+		return
+	}
+
+	cap := usage.NewCapture(startedAt)
+	text, parseErr := collectChatTurn(stdout, cap)
+	waitErr := wait()
+	d.recordChatUsage(rt, cap.Summary(), "leader-telegram")
+
+	if errors.Is(turnCtx.Err(), context.DeadlineExceeded) {
+		if rep != nil && chatID != 0 {
+			_ = rep.SendText(d.baseCtx, chatID, "Leader turn timed out after "+telegramIdleTimeout.String()+".")
+		}
+		return
+	}
+	if errors.Is(turnCtx.Err(), context.Canceled) {
+		// /done — handleTelegramDone already acknowledged.
+		return
+	}
+	if waitErr != nil && parseErr == nil {
+		if rep != nil && chatID != 0 {
+			_ = rep.SendText(d.baseCtx, chatID, "Leader subprocess errored: "+waitErr.Error())
+		}
+		return
+	}
+	if parseErr != nil {
+		if rep != nil && chatID != 0 {
+			_ = rep.SendText(d.baseCtx, chatID, "Leader output parse error: "+parseErr.Error())
+		}
+		return
+	}
+	if strings.TrimSpace(text) == "" {
+		text = "(leader returned no text)"
+	}
+	if rep == nil || chatID == 0 {
+		return
+	}
+	for _, chunk := range chunkForTelegram(text) {
+		_ = rep.SendText(d.baseCtx, chatID, chunk)
+	}
+}
+
+// telegramMaxMessageBytes is Telegram's documented per-message size
+// limit (sendMessage rejects payloads beyond 4096 UTF-8 bytes).
+const telegramMaxMessageBytes = 4096
+
+// chunkForTelegram splits text into ≤4096-byte slices so a long
+// leader response can be delivered as multiple consecutive bot
+// messages. Splits on the last newline within the window when
+// available, otherwise hard-cuts on a byte boundary — Telegram
+// renders the broken edges as monospace anyway, and the operator
+// can still read the run-on text. Short inputs return as a
+// single-element slice.
+func chunkForTelegram(text string) []string {
+	if len(text) <= telegramMaxMessageBytes {
+		return []string{text}
+	}
+	var out []string
+	for len(text) > telegramMaxMessageBytes {
+		cut := telegramMaxMessageBytes
+		if nl := strings.LastIndexByte(text[:cut], '\n'); nl > telegramMaxMessageBytes/2 {
+			cut = nl
+		} else {
+			// No newline in the upper half of the window: hard-cut, but
+			// back off to the nearest rune start so we never emit a
+			// chunk that ends mid-multibyte-rune (Telegram rejects
+			// invalid UTF-8).
+			for cut > 0 && !utf8.RuneStart(text[cut]) {
+				cut--
+			}
+		}
+		out = append(out, text[:cut])
+		text = strings.TrimPrefix(text[cut:], "\n")
+	}
+	if len(text) > 0 {
+		out = append(out, text)
+	}
+	return out
 }
 
 // handleTelegramDone parses an optional token argument and cancels the

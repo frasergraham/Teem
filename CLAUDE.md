@@ -22,7 +22,7 @@ report back via an HTTP audit stream.
 
 ## Tailnet & ports
 
-The daemon runs as its own `tsnet` node named `teem` — it does NOT use the host's `tailscaled`. Dashboard at `http://teem:7777` on the tailnet. Telegram webhook on `:7778` (default = main port + 1).
+The daemon runs as its own `tsnet` node named `teem` — it does NOT use the host's `tailscaled`. Dashboard at `http://teem:7777` on the tailnet. Telegram webhook on `:7778` (default = main port + 1); bare DMs to the bot = leader chat turn, `/done` ends the session, `/reply <token>` stays task-scoped.
 
 ## State
 
