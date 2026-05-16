@@ -127,19 +127,26 @@ func renderChatBurst(turns []chatTurn) string {
 	b.WriteString("Recent conversation (oldest first):\n")
 	for _, t := range turns {
 		ts := t.Timestamp.UTC().Format(time.RFC3339)
-		fmt.Fprintf(&b, "[%s] operator: %s\n", ts, singleLine(t.UserMessage))
-		fmt.Fprintf(&b, "[%s] you: %s\n", ts, singleLine(t.AssistantText))
+		if u := singleLine(t.UserMessage); u != "" {
+			fmt.Fprintf(&b, "[%s] operator: %s\n", ts, u)
+		}
+		if a := singleLine(t.AssistantText); a != "" {
+			fmt.Fprintf(&b, "[%s] you: %s\n", ts, a)
+		}
 	}
 	return b.String()
 }
 
 // singleLine collapses internal newlines so each rendered turn occupies
-// exactly two lines in the burst block. The leader still sees the full
-// content; we just keep the prompt-body markup compact.
+// at most one line in the burst block. Returns "" for empty input so
+// the caller can skip the line entirely — a tool-only turn shouldn't
+// render as `you: (empty)`, and a spawn-error row (assistant_text="")
+// should still surface the operator's question without a fake empty
+// reply alongside it.
 func singleLine(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "(empty)"
+		return ""
 	}
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", " "), "\n", " ")
 }
@@ -177,7 +184,11 @@ func filterByChatID(events []audit.Event, want int64) []audit.Event {
 	if want == 0 {
 		return events
 	}
-	out := events[:0]
+	// Fresh allocation: don't alias the input slice. audit.FileSink.Query
+	// happens to return a fresh slice today, but a future sink might
+	// return shared backing storage, and an aliased `out` would mutate
+	// it in place.
+	out := make([]audit.Event, 0, len(events))
 	for _, e := range events {
 		if got, ok := chatIDFromMeta(e.Meta); ok && got == want {
 			out = append(out, e)

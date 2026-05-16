@@ -130,6 +130,11 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now().UTC()
 	stdout, wait, err := runner(ctx, mcpConfig, rt.repoRoot, contextBody, msg)
 	if err != nil {
+		// Record the operator's message even though no assistant text
+		// was produced — keeps the next turn's burst aware of what was
+		// just asked. assistant_text="" matches the success path's
+		// shape when the subprocess produces no prose.
+		d.recordChatTurn(rt, "leader-chat", 0, msg, "")
 		writeSSE(w, flusher, "error", err.Error())
 		return
 	}

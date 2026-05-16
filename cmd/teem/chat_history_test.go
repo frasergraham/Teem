@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -190,6 +191,35 @@ func TestRenderChatBurst_FormatsTurns(t *testing.T) {
 	}
 	if !strings.Contains(got, "operator: Status?") {
 		t.Errorf("missing second user line; got=%q", got)
+	}
+}
+
+// TestRenderChatBurst_SkipsEmptySides asserts that a turn with an
+// empty user_message or assistant_text emits only the populated side
+// rather than rendering a "(empty)" placeholder. Covers the spawn-error
+// case (assistant_text="") and tool-only turns (no assistant prose).
+func TestRenderChatBurst_SkipsEmptySides(t *testing.T) {
+	turns := []chatTurn{
+		{
+			Timestamp:     mustTime(t, "2026-05-16T12:00:00Z"),
+			UserMessage:   "spawn-failed-question",
+			AssistantText: "",
+		},
+		{
+			Timestamp:     mustTime(t, "2026-05-16T12:01:00Z"),
+			UserMessage:   "",
+			AssistantText: "tool-only-reply",
+		},
+	}
+	got := renderChatBurst(turns)
+	if !strings.Contains(got, "operator: spawn-failed-question") {
+		t.Errorf("missing operator line for spawn-error turn; got=%q", got)
+	}
+	if !strings.Contains(got, "you: tool-only-reply") {
+		t.Errorf("missing you line for tool-only turn; got=%q", got)
+	}
+	if strings.Contains(got, "(empty)") {
+		t.Errorf("rendered placeholder leaked into burst; got=%q", got)
 	}
 }
 
@@ -424,6 +454,102 @@ func TestTelegramBareChat_RecordsChatTurn(t *testing.T) {
 	}
 	if got, _ := turn.Meta["assistant_text"].(string); got != "Roger" {
 		t.Errorf("Meta assistant_text=%q want Roger", got)
+	}
+	if got, _ := chatIDFromMeta(turn.Meta); got != 7 {
+		t.Errorf("Meta chat_id=%d want 7", got)
+	}
+}
+
+// TestChatEndpoint_RecordsTurnOnSpawnError asserts the dashboard chat
+// handler still emits a KindLeaderChatTurn event when the subprocess
+// fails to start — otherwise the operator's last question would be
+// silently dropped from the next turn's burst context.
+func TestChatEndpoint_RecordsTurnOnSpawnError(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+		return nil, nil, errors.New("claude CLI not on PATH")
+	}
+
+	body := strings.NewReader(`{"message":"hello"}`)
+	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/chat", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+
+	events, err := rt.auditSink.Query("", time.Time{}, 100)
+	if err != nil {
+		t.Fatalf("query audit: %v", err)
+	}
+	var turns []audit.Event
+	for _, e := range events {
+		if e.Kind == audit.KindLeaderChatTurn {
+			turns = append(turns, e)
+		}
+	}
+	if len(turns) != 1 {
+		t.Fatalf("got %d KindLeaderChatTurn events, want 1", len(turns))
+	}
+	turn := turns[0]
+	if turn.AgentID != "leader-chat" {
+		t.Errorf("AgentID=%q want leader-chat", turn.AgentID)
+	}
+	if got, _ := turn.Meta["user_message"].(string); got != "hello" {
+		t.Errorf("Meta user_message=%q want hello", got)
+	}
+	if got, _ := turn.Meta["assistant_text"].(string); got != "" {
+		t.Errorf("Meta assistant_text=%q want empty", got)
+	}
+}
+
+// TestTelegramBareChat_RecordsTurnOnSpawnError mirrors the dashboard
+// test for the Telegram bare-text surface. The recorded event must keep
+// chat_id meta so the next turn on the same Telegram thread still
+// scopes its burst correctly.
+func TestTelegramBareChat_RecordsTurnOnSpawnError(t *testing.T) {
+	d, _ := newWebhookTestDaemon(t)
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+		return nil, nil, errors.New("claude CLI not on PATH")
+	}
+
+	body := strings.NewReader(`{"message":{"chat":{"id":7},"text":"ping"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", body)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var turn *audit.Event
+	waitFor(t, func() bool {
+		events, err := rt.auditSink.Query("", time.Time{}, 100)
+		if err != nil {
+			return false
+		}
+		for i, e := range events {
+			if e.Kind == audit.KindLeaderChatTurn {
+				turn = &events[i]
+				return true
+			}
+		}
+		return false
+	})
+
+	if turn.AgentID != "leader-telegram" {
+		t.Errorf("AgentID=%q want leader-telegram", turn.AgentID)
+	}
+	if got, _ := turn.Meta["user_message"].(string); got != "ping" {
+		t.Errorf("Meta user_message=%q want ping", got)
+	}
+	if got, _ := turn.Meta["assistant_text"].(string); got != "" {
+		t.Errorf("Meta assistant_text=%q want empty", got)
 	}
 	if got, _ := chatIDFromMeta(turn.Meta); got != 7 {
 		t.Errorf("Meta chat_id=%d want 7", got)
