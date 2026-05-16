@@ -49,6 +49,7 @@ const handlers: Record<string, Handler> = {
   pulse_tick: handlePulseTick,
   channels_state: handleChannelsState,
   usage_event: handleUsageEvent,
+  leader_status_changed: handleLeaderStatusChanged,
 };
 
 // bucketForStage mirrors cmd/teem/ui.go's per-task switch (Stage ==
@@ -174,6 +175,22 @@ function handleChannelsState(snap: StateSnapshot, ev: AuditEvent): StateSnapshot
   if (state !== 'live' && state !== 'fallback') return null;
   if (snap.channels_state === state) return null;
   return { ...snap, channels_state: state };
+}
+
+function handleLeaderStatusChanged(snap: StateSnapshot, ev: AuditEvent): StateSnapshot | null {
+  const meta = ev.meta ?? {};
+  const text = typeof meta.text === 'string' ? meta.text : '';
+  if (!text) return null;
+  const agentID =
+    (typeof meta.agent_id === 'string' && meta.agent_id) || ev.agent_id || 'leader';
+  const prev = snap.leader_status;
+  const nextLeader = {
+    ...(prev ?? { agent_id: agentID, text: '', updated_ago: '0s ago' }),
+    agent_id: agentID,
+    text,
+    updated_ago: '0s ago',
+  };
+  return { ...snap, leader_status: nextLeader, status_headline: text };
 }
 
 function handleUsageEvent(snap: StateSnapshot, ev: AuditEvent): StateSnapshot | null {
