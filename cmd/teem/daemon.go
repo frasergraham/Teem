@@ -2789,9 +2789,9 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/teams/")
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
-		// Phase 3: bare /teams/<id> serves the SPA. The legacy SSR page
-		// has moved to /teams/<id>/legacy. Resolve the team first so a
-		// stale id 404s instead of silently rendering the shell.
+		// Phase 3: bare /teams/<id> serves the SPA. Redirect to the
+		// trailing-slash form so the SPA's relative ./assets/... refs
+		// resolve under /teams/<id>/ rather than /teams/.
 		if rest == "" {
 			http.NotFound(w, r)
 			return
@@ -2800,7 +2800,7 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		serveSPA(w, r, "")
+		http.Redirect(w, r, "/teams/"+rest+"/", http.StatusSeeOther)
 		return
 	}
 	id, suffix := rest[:slash], rest[slash:]
@@ -2810,6 +2810,13 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case suffix == "/":
+		// SPA shell (trailing-slash form of bare /teams/<id>).
+		serveSPA(w, r, "")
+	case strings.HasPrefix(suffix, "/assets/"):
+		// SPA static assets emitted by Vite (base: './'), resolved by
+		// the browser against /teams/<id>/.
+		serveSPA(w, r, suffix)
 	case strings.HasPrefix(suffix, "/mcp"):
 		// Forward to the team's MCP handler. It expects to see /mcp at
 		// the root.

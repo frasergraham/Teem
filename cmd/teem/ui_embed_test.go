@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,7 +33,10 @@ func TestSPAEmbedded_IndexAtV2(t *testing.T) {
 	}
 }
 
-func TestSPAEmbedded_TeamRootServesSPA(t *testing.T) {
+func TestSPAEmbedded_TeamRootRedirectsToTrailingSlash(t *testing.T) {
+	// Vite emits relative ./assets/... refs in index.html; without a
+	// trailing slash the browser resolves them against /teams/ instead
+	// of /teams/<id>/, so the bare form must redirect.
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
 	rt := newFullTestTeam(t, "alpha")
 	d.teams["alpha"] = rt
@@ -40,11 +44,59 @@ func TestSPAEmbedded_TeamRootServesSPA(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("code=%d want 303 body=%s", w.Code, w.Body.String())
+	}
+	if loc := w.Header().Get("Location"); loc != "/teams/alpha/" {
+		t.Errorf("Location=%q want /teams/alpha/", loc)
+	}
+}
+
+func TestSPAEmbedded_TeamRootSlashServesSPA(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
 	}
 	if !strings.Contains(w.Body.String(), `<div id="root">`) {
-		t.Errorf("/teams/<id> did not serve SPA shell; body excerpt:\n%s", excerpt(w.Body.String()))
+		t.Errorf("/teams/<id>/ did not serve SPA shell; body excerpt:\n%s", excerpt(w.Body.String()))
+	}
+}
+
+func TestSPAEmbedded_AssetsUnderTeamPath(t *testing.T) {
+	// The SPA's relative ./assets/<hash>.js refs resolve to
+	// /teams/<id>/assets/<hash>.js once the page is at the trailing-
+	// slash form. Those must hit the embedded bundle, not 404.
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	dist, err := spaDistFS()
+	if err != nil {
+		t.Fatalf("spaDistFS: %v", err)
+	}
+	entries, err := fs.ReadDir(dist, "assets")
+	if err != nil {
+		t.Fatalf("read assets/: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no built assets — run `make ui`")
+	}
+	asset := entries[0].Name()
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/assets/"+asset, nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("asset %q: code=%d body=%s", asset, w.Code, w.Body.String())
+	}
+	if w.Body.Len() == 0 {
+		t.Errorf("asset %q served empty body", asset)
 	}
 }
 
