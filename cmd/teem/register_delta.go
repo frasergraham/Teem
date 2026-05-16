@@ -29,11 +29,18 @@ func safeReregisterDelta(existing, fresh *team.Team) (displayChanged bool, struc
 	displayChanged = existing.Name != fresh.Name ||
 		existing.Leader.SystemPrompt != fresh.Leader.SystemPrompt
 
-	if diff := diffArchetypes(existing, fresh); diff != "" {
+	trackerDiff := diffTracker(existing.Tracker, fresh.Tracker)
+	// When the tracker block itself is being added or removed, the
+	// synthesised project_manager archetype follows it in or out
+	// automatically. The tracker-diff line below already conveys that
+	// to the operator; suppress the PM from the archetype diff so we
+	// don't double-warn ("tracker added" + "added project_manager").
+	skipPM := trackerDiff != ""
+	if diff := diffArchetypes(existing, fresh, skipPM); diff != "" {
 		structuralChanges = append(structuralChanges, diff)
 	}
-	if diff := diffTracker(existing.Tracker, fresh.Tracker); diff != "" {
-		structuralChanges = append(structuralChanges, diff)
+	if trackerDiff != "" {
+		structuralChanges = append(structuralChanges, trackerDiff)
 	}
 	if diff := diffTailnet(existing, fresh); diff != "" {
 		structuralChanges = append(structuralChanges, diff)
@@ -41,13 +48,32 @@ func safeReregisterDelta(existing, fresh *team.Team) (displayChanged bool, struc
 	return displayChanged, structuralChanges
 }
 
+// pmArchetypeRole is the hardcoded role name MaybePMArchetype synthesises;
+// kept here so the archetype-diff filter doesn't have to round-trip
+// through MaybePMArchetype (which returns nil on the trackerless side).
+const pmArchetypeRole = "project_manager"
+
 // augmentedArchetypes returns the team's declared archetypes plus the
 // synthesised project_manager (if Tracker.Type is set). The existing
 // team has had MaybePMArchetype appended at first-register; a fresh
 // team has not. Augmenting both sides keeps the diff symmetric so a
 // Tracker-driven PM doesn't masquerade as a bare archetype add.
-func augmentedArchetypes(t *team.Team) []team.ArchetypeSpec {
+//
+// skipPM strips the synthesised PM from BOTH sides so a tracker
+// add/remove (which carries the PM with it) doesn't surface as a
+// separate archetype add/remove line.
+func augmentedArchetypes(t *team.Team, skipPM bool) []team.ArchetypeSpec {
 	archs := t.SnapshotArchetypes()
+	if skipPM {
+		filtered := make([]team.ArchetypeSpec, 0, len(archs))
+		for _, a := range archs {
+			if a.Role == pmArchetypeRole {
+				continue
+			}
+			filtered = append(filtered, a)
+		}
+		return filtered
+	}
 	pm := team.MaybePMArchetype(t)
 	if pm == nil {
 		return archs
@@ -60,9 +86,9 @@ func augmentedArchetypes(t *team.Team) []team.ArchetypeSpec {
 	return append(archs, *pm)
 }
 
-func diffArchetypes(existing, fresh *team.Team) string {
-	existArchs := augmentedArchetypes(existing)
-	freshArchs := augmentedArchetypes(fresh)
+func diffArchetypes(existing, fresh *team.Team, skipPM bool) string {
+	existArchs := augmentedArchetypes(existing, skipPM)
+	freshArchs := augmentedArchetypes(fresh, skipPM)
 	existByRole := make(map[string]team.ArchetypeSpec, len(existArchs))
 	for _, a := range existArchs {
 		existByRole[a.Role] = a

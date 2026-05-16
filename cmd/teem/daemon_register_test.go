@@ -259,6 +259,7 @@ func TestSafeReregisterDelta_TableDriven(t *testing.T) {
 		fresh          *team.Team
 		wantDisplay    bool
 		wantStructural []string // substrings that MUST appear in the joined output
+		notStructural  []string // substrings that MUST NOT appear in the joined output
 	}{
 		{
 			name:        "identical",
@@ -328,6 +329,34 @@ func TestSafeReregisterDelta_TableDriven(t *testing.T) {
 			wantDisplay:    true,
 			wantStructural: []string{"archetypes changed", "added reviewer"},
 		},
+		{
+			// Adding a tracker block also makes the synthesised
+			// project_manager appear in the augmented archetype list.
+			// We don't want both lines to fire — only "tracker added"
+			// should surface, and the archetype diff should stay quiet.
+			//
+			// Mirrors the first-register call path: handleRegister
+			// appends MaybePMArchetype to t.Archetypes when a tracker
+			// is wired, so the existing team's raw archetype list does
+			// NOT yet carry PM (tracker was nil) but the fresh team's
+			// does (we pre-append PM here to match the post-register
+			// state once the operator re-POSTs).
+			name:           "tracker add with PM emerging",
+			existing:       mkTeam("a", "p", baseArchs, nil, team.TailnetSpec{}),
+			fresh:          mkTeam("a", "p", append([]team.ArchetypeSpec{}, append(baseArchs, team.ArchetypeSpec{Role: "project_manager", Placement: "local", MaxConcurrent: 1})...), &team.TrackerConfig{Type: "linear", TeamID: "ENG"}, team.TailnetSpec{}),
+			wantStructural: []string{"tracker added"},
+			notStructural:  []string{"project_manager", "archetypes changed"},
+		},
+		{
+			// Mirror of the previous case: removing the tracker also
+			// strips the synthesised project_manager. Only "tracker
+			// removed" should fire — no archetype warning.
+			name:           "tracker remove with PM going",
+			existing:       mkTeam("a", "p", append([]team.ArchetypeSpec{}, append(baseArchs, team.ArchetypeSpec{Role: "project_manager", Placement: "local", MaxConcurrent: 1})...), &team.TrackerConfig{Type: "linear", TeamID: "ENG"}, team.TailnetSpec{}),
+			fresh:          mkTeam("a", "p", baseArchs, nil, team.TailnetSpec{}),
+			wantStructural: []string{"tracker removed"},
+			notStructural:  []string{"project_manager", "archetypes changed"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -336,6 +365,11 @@ func TestSafeReregisterDelta_TableDriven(t *testing.T) {
 				t.Errorf("displayChanged = %v, want %v", display, c.wantDisplay)
 			}
 			joined := strings.Join(structural, "; ")
+			for _, banned := range c.notStructural {
+				if strings.Contains(joined, banned) {
+					t.Errorf("structural should not contain %q: %s", banned, joined)
+				}
+			}
 			if len(c.wantStructural) == 0 {
 				if len(structural) != 0 {
 					t.Errorf("structural = %v, want empty", structural)
