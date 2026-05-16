@@ -272,11 +272,16 @@ func resolveActionInput(action string, req taskActionRequest) (decision, string,
 
 // markTaskReady flips a task into plan.StageReady — the operator's
 // "pre-flighted, free to dispatch" signal. Idempotent on already-ready
-// tasks (returns the existing task without writing). Returns
-// errReadyFromTerminal when the task is verified or abandoned;
-// plan.ErrTaskNotFound when the id is missing; plan.ErrInvalidStage
-// (or errStageRaced after retries) when the matrix forbids the move
-// from the task's current stage.
+// tasks (returns the existing task with changed=false and without
+// writing). Returns errReadyFromTerminal when the task is verified or
+// abandoned; plan.ErrTaskNotFound when the id is missing;
+// plan.ErrInvalidStage (or errStageRaced after retries) when the
+// matrix forbids the move from the task's current stage.
+//
+// The changed bool tells callers whether the stage actually
+// transitioned on this call. handleControlTaskReady uses it to decide
+// whether to fire the operator auto-wake — idempotent re-posts on an
+// already-ready task should not wake the leader again.
 //
 // Race handling: the operator can double-click the button, and the
 // PM loop can also be moving the task. Each attempt locks expected
@@ -285,20 +290,20 @@ func resolveActionInput(action string, req taskActionRequest) (decision, string,
 // and retry up to maxReadyRetries.
 const maxReadyRetries = 3
 
-func markTaskReady(rt *registeredTeam, taskID string) (plan.Task, error) {
+func markTaskReady(rt *registeredTeam, taskID string) (plan.Task, bool, error) {
 	if rt == nil || rt.plan == nil {
-		return plan.Task{}, errors.New("plan unavailable")
+		return plan.Task{}, false, errors.New("plan unavailable")
 	}
 	for i := 0; i < maxReadyRetries; i++ {
 		current, ok := rt.plan.Get(taskID)
 		if !ok {
-			return plan.Task{}, plan.ErrTaskNotFound
+			return plan.Task{}, false, plan.ErrTaskNotFound
 		}
 		if current.Stage == plan.StageReady {
-			return current, nil
+			return current, false, nil
 		}
 		if current.Stage == plan.StageVerified || current.Stage == plan.StageAbandoned {
-			return plan.Task{}, errReadyFromTerminal
+			return plan.Task{}, false, errReadyFromTerminal
 		}
 		updated, err := rt.plan.MutateTaskIfStage(taskID, current.Stage, func(plan.Task) plan.UpdateInput {
 			return plan.UpdateInput{Stage: plan.StageReady}
@@ -307,7 +312,7 @@ func markTaskReady(rt *registeredTeam, taskID string) (plan.Task, error) {
 			continue
 		}
 		if err != nil {
-			return plan.Task{}, err
+			return plan.Task{}, false, err
 		}
 		if rt.auditSink != nil {
 			_ = rt.auditSink.Write(audit.Event{
@@ -322,9 +327,9 @@ func markTaskReady(rt *registeredTeam, taskID string) (plan.Task, error) {
 				},
 			})
 		}
-		return updated, nil
+		return updated, true, nil
 	}
-	return plan.Task{}, errStageRaced
+	return plan.Task{}, false, errStageRaced
 }
 
 // handleControlTaskReady is the JSON API surface for POST
@@ -344,7 +349,7 @@ func (d *daemon) handleControlTaskReady(w http.ResponseWriter, r *http.Request, 
 	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
 	r.Body.Close()
 
-	task, err := markTaskReady(rt, taskID)
+	task, changed, err := markTaskReady(rt, taskID)
 	switch {
 	case errors.Is(err, plan.ErrTaskNotFound):
 		http.NotFound(w, r)
@@ -356,7 +361,59 @@ func (d *daemon) handleControlTaskReady(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Operator just made a task dispatchable — wake the leader so it
+	// picks up the work without waiting for the next pulse interval.
+	// Hooked ONLY here, NOT in the MCP set_task_stage tool: that path is
+	// leader-initiated and would self-wake recursively.
+	if changed {
+		d.autoWakeLeaderOnTaskReady(rt)
+	}
 	writeJSON(w, http.StatusOK, task)
+}
+
+// autoWakeLeaderOnTaskReady fires a pulse tick fire-and-forget after an
+// operator successfully marks a task ready. Mirrors handlePingTeam's
+// gating (channels-live → channel nudge; paused or busy → skip) so
+// burst transitions don't pile up a queue of ticks.
+//
+// Safe to call with a nil-pulse team (no-op); the daemon's baseCtx is
+// used for the Tick goroutine so it survives the HTTP request scope.
+func (d *daemon) autoWakeLeaderOnTaskReady(rt *registeredTeam) {
+	if rt == nil || rt.pulse == nil {
+		return
+	}
+	rt.detectionMu.Lock()
+	live := rt.channelsLive
+	rt.detectionMu.Unlock()
+	if live {
+		publishPulseChannelNudge(rt.channelBus)
+		if rt.auditSink != nil {
+			_ = rt.auditSink.Write(audit.Event{
+				Timestamp: time.Now().UTC(),
+				AgentID:   "operator",
+				Kind:      audit.KindPulseTick,
+				Message:   "task ready: auto-wake routed as channel nudge",
+				Meta:      map[string]any{"trigger": "task_ready", "route": "channel"},
+			})
+		}
+		return
+	}
+	if rt.pulse.Paused() {
+		return
+	}
+	if rt.pulse.Busy() {
+		return
+	}
+	if rt.auditSink != nil {
+		_ = rt.auditSink.Write(audit.Event{
+			Timestamp: time.Now().UTC(),
+			AgentID:   "operator",
+			Kind:      audit.KindPulseTick,
+			Message:   "task ready: auto-wake leader",
+			Meta:      map[string]any{"trigger": "task_ready"},
+		})
+	}
+	safeGo("pulse.task_ready:"+rt.team.ID, func() { _ = rt.pulse.Tick(d.baseCtx, "task_ready") })
 }
 
 // writeReadyConflict emits the JSON 409 body for /tasks/<id>/ready
