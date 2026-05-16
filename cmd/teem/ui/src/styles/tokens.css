@@ -964,3 +964,175 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
   color: var(--c-text, var(--fg));
   border-color: var(--c-border-hover, var(--border));
 }
+
+/* --- Task-detail modal -----------------------------------------
+   Restored click-to-see-details: the SSR /teams/<id>/tasks/<id>
+   page was removed in Phase 4; this is the SPA replacement. The
+   modal floats above the bridge-console body and uses the same
+   panel tokens so the operator's eye doesn't have to retune. */
+
+table.tasks tbody tr.task-row { cursor: pointer; }
+table.tasks tbody tr.task-row:hover {
+  background: var(--c-tile-hover, var(--pill-bg));
+}
+table.tasks tbody tr.task-row:focus-visible {
+  outline: 2px solid var(--c-signal-accent, var(--accent));
+  outline-offset: -2px;
+}
+
+.task-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 6vh 16px 16px;
+  z-index: 100;
+}
+
+.task-modal-card {
+  background: var(--c-panel, var(--card));
+  color: var(--c-text, var(--fg));
+  border: 1px solid var(--c-border, var(--border));
+  border-radius: 10px;
+  width: min(720px, 100%);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.task-modal-header {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: start;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--c-rule, var(--border));
+}
+.task-modal-titles { min-width: 0; }
+.task-modal-id {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--c-text-muted, var(--muted));
+  margin-bottom: 4px;
+}
+.task-modal-title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+  font-weight: 600;
+  color: var(--c-text, var(--fg));
+  word-break: break-word;
+}
+.task-modal-pills {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.task-modal-status {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  background: var(--c-panel-alt, var(--pill-bg));
+  color: var(--c-text-muted, var(--muted));
+  border: 1px solid var(--c-rule, var(--border));
+}
+.task-modal-close {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--c-rule, var(--border));
+  color: var(--c-text-muted, var(--muted));
+  font-size: 20px;
+  line-height: 1;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.task-modal-close:hover {
+  color: var(--c-text, var(--fg));
+  border-color: var(--c-border, var(--border));
+}
+.task-modal-close:focus-visible {
+  outline: 2px solid var(--c-signal-accent, var(--accent));
+  outline-offset: 2px;
+}
+
+.task-modal-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 24px;
+  margin: 0;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--c-rule, var(--border));
+  font-size: 12px;
+}
+.task-modal-meta dt {
+  color: var(--c-text-dim, var(--muted));
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+  margin-bottom: 2px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+.task-modal-meta dd {
+  margin: 0;
+  color: var(--c-text, var(--fg));
+}
+.task-modal-meta dd.gone {
+  opacity: 0.6;
+  text-decoration: line-through;
+}
+.task-modal-meta dd em {
+  font-style: italic;
+  color: var(--c-text-muted, var(--muted));
+}
+
+.task-modal-notes {
+  padding: 16px 18px 20px;
+  overflow-y: auto;
+}
+.task-modal-notes-body {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--c-text, var(--fg));
+}
+.task-modal-notes-body p { margin: 0 0 10px; }
+.task-modal-notes-body p:last-child { margin-bottom: 0; }
+.task-modal-notes-body code {
+  background: var(--c-tile, var(--code-bg));
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+.task-modal-notes-body pre {
+  background: var(--c-tile, var(--code-bg));
+  padding: 10px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+}
+.task-modal-notes-body pre code { background: transparent; padding: 0; }
+.task-modal-notes-body ul, .task-modal-notes-body ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+.task-modal-notes-body a { color: var(--c-azure, var(--info)); }
+.task-modal-notes-empty {
+  color: var(--c-text-dim, var(--muted));
+  font-style: italic;
+  font-size: 13px;
+}

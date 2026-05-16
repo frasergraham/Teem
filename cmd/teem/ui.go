@@ -324,6 +324,12 @@ type dashboardTask struct {
 	// the task forward.
 	Stale bool   `json:"stale"`
 	URL   string `json:"url"`
+	// Notes carries plan.Task.Notes verbatim. The SPA renders this in
+	// the task-detail modal (TaskDetailModal.tsx) as goldmark-style
+	// markdown via marked. Trusted writer (leader / project_manager
+	// via plan.UpdateTask); the modal renders the HTML with
+	// dangerouslySetInnerHTML, same model as ChatPanel leader output.
+	Notes string `json:"notes"`
 }
 
 // taskCostCell is the dashboardTask sub-struct holding the rendered
@@ -1213,6 +1219,7 @@ func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool, j
 		AssigneeActive:  assigneeActive,
 		AssigneeDerived: derived,
 		Stale:           stale,
+		Notes:           t.Notes,
 		Cost:            buildTaskCostCell(t.Evidence, pricing, costEvents),
 	}
 }

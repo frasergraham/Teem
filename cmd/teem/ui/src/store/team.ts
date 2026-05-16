@@ -55,6 +55,7 @@ export interface DashboardTask {
   assignee_derived?: boolean;
   stale?: boolean;
   url?: string;
+  notes?: string;
 }
 
 // PlanFile mirrors cmd/teem/plan_artifact.go planFile. Rendered is

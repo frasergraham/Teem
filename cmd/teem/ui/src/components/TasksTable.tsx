@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState, KeyboardEvent, MouseEvent } from 'react';
 
 import { APIError } from '../api/client';
 import { markReady } from '../api/control';
 import { DashboardTask, useTeamStore } from '../store/team';
+import { TaskDetailModal } from './TaskDetailModal';
 
 // TasksTable renders snapshot.tasks.open — the per-team open-task list.
 // Server-side teamSnapshot already sorts by stage order (see
@@ -14,6 +15,24 @@ import { DashboardTask, useTeamStore } from '../store/team';
 export function TasksTable() {
   const open = useTeamStore((s) => s.snapshot?.tasks.open ?? emptyTasks);
   const recentDone = useTeamStore((s) => s.snapshot?.tasks.recent_done ?? emptyTasks);
+  const [openTaskID, setOpenTaskID] = useState<string | null>(null);
+
+  // Resolve the modal's task from the live snapshot so streamed updates
+  // (stage flips, notes edits) re-render the open modal without
+  // requiring the operator to reopen it.
+  const modalTask =
+    openTaskID === null
+      ? null
+      : open.find((t) => t.id === openTaskID) ??
+        recentDone.find((t) => t.id === openTaskID) ??
+        null;
+
+  // If the task disappears from both buckets (e.g. shelved while the
+  // modal is open), close the modal so we don't render a dangling id.
+  useEffect(() => {
+    if (openTaskID !== null && modalTask === null) setOpenTaskID(null);
+  }, [openTaskID, modalTask]);
+
   return (
     <section className="tasks-panel" aria-label="open tasks">
       <h3 className="panel-label">
@@ -34,7 +53,7 @@ export function TasksTable() {
           </thead>
           <tbody>
             {open.map((t) => (
-              <TaskRow key={t.id} task={t} />
+              <TaskRow key={t.id} task={t} onOpen={setOpenTaskID} />
             ))}
           </tbody>
         </table>
@@ -56,27 +75,52 @@ export function TasksTable() {
             </thead>
             <tbody>
               {recentDone.map((t) => (
-                <TaskRow key={t.id} task={t} />
+                <TaskRow key={t.id} task={t} onOpen={setOpenTaskID} />
               ))}
             </tbody>
           </table>
         </details>
       )}
+      {modalTask && (
+        <TaskDetailModal task={modalTask} onClose={() => setOpenTaskID(null)} />
+      )}
     </section>
   );
 }
 
-function TaskRow({ task }: { task: DashboardTask }) {
+function TaskRow({ task, onOpen }: { task: DashboardTask; onOpen: (id: string) => void }) {
   const assigneeClass = ['assignee']
     .concat(task.assigned_to && !task.assignee_active ? ['gone'] : [])
     .concat(task.assignee_derived ? ['derived'] : [])
     .join(' ');
-  const titleNode = task.url ? <a href={task.url}>{task.title}</a> : <>{task.title}</>;
-  const idNode = task.url ? <a href={task.url}>{task.id}</a> : <>{task.id}</>;
+
+  function handleClick(e: MouseEvent<HTMLTableRowElement>) {
+    // Don't intercept clicks on interactive children — the "→ ready"
+    // button has its own handler, and a future link in the row should
+    // win over the row-level open.
+    const target = e.target as HTMLElement;
+    if (target.closest('button, a, input, select, textarea')) return;
+    onOpen(task.id);
+  }
+
+  function handleKey(e: KeyboardEvent<HTMLTableRowElement>) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onOpen(task.id);
+    }
+  }
+
   return (
-    <tr>
-      <td className="id">{idNode}</td>
-      <td>{titleNode}</td>
+    <tr
+      className="task-row"
+      tabIndex={0}
+      role="button"
+      aria-label={`open details for ${task.id}`}
+      onClick={handleClick}
+      onKeyDown={handleKey}
+    >
+      <td className="id">{task.id}</td>
+      <td>{task.title}</td>
       <td>
         {task.stage && <span className={`stage ${task.stage}`}>{task.stage}</span>}
         {task.stale && (
