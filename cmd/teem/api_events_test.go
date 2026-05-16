@@ -117,16 +117,21 @@ func TestAPIEvents_SnapshotInvalidateWhenSinceSeqTooOld(t *testing.T) {
 func TestAPIEvents_LivePush(t *testing.T) {
 	_, rt, srv := teamWithWSBus(t, "alpha", 2000)
 
+	// Publish one envelope BEFORE dial — it'll be in the ring for
+	// backfill. With Subscribe-before-backfill the live channel never
+	// sees this one (Subscribe runs server-side after dial returns,
+	// after the pre-dial Publish), but reading it via backfill plus
+	// the post-dial live envelope verifies both paths in one test.
+	rt.wsbus.Publish(wsbus.Envelope{
+		Kind:  "audit",
+		Seq:   rt.wsbus.NextSeq(),
+		TS:    time.Now().UTC(),
+		Event: &audit.Event{Kind: audit.KindHeartbeat, AgentID: "worker-prelive"},
+	})
+
 	c, cancel := dialEvents(t, srv, "alpha", "0")
 	defer cancel()
 	defer c.Close(websocket.StatusNormalClosure, "")
-
-	// Backfill is empty (no prior Publishes); first read should pick
-	// up the post-connect envelope. Subscribe is registered on the
-	// server side as part of the handler — but there's a small window
-	// between Accept and Subscribe. Sleep briefly so the server
-	// finishes its backfill (no-op here) and Subscribes.
-	time.Sleep(50 * time.Millisecond)
 
 	rt.wsbus.Publish(wsbus.Envelope{
 		Kind:  "audit",
@@ -137,15 +142,29 @@ func TestAPIEvents_LivePush(t *testing.T) {
 
 	ctx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer readCancel()
+
+	// First read: pre-dial envelope via backfill.
 	var env wsbus.Envelope
 	if err := wsjson.Read(ctx, c, &env); err != nil {
-		t.Fatalf("read: %v", err)
+		t.Fatalf("read backfill: %v", err)
 	}
-	if env.Kind != "audit" {
-		t.Fatalf("kind=%q want audit", env.Kind)
+	if env.Kind != "audit" || env.Event == nil || env.Event.AgentID != "worker-prelive" {
+		t.Fatalf("backfill: kind=%q event=%+v want worker-prelive", env.Kind, env.Event)
 	}
-	if env.Event == nil || env.Event.AgentID != "worker-live" {
-		t.Fatalf("event agent_id=%v want worker-live", env.Event)
+	if env.Seq != 1 {
+		t.Errorf("backfill seq=%d want 1", env.Seq)
+	}
+
+	// Second read: post-dial envelope via live push. If the live loop
+	// failed to dedup, we might see worker-prelive again here.
+	if err := wsjson.Read(ctx, c, &env); err != nil {
+		t.Fatalf("read live: %v", err)
+	}
+	if env.Kind != "audit" || env.Event == nil || env.Event.AgentID != "worker-live" {
+		t.Fatalf("live: kind=%q event=%+v want worker-live", env.Kind, env.Event)
+	}
+	if env.Seq != 2 {
+		t.Errorf("live seq=%d want 2", env.Seq)
 	}
 }
 
