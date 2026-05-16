@@ -255,7 +255,7 @@ type usageSnapshot struct {
 	NextResetAbs string       `json:"next_reset_abs"`
 	LastResetAbs string       `json:"last_reset_abs"`
 	PerModel     []modelUsage `json:"per_model"`
-	BarColour    string       `json:"bar_colour"`
+	BarColour    string       `json:"bar_colour"` // "green" | "amber" | "red"
 }
 
 // modelUsage is one row in the per-model breakdown. Total is
@@ -310,17 +310,17 @@ type decisionAction struct {
 type pulseSnapshot struct {
 	Running              bool   `json:"running"`
 	Paused               bool   `json:"paused"`
-	Interval             string `json:"interval"`
-	IntervalValue        int    `json:"interval_value"`
-	IntervalUnit         string `json:"interval_unit"`
-	LastTick             string `json:"last_tick"`
+	Interval             string `json:"interval"`       // formatted Go duration ("5m0s")
+	IntervalValue        int    `json:"interval_value"` // for the number input
+	IntervalUnit         string `json:"interval_unit"`  // "s" / "m" / "h"
+	LastTick             string `json:"last_tick"`      // "(never)" or "<duration> ago"
 	TickCount            int64  `json:"tick_count"`
-	WakePrompt           string `json:"wake_prompt"`
-	UseDefaultWakePrompt bool   `json:"use_default_wake_prompt"`
-	DefaultWakePrompt    string `json:"default_wake_prompt"`
-	StartURL             string `json:"start_url"`
-	StopURL              string `json:"stop_url"`
-	ConfigURL            string `json:"config_url"`
+	WakePrompt           string `json:"wake_prompt"`             // current value (default or override)
+	UseDefaultWakePrompt bool   `json:"use_default_wake_prompt"` // true ⇒ render textarea as placeholder
+	DefaultWakePrompt    string `json:"default_wake_prompt"`     // shown as the placeholder text
+	StartURL             string `json:"start_url"`               // /control/teams/<id>/pulse/start
+	StopURL              string `json:"stop_url"`                // /control/teams/<id>/pulse/stop
+	ConfigURL            string `json:"config_url"`              // /control/teams/<id>/pulse/config
 }
 
 // workerRow is one entry in the active-workers manifest. Persona is the

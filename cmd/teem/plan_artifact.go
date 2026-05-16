@@ -34,9 +34,9 @@ const planFileSizeCap = 50 * 1024
 type planFile struct {
 	Path       string        `json:"path"`
 	IsMarkdown bool          `json:"is_markdown"`
-	PathSlug   string        `json:"path_slug"`
-	Rendered   template.HTML `json:"rendered"`
-	Truncated  bool          `json:"truncated"`
+	PathSlug   string        `json:"path_slug"` // "docs/foo.md" → "docs-foo-md"; used as a <details> id only
+	Rendered   template.HTML `json:"rendered"`  // pre-rendered (sanitized) markdown body, blank if read/render failed
+	Truncated  bool          `json:"truncated"` // true if source was clipped at planFileSizeCap
 }
 
 // awaitingApprovalEvidence is the per-evidence-job view rendered
@@ -48,9 +48,9 @@ type planFile struct {
 type awaitingApprovalEvidence struct {
 	JobID      string     `json:"job_id"`
 	AgentID    string     `json:"agent_id"`
-	BranchRef  string     `json:"branch_ref"`
-	BranchURL  string     `json:"branch_url"`
-	JobURL     string     `json:"job_url"`
+	BranchRef  string     `json:"branch_ref"` // "teem/worker-una"
+	BranchURL  string     `json:"branch_url"` // /teams/<id>/agents/<agent>/jobs
+	JobURL     string     `json:"job_url"`    // /teams/<id>/jobs/<jobid>
 	PlanFiles  []planFile `json:"plan_files"`
 	PlanShaped bool       `json:"plan_shaped"`
 }
