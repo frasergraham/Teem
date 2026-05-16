@@ -1,24 +1,441 @@
+/* Shared tokens for the SPA. The first :root block mirrors the SSR
+   dashboard's light theme so the SPA renders with the same palette
+   when not on a dedicated team page. The body.team-detail-page block
+   layers the bridge-console palette on top, scoped to the per-team
+   SPA so the hero / workers / decisions panels match SSR exactly. */
+
 :root {
   color-scheme: light dark;
-  --bg: #ffffff;
-  --fg: #0a0a0a;
-  --muted: #6b6b6b;
+  --bg: #f5f5f4;
+  --fg: #1c1917;
+  --muted: #78716c;
+  --card: #ffffff;
+  --border: #e7e5e4;
+  --accent: #15803d;
+  --warn: #b45309;
+  --error: #b91c1c;
+  --pill-bg: #f5f5f4;
+  --code-bg: #fafaf9;
+  --info: #2563eb;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0a0a0a;
-    --fg: #f5f5f5;
-    --muted: #a0a0a0;
+    --bg: #0c0a09;
+    --fg: #fafaf9;
+    --muted: #a8a29e;
+    --card: #1c1917;
+    --border: #292524;
+    --accent: #22c55e;
+    --warn: #f59e0b;
+    --error: #ef4444;
+    --pill-bg: #292524;
+    --code-bg: #1c1917;
+    --info: #60a5fa;
   }
 }
 
+* { box-sizing: border-box; }
+
 body {
-  margin: 0;
-  padding: 24px;
+  margin: 0 auto;
+  padding: 16px 16px 64px;
   background: var(--bg);
   color: var(--fg);
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   font-size: 15px;
-  line-height: 1.5;
+  line-height: 1.4;
+  max-width: 960px;
 }
+
+/* --- Bridge-console palette (per-team detail) ----------------------
+   Scoped under body.team-detail-page (same selector as the SSR page)
+   so the SPA picks up the dark bridge ground + role tag colours
+   without diverging from SSR. */
+body.team-detail-page {
+  --c-bg:              #0a0d12;
+  --c-panel:           #11151c;
+  --c-panel-alt:       #161b24;
+  --c-tile:            #1c2230;
+  --c-tile-hover:      #232a3a;
+  --c-rule:            #181d26;
+  --c-border:          #1f2632;
+  --c-border-2:        #2a3140;
+  --c-border-hover:    #4a5160;
+  --c-placeholder-dim: #4a5161;
+  --c-text:            #e8e6df;
+  --c-text-muted:      #9aa1ad;
+  --c-text-dim:        #6a7280;
+  --c-signal:          #ffb347;
+  --c-signal-text:     #ffb347;
+  --c-signal-accent:   #ffd17a;
+  --c-signal-hover:    #ffc070;
+  --c-signal-paused:   #d29a4a;
+  --c-on-signal:       #0a0d12;
+  --c-role-reviewer:   #6cb6ff;
+  --c-role-integrator: #7fc88f;
+  --c-role-planner:    #d27ed2;
+  --c-azure:           #7dd3fc;
+  --c-plum:            #a78bfa;
+  --c-error:           #ef4444;
+  --c-error-text:      #fca5a5;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: 'Bricolage Grotesque', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background-image: radial-gradient(circle at 1px 1px, rgba(255,255,255,0.018) 1px, transparent 0);
+  background-size: 16px 16px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+@media (prefers-color-scheme: light) {
+  body.team-detail-page {
+    --c-bg:              #fafbfd;
+    --c-panel:           #ffffff;
+    --c-panel-alt:       #f3f5f8;
+    --c-tile:            #eef1f6;
+    --c-tile-hover:      #e2e6ec;
+    --c-rule:            #e6e9ef;
+    --c-border:          #d8dde4;
+    --c-border-2:        #c1c7d0;
+    --c-border-hover:    #8a92a0;
+    --c-placeholder-dim: #b5bbc4;
+    --c-text:            #15202b;
+    --c-text-muted:      #4a5560;
+    --c-text-dim:        #6f7682;
+    --c-signal:          #c97800;
+    --c-signal-text:     #9a5e00;
+    --c-signal-accent:   #a35e00;
+    --c-signal-hover:    #b06a00;
+    --c-signal-paused:   #8c5a14;
+    --c-on-signal:       #fffaf0;
+    --c-on-signal-warm:  #fffaf0;
+    --c-role-reviewer:   #1f5fa6;
+    --c-role-integrator: #2f7a3a;
+    --c-role-planner:    #8b3a8b;
+    --c-azure:           #0c79a0;
+    --c-plum:            #6b46c1;
+    --c-error:           #b91c1c;
+    --c-error-text:      #b91c1c;
+  }
+}
+
+/* --- SPA layout shell ------------------------------------------- */
+
+.spa-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--c-border, var(--border));
+}
+.spa-header h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-family: 'Fraunces', Georgia, serif;
+}
+.spa-header .spa-conn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--c-text-muted, var(--muted));
+}
+.spa-conn .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--c-text-dim, var(--muted));
+}
+.spa-conn .dot.live          { background: var(--accent); box-shadow: 0 0 8px rgba(34,197,94,0.4); }
+.spa-conn .dot.connecting,
+.spa-conn .dot.reconnecting,
+.spa-conn .dot.loading       { background: var(--warn); }
+.spa-conn .dot.error         { background: var(--error); }
+
+.spa-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* --- Hero panel ------------------------------------------------- */
+
+.hero {
+  border-radius: 12px;
+  padding: 20px 22px;
+  margin: 0;
+  background: linear-gradient(135deg, var(--c-panel) 0%, var(--c-panel-alt) 100%);
+  border: 1px solid var(--c-border);
+}
+.status-headline-row {
+  display: flex; align-items: flex-start; gap: 16px;
+  margin: 0 0 14px 0;
+}
+.status-lamp {
+  display: inline-block;
+  width: 12px; height: 12px;
+  margin-top: 12px;
+  border-radius: 50%;
+  background: var(--c-signal);
+  box-shadow:
+    0 0 0 4px rgba(255, 179, 71, 0.10),
+    0 0 18px rgba(255, 179, 71, 0.45);
+  flex: 0 0 auto;
+  animation: bridge-breathe 2.6s ease-in-out infinite;
+}
+@keyframes bridge-breathe {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+.status-headline {
+  font-family: 'Fraunces', Georgia, serif;
+  font-style: italic;
+  font-weight: 500;
+  font-size: 26px;
+  line-height: 1.22;
+  letter-spacing: -0.012em;
+  margin: 0;
+  color: var(--c-text);
+}
+.status-headline.empty { color: var(--c-text-dim); }
+
+.hero-numbers {
+  display: flex; gap: 28px; align-items: baseline; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.hero-numbers .stat { display: flex; align-items: baseline; gap: 8px; }
+.hero-numbers .stat .n {
+  font-weight: 700; letter-spacing: -0.02em; line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text);
+}
+.hero-numbers .stat.big .n { font-size: 48px; }
+.hero-numbers .stat.secondary .n { font-size: 24px; }
+.hero-numbers .stat .lbl {
+  color: var(--c-text-muted);
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+}
+
+.hero-chips {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 10px;
+}
+.hero-chips .chip {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.hero-chips .chip .role { color: var(--c-text-muted); }
+.hero-chips .chip .count {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 600;
+  color: var(--c-text);
+  font-variant-numeric: tabular-nums;
+}
+.hero-chips .chip.zero .count { color: var(--c-text-muted); }
+
+.hero-bar-label {
+  color: var(--c-text-muted); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  margin: 0 0 4px 0;
+}
+.stage-bar {
+  display: flex;
+  width: 100%;
+  height: 28px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--c-border);
+  background: var(--c-panel-alt);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.stage-bar .segment {
+  min-width: 40px;
+  padding: 0 8px;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  color: #0c0a09;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-right: 1px solid rgba(255,255,255,0.5);
+}
+.stage-bar .segment:last-child { border-right: none; }
+.stage-bar .segment .count { font-variant-numeric: tabular-nums; font-weight: 700; }
+.stage-bar-empty {
+  color: var(--c-text-muted); font-style: italic; font-size: 13px;
+  padding: 6px 0;
+}
+
+@media (max-width: 720px) {
+  .hero-numbers .stat.big .n { font-size: 40px; }
+  .hero-numbers .stat.secondary .n { font-size: 22px; }
+  .stage-bar { height: 32px; font-size: 10px; }
+  .stage-bar .segment { min-width: 36px; padding: 0 6px; }
+}
+
+/* --- Workers panel ---------------------------------------------- */
+
+.workers-panel {
+  background: var(--c-panel);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 20px 22px;
+}
+.panel-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+  margin: 0 0 10px 0;
+  display: flex; align-items: center; gap: 10px;
+  font-weight: 600;
+}
+.panel-label::after {
+  content: "";
+  flex: 1; height: 1px;
+  background: linear-gradient(to right, var(--c-border), transparent);
+}
+.panel-label .count { color: var(--c-signal-text); font-weight: 600; }
+
+.workers { display: flex; flex-direction: column; gap: 0; }
+.worker-row {
+  display: grid;
+  grid-template-columns: minmax(180px, auto) auto 1fr auto;
+  gap: 18px;
+  align-items: baseline;
+  padding: 10px 0;
+  border-top: 1px dashed var(--c-rule);
+}
+.worker-row:first-child { border-top: none; padding-top: 4px; }
+.worker-row:last-child  { padding-bottom: 2px; }
+.worker-row .worker-name {
+  font-family: 'Fraunces', Georgia, serif;
+  font-weight: 500;
+  font-size: 17px;
+  color: var(--c-text);
+  letter-spacing: -0.003em;
+}
+.worker-row .role-tag {
+  display: inline-block;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  padding: 2px 7px;
+  border-radius: 2px;
+  border: 1px solid currentColor;
+  line-height: 1.4;
+  color: var(--c-text-muted);
+}
+.worker-row .role-tag.coder      { color: var(--c-signal-text); }
+.worker-row .role-tag.reviewer   { color: var(--c-role-reviewer); }
+.worker-row .role-tag.integrator { color: var(--c-role-integrator); }
+.worker-row .role-tag.planner    { color: var(--c-role-planner); }
+.worker-row .worker-doing {
+  color: var(--c-text-muted);
+  font-size: 14px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.worker-row .worker-doing.empty { color: var(--c-text-dim); font-style: italic; }
+.worker-row .worker-age {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--c-text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.workers-empty { color: var(--c-text-dim); font-style: italic; font-size: 13px; padding: 6px 0 2px; }
+
+@media (max-width: 720px) {
+  .worker-row {
+    grid-template-columns: 1fr auto;
+    gap: 6px 12px;
+  }
+  .worker-row .worker-doing { grid-column: 1 / -1; white-space: normal; }
+}
+
+/* --- Tasks table ------------------------------------------------ */
+
+.tasks-panel {
+  background: var(--c-panel);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 20px 22px;
+}
+table.tasks { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.tasks th, table.tasks td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--c-rule);
+  vertical-align: top;
+  color: var(--c-text);
+}
+table.tasks th {
+  color: var(--c-text-dim);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+table.tasks td.id {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--c-text-muted);
+}
+table.tasks .assignee { color: var(--c-text-muted); font-size: 12px; }
+table.tasks .assignee.gone { opacity: 0.55; text-decoration: line-through; }
+table.tasks .assignee.gone::after { content: " (gone)"; text-decoration: none; font-style: italic; }
+table.tasks .assignee.derived { font-style: italic; }
+table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: nowrap; }
+
+/* Stage pill — colour-coded by lifecycle. Mirrors SSR stage classes. */
+.stage {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+.stage.proposed          { background: var(--c-panel-alt); color: var(--c-text-muted); }
+.stage.specced           { background: var(--c-panel-alt); color: var(--c-azure); }
+.stage.awaiting_approval { background: var(--c-azure); color: var(--c-on-signal); }
+.stage.planning          { background: var(--c-panel-alt); color: var(--c-signal-text); border: 1px solid var(--c-signal-text); }
+.stage.coding            { background: var(--c-signal); color: var(--c-on-signal); }
+.stage.reviewing         { background: var(--c-panel-alt); color: var(--c-role-reviewer); border: 1px solid var(--c-role-reviewer); }
+.stage.integrating       { background: var(--c-role-integrator); color: var(--c-on-signal); }
+.stage.blocked           { background: var(--c-plum); color: var(--c-on-signal); }
+.stage.done              { background: var(--c-panel-alt); color: var(--c-role-integrator); }
+.stage.shelved           { background: var(--c-panel-alt); color: var(--c-text-muted); }
+.stage.cancelled         { background: var(--c-panel-alt); color: var(--c-text-dim); }
+
+.stale-pill {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px dashed var(--c-signal-text);
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--c-signal-text);
+  vertical-align: middle;
+}
+
+.tasks-empty { color: var(--c-text-dim); font-style: italic; font-size: 13px; padding: 6px 0; }

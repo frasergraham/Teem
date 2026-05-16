@@ -1,17 +1,73 @@
 import { create } from 'zustand';
 
-// Shape pinned from docs/dashboard-spa.md §6. These are deliberately
-// loose where Phase 2b (t-e2da3b70) has not landed the JSON-tagged Go
-// structs yet; the doc is the authoritative contract until codegen
-// replaces these hand-typed mirrors.
-//
-// TODO(t-e2da3b70 codegen): regenerate from `dashboardTeam` json tags
-// once Phase 2b lands so component subscribers get exhaustive fields.
+// Shape mirrors cmd/teem/api_state.go (apiTeamStatePayload) and the
+// dashboardTeam / hero / worker / task structs in cmd/teem/ui.go. Phase
+// 2c-ii adds enough typed fields for HeroPanel / WorkersPanel /
+// TasksTable to render without `unknown` casts. Anything the components
+// don't read yet stays loose.
 
 export interface TeamMeta {
   id: string;
   name: string;
-  registered_at?: string;
+  registered_ago?: string;
+}
+
+export interface AgentChip {
+  role: string;
+  count: number;
+}
+
+export interface StageBarSegment {
+  stage: string;
+  count: number;
+  width_pct: number;
+  color_hex: string;
+  task_ids?: string[];
+  task_id_list?: string;
+}
+
+export interface TeamHero {
+  active_agents_total: number;
+  open_tasks_total: number;
+  agent_chips: AgentChip[];
+  stage_bar: StageBarSegment[];
+  has_stage_activity: boolean;
+}
+
+export interface Worker {
+  agent_id: string;
+  persona: string;
+  role: string;
+  role_tag: string;
+  role_colour_class: string;
+  activity: string;
+  age: string;
+}
+
+export interface DashboardTask {
+  id: string;
+  title: string;
+  status: string;
+  stage: string;
+  stage_ago: string;
+  assigned_to: string;
+  assignee_active?: boolean;
+  assignee_derived?: boolean;
+  stale?: boolean;
+  url?: string;
+}
+
+export interface TaskBuckets {
+  open: DashboardTask[];
+  awaiting_approval?: unknown[];
+  shelved?: DashboardTask[];
+  recent_done?: DashboardTask[];
+}
+
+export interface LeaderStatus {
+  agent_id: string;
+  text: string;
+  updated_ago: string;
 }
 
 export interface AuditEvent {
@@ -31,28 +87,24 @@ export interface Envelope {
   reason?: string;
 }
 
-// Snapshot payload — see docs/dashboard-spa.md §6. Treated as a loose
-// projection until Phase 2b nails the Go-side json tags; components
-// that need a field reach for it through a selector and accept
-// `unknown`-ish until then.
 export interface StateSnapshot {
   team: TeamMeta;
-  hero?: unknown;
+  hero: TeamHero;
   agents?: unknown[];
-  workers?: unknown[];
-  tasks?: {
-    open?: unknown[];
-    awaiting_approval?: unknown[];
-    shelved?: unknown[];
-    recent_done?: unknown[];
-  };
+  workers: Worker[];
+  tasks: TaskBuckets;
   decisions?: unknown[];
-  leader_status?: unknown;
+  leader_status: LeaderStatus | null;
   other_statuses?: unknown[];
   pulse?: unknown;
   usage?: unknown | null;
   branches?: { count: number; rows?: unknown[] };
   channels_state?: 'live' | 'fallback';
+  status_headline?: string;
+  has_pricing?: boolean;
+  pricing_stale?: boolean;
+  hero_spend_usd?: number;
+  hero_spend_display?: string;
   now?: string;
   etag?: string;
 }
@@ -78,7 +130,7 @@ export interface TeamState {
   conn: ConnState;
 
   // Ring of the last 50 audit events, newest first. Components like
-  // EventsLog (Phase 2c-ii+) will subscribe to this slice.
+  // EventsLog (Phase 2c-iii+) will subscribe to this slice.
   events: AuditEvent[];
 
   // Mutators (called by dispatch.ts / ws.ts / client.ts).
