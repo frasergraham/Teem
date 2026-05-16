@@ -100,6 +100,12 @@ const (
 	// {state: "active"|"throttled", used, cap, reason}. One event per
 	// flip, not per check.
 	KindUsageThrottle Kind = "usage_throttle"
+	// KindPulseTick is emitted by the pulse loop after every leader
+	// tick (scheduled or nudged). Message carries the leader's text
+	// output (or the error string when meta.error is true). Meta
+	// carries trigger, duration_ms, tool_calls, chat_session_id, and
+	// either assistant_bytes or error=true.
+	KindPulseTick Kind = "pulse_tick"
 )
 
 // PMOutcomeXxx are the values the project-manager loop writes into

@@ -63,6 +63,11 @@ func TestIsMessagingKind(t *testing.T) {
 			e:    audit.Event{Kind: audit.KindJobComplete, AgentID: "worker-una"},
 			want: false,
 		},
+		{
+			name: "pulse_tick fires",
+			e:    audit.Event{Kind: audit.KindPulseTick, AgentID: "leader"},
+			want: true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -166,6 +171,80 @@ func TestFormatter_Blocker(t *testing.T) {
 	if !strings.Contains(msg.Summary, "moved to blocked") {
 		t.Errorf("summary missing tail: %q", msg.Summary)
 	}
+}
+
+func TestFormatter_PulseTickMessage(t *testing.T) {
+	t.Run("uses leader status text when available", func(t *testing.T) {
+		f := MessageFormatter{
+			TeamID:           "foo",
+			DashboardBaseURL: "https://dash.example",
+			LeaderStatus:     func() string { return "Reviewing T1 + T6 diff" },
+		}
+		msg, ok := f.Format(audit.Event{
+			Kind:    audit.KindPulseTick,
+			AgentID: "leader",
+			Meta:    map[string]any{"trigger": "schedule", "duration_ms": 1234},
+		})
+		if !ok {
+			t.Fatal("expected ok")
+		}
+		if msg.Title != "[foo] Pulse tick" {
+			t.Errorf("title = %q", msg.Title)
+		}
+		if msg.Summary != "Reviewing T1 + T6 diff" {
+			t.Errorf("summary = %q", msg.Summary)
+		}
+		if msg.Severity != SeverityInfo {
+			t.Errorf("severity = %s, want info", msg.Severity)
+		}
+		if msg.Link != "" {
+			t.Errorf("link = %q, want empty (tailnet-only)", msg.Link)
+		}
+		if msg.AgentID != "leader" || msg.TeamID != "foo" {
+			t.Errorf("identity fields wrong: %+v", msg)
+		}
+	})
+
+	t.Run("falls back to meta.summary when status empty", func(t *testing.T) {
+		f := MessageFormatter{TeamID: "foo", LeaderStatus: func() string { return "" }}
+		msg, ok := f.Format(audit.Event{
+			Kind:    audit.KindPulseTick,
+			AgentID: "leader",
+			Meta:    map[string]any{"summary": "Idle tick, no tool calls."},
+		})
+		if !ok {
+			t.Fatal("expected ok")
+		}
+		if msg.Summary != "Idle tick, no tool calls." {
+			t.Errorf("summary = %q", msg.Summary)
+		}
+	})
+
+	t.Run("falls back to generic text when nothing else", func(t *testing.T) {
+		f := MessageFormatter{TeamID: "foo"}
+		msg, ok := f.Format(audit.Event{
+			Kind:    audit.KindPulseTick,
+			AgentID: "leader",
+		})
+		if !ok {
+			t.Fatal("expected ok")
+		}
+		if !strings.Contains(msg.Summary, "Pulse tick") {
+			t.Errorf("summary = %q, want generic fallback", msg.Summary)
+		}
+	})
+
+	t.Run("clips long status text", func(t *testing.T) {
+		long := strings.Repeat("x", 500)
+		f := MessageFormatter{TeamID: "foo", LeaderStatus: func() string { return long }}
+		msg, ok := f.Format(audit.Event{Kind: audit.KindPulseTick, AgentID: "leader"})
+		if !ok {
+			t.Fatal("expected ok")
+		}
+		if len(msg.Summary) > 220 {
+			t.Errorf("summary length = %d, expected clipped", len(msg.Summary))
+		}
+	})
 }
 
 func TestFormatter_LeaderError(t *testing.T) {

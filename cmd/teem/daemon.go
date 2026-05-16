@@ -2065,6 +2065,12 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 			TeamID:           t.ID,
 			DashboardBaseURL: d.messagingCfg.DashboardBaseURL,
 			TaskTitle:        messaging.FromPlan(planStore),
+			LeaderStatus: func() string {
+				if e, ok := leaderStatusStore.Get("leader"); ok {
+					return e.Text
+				}
+				return ""
+			},
 		}
 		messagingHook = makeMessagingHook(d.messagingNotifier, fmtr, d.messagingDedup, d.messagingReplyTokens)
 	}

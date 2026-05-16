@@ -21,6 +21,10 @@ type MessageFormatter struct {
 	TeamID           string
 	DashboardBaseURL string
 	TaskTitle        taskTitleLookup
+	// LeaderStatus returns the leader's most recent update_leader_status
+	// text (or "" when never set). Optional — nil falls back to the
+	// generic "see dashboard" line on pulse_tick messages.
+	LeaderStatus func() string
 }
 
 // FromPlan returns a TaskTitle lookup backed by a plan.Plan. Safe to
@@ -107,6 +111,21 @@ func (f MessageFormatter) Format(e audit.Event) (Message, bool) {
 			AgentID:  e.AgentID,
 			TeamID:   f.TeamID,
 		}, true
+
+	case audit.KindPulseTick:
+		return Message{
+			Title:    fmt.Sprintf("[%s] Pulse tick", f.TeamID),
+			Summary:  f.summaryPulseTick(e),
+			Severity: SeverityInfo,
+			// Pulse-tick link intentionally empty: the dashboard is
+			// tailnet-only, and the Telegram message reaches the
+			// operator on the public internet where the link wouldn't
+			// resolve.
+			Link:    "",
+			TaskID:  taskID,
+			AgentID: e.AgentID,
+			TeamID:  f.TeamID,
+		}, true
 	}
 	return Message{}, false
 }
@@ -129,6 +148,8 @@ func isMessagingKind(e audit.Event) bool {
 		return sev == "question"
 	case audit.KindJobError:
 		return e.AgentID == "leader"
+	case audit.KindPulseTick:
+		return true
 	}
 	return false
 }
@@ -177,6 +198,22 @@ func (f MessageFormatter) summaryQuestion(taskID, body string) string {
 		return fmt.Sprintf("%s (see task %s)", body, shortTaskID(taskID))
 	}
 	return body
+}
+
+// summaryPulseTick prefers the leader's most recent update_leader_status
+// text, then meta.summary, then a generic fallback. The leader's full
+// pulse-tick claude output (in e.Message) is intentionally NOT used — it
+// can be many KB and is for the audit log, not a phone notification.
+func (f MessageFormatter) summaryPulseTick(e audit.Event) string {
+	if f.LeaderStatus != nil {
+		if s := strings.TrimSpace(f.LeaderStatus()); s != "" {
+			return clipString(s, 200)
+		}
+	}
+	if s, _ := e.Meta["summary"].(string); strings.TrimSpace(s) != "" {
+		return clipString(strings.TrimSpace(s), 200)
+	}
+	return "Pulse tick — see dashboard for details."
 }
 
 func (f MessageFormatter) summaryLeaderError(jobID, body string) string {
