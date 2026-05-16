@@ -640,6 +640,7 @@ func branchNamePeek(rows []dashboardBranch, limit int) string {
 // step up the saturation; terminal stages are green / red / grey.
 var stageBarColors = map[plan.Stage]string{
 	plan.StageProposed:         "#cbd5e1",
+	plan.StageReady:            "#fde047",
 	plan.StageSpecced:          "#94a3b8",
 	plan.StageAwaitingApproval: "#f59e0b",
 	plan.StagePlanning:         "#7dd3fc",
@@ -1365,24 +1366,26 @@ func stageOrder(s string) int {
 	switch plan.Stage(s) {
 	case plan.StageProposed:
 		return 0
-	case plan.StageSpecced:
+	case plan.StageReady:
 		return 1
-	case plan.StageAwaitingApproval:
+	case plan.StageSpecced:
 		return 2
-	case plan.StagePlanning:
+	case plan.StageAwaitingApproval:
 		return 3
-	case plan.StageCoding:
+	case plan.StagePlanning:
 		return 4
-	case plan.StageReviewing:
+	case plan.StageCoding:
 		return 5
-	case plan.StageIntegrating:
+	case plan.StageReviewing:
 		return 6
-	case plan.StageVerified:
+	case plan.StageIntegrating:
 		return 7
-	case plan.StageBlocked:
+	case plan.StageVerified:
 		return 8
-	case plan.StageAbandoned:
+	case plan.StageBlocked:
 		return 9
+	case plan.StageAbandoned:
+		return 10
 	}
 	return 99
 }

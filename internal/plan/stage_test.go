@@ -55,6 +55,60 @@ func TestCanTransition_ShelvedRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCanTransition_ReadyEdges(t *testing.T) {
+	// Allowed → ready: proposed / specced / shelved / blocked. The
+	// "ready" stage is the operator's "pre-flighted, free to dispatch"
+	// signal so only un-dispatched / paused tasks can flip into it.
+	for _, from := range []Stage{StageProposed, StageSpecced, StageShelved, StageBlocked} {
+		if !CanTransition(from, StageReady) {
+			t.Errorf("%q → ready should be allowed", from)
+		}
+	}
+	// Forbidden → ready: active and terminal stages. A coding/reviewing
+	// task is already past the "should we do this?" gate, so going back
+	// to ready would be a category error.
+	for _, from := range []Stage{
+		StageAwaitingApproval, StagePlanning, StageCoding,
+		StageReviewing, StageIntegrating, StageVerified, StageAbandoned,
+	} {
+		if CanTransition(from, StageReady) {
+			t.Errorf("%q → ready should be forbidden", from)
+		}
+	}
+	// Allowed exits from ready: dispatch (coding / planning), revert
+	// (specced / proposed), or pause (blocked / shelved / abandoned).
+	for _, to := range []Stage{
+		StageCoding, StagePlanning, StageSpecced, StageProposed,
+		StageBlocked, StageShelved, StageAbandoned,
+	} {
+		if !CanTransition(StageReady, to) {
+			t.Errorf("ready → %q should be allowed", to)
+		}
+	}
+	// Forbidden exits from ready: skipping straight to review /
+	// integrate / verified bypasses the "code happened" gate.
+	for _, to := range []Stage{StageReviewing, StageIntegrating, StageVerified, StageAwaitingApproval} {
+		if CanTransition(StageReady, to) {
+			t.Errorf("ready → %q should be forbidden", to)
+		}
+	}
+}
+
+func TestReady_AppearsInAllStages(t *testing.T) {
+	for _, s := range AllStages {
+		if s == StageReady {
+			return
+		}
+	}
+	t.Error("AllStages should include ready")
+}
+
+func TestReady_StatusForStageIsPending(t *testing.T) {
+	if got := statusForStage(StageReady); got != StatusPending {
+		t.Errorf("statusForStage(ready) = %q, want pending", got)
+	}
+}
+
 func TestUpdateTask_RejectsInvalidStageTransition(t *testing.T) {
 	p := openTest(t)
 	defer p.Close()

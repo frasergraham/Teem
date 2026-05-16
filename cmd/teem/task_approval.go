@@ -23,6 +23,13 @@ const (
 	decisionComment decision = "comment"
 )
 
+// errReadyFromTerminal is returned by markTaskReady when the caller
+// tries to flip a verified or abandoned task into ready. Mapped to
+// HTTP 409 by the route handler; reusing the stage-conflict status
+// since the task is in a stage incompatible with the operator's
+// "pre-flighted, dispatch this" signal.
+var errReadyFromTerminal = errors.New("task is terminal (verified/abandoned); cannot mark ready")
+
 // errNotAwaitingApproval is returned by decideTask when the caller
 // tries to approve/reject/comment on a task whose Stage isn't
 // awaiting_approval. Mapped to HTTP 409 by the route handlers.
@@ -261,6 +268,95 @@ func resolveActionInput(action string, req taskActionRequest) (decision, string,
 		return decisionComment, text, nil
 	}
 	return "", "", fmt.Errorf("unknown action: %q (want approve|reject|comment)", action)
+}
+
+// markTaskReady flips a task into plan.StageReady — the operator's
+// "pre-flighted, free to dispatch" signal. Idempotent on already-ready
+// tasks (returns the existing task without writing). Returns
+// errReadyFromTerminal when the task is verified or abandoned;
+// plan.ErrTaskNotFound when the id is missing; plan.ErrInvalidStage
+// (or errStageRaced after retries) when the matrix forbids the move
+// from the task's current stage.
+//
+// Race handling: the operator can double-click the button, and the
+// PM loop can also be moving the task. Each attempt locks expected
+// = currentStage via MutateTaskIfStage so two concurrent flips can't
+// both pass the read-then-write check. On ErrStageChanged we re-read
+// and retry up to maxReadyRetries.
+const maxReadyRetries = 3
+
+func markTaskReady(rt *registeredTeam, taskID string) (plan.Task, error) {
+	if rt == nil || rt.plan == nil {
+		return plan.Task{}, errors.New("plan unavailable")
+	}
+	for i := 0; i < maxReadyRetries; i++ {
+		current, ok := rt.plan.Get(taskID)
+		if !ok {
+			return plan.Task{}, plan.ErrTaskNotFound
+		}
+		if current.Stage == plan.StageReady {
+			return current, nil
+		}
+		if current.Stage == plan.StageVerified || current.Stage == plan.StageAbandoned {
+			return plan.Task{}, errReadyFromTerminal
+		}
+		updated, err := rt.plan.MutateTaskIfStage(taskID, current.Stage, func(plan.Task) plan.UpdateInput {
+			return plan.UpdateInput{Stage: plan.StageReady}
+		})
+		if errors.Is(err, plan.ErrStageChanged) {
+			continue
+		}
+		if err != nil {
+			return plan.Task{}, err
+		}
+		if rt.auditSink != nil {
+			_ = rt.auditSink.Write(audit.Event{
+				Timestamp: time.Now().UTC(),
+				AgentID:   "operator",
+				Kind:      audit.KindTaskStageChanged,
+				Message:   "operator marked task ready",
+				Meta: map[string]any{
+					"task_id": taskID,
+					"from":    string(current.Stage),
+					"to":      string(plan.StageReady),
+				},
+			})
+		}
+		return updated, nil
+	}
+	return plan.Task{}, errStageRaced
+}
+
+// handleControlTaskReady is the JSON API surface for POST
+// /control/teams/<id>/tasks/<task_id>/ready. Unauth on purpose (tailnet
+// boundary, same model as the dashboard's pulse-action POSTs); body is
+// ignored.
+func (d *daemon) handleControlTaskReady(w http.ResponseWriter, r *http.Request, rt *registeredTeam, taskID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isSafeID(taskID) {
+		http.Error(w, "bad task id", http.StatusBadRequest)
+		return
+	}
+	// Drain (but ignore) any body — keeps clients that send `{}` happy.
+	_, _ = io.Copy(io.Discard, io.LimitReader(r.Body, 64*1024))
+	r.Body.Close()
+
+	task, err := markTaskReady(rt, taskID)
+	switch {
+	case errors.Is(err, plan.ErrTaskNotFound):
+		http.NotFound(w, r)
+		return
+	case errors.Is(err, errReadyFromTerminal), errors.Is(err, errStageRaced), errors.Is(err, plan.ErrInvalidStage):
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
 }
 
 // splitTaskActionPath parses "<task_id>/<action>" out of the control

@@ -10,7 +10,15 @@ type Stage string
 
 const (
 	StageProposed Stage = "proposed"
-	StageSpecced  Stage = "specced"
+	// StageReady marks a task the operator has pre-flighted — title /
+	// scope / acceptance criteria look correct, and the leader is free
+	// to dispatch it on the next pulse without waiting for further
+	// human input. Distinct from StageSpecced (an LLM-side judgement
+	// that the spec field is filled in) and from StageProposed (no
+	// human signal at all). The default pulse wake prompt instructs
+	// the leader to pick up ready tasks before anything else.
+	StageReady   Stage = "ready"
+	StageSpecced Stage = "specced"
 	// StageAwaitingApproval marks a task whose plan/design needs
 	// explicit operator signoff before code work resumes. Pairs with
 	// Status=in_progress (the task is "live" — the leader is waiting
@@ -41,6 +49,7 @@ const (
 // the transition matrix is closed-set checked, not open enumeration.
 var AllStages = []Stage{
 	StageProposed,
+	StageReady,
 	StageSpecced,
 	StageAwaitingApproval,
 	StagePlanning,
@@ -94,6 +103,7 @@ func IsValidStage(s Stage) bool {
 var allowedTransitions = map[Stage]map[Stage]bool{
 	StageProposed: {
 		StageSpecced:          true,
+		StageReady:            true,
 		StageAwaitingApproval: true,
 		StagePlanning:         true,
 		StageCoding:           true,
@@ -103,12 +113,26 @@ var allowedTransitions = map[Stage]map[Stage]bool{
 	},
 	StageSpecced: {
 		StageProposed:         true,
+		StageReady:            true,
 		StageAwaitingApproval: true,
 		StagePlanning:         true,
 		StageCoding:           true,
 		StageBlocked:          true,
 		StageShelved:          true,
 		StageAbandoned:        true,
+	},
+	StageReady: {
+		// "Ready" is the operator's "go ahead and dispatch this"
+		// signal. From here the leader hands the task to a worker
+		// (coding / planning), or the operator changes their mind
+		// (back to specced / proposed, or shelved / abandoned).
+		StageProposed:  true,
+		StageSpecced:   true,
+		StagePlanning:  true,
+		StageCoding:    true,
+		StageBlocked:   true,
+		StageShelved:   true,
+		StageAbandoned: true,
 	},
 	StageAwaitingApproval: {
 		// APPROVE → coding, REJECT → shelved, COMMENT → self,
@@ -163,6 +187,7 @@ var allowedTransitions = map[Stage]map[Stage]bool{
 	StageBlocked: {
 		// Unblock back into whichever stage was current. Callers pick.
 		StageProposed:         true,
+		StageReady:            true,
 		StageSpecced:          true,
 		StageAwaitingApproval: true,
 		StagePlanning:         true,
@@ -175,6 +200,7 @@ var allowedTransitions = map[Stage]map[Stage]bool{
 	StageShelved: {
 		// Coming off the shelf — operator picks where to resume.
 		StageProposed:         true,
+		StageReady:            true,
 		StageSpecced:          true,
 		StageAwaitingApproval: true,
 		StagePlanning:         true,

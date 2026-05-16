@@ -1,3 +1,7 @@
+import { useState } from 'react';
+
+import { APIError } from '../api/client';
+import { markReady } from '../api/control';
 import { DashboardTask, useTeamStore } from '../store/team';
 
 // TasksTable renders snapshot.tasks.open — the per-team open-task list.
@@ -59,6 +63,7 @@ function TaskRow({ task }: { task: DashboardTask }) {
             STALE
           </span>
         )}
+        <ReadyAffordance task={task} />
       </td>
       <td
         className={assigneeClass}
@@ -68,6 +73,84 @@ function TaskRow({ task }: { task: DashboardTask }) {
       </td>
       <td className="when">{task.stage_ago}</td>
     </tr>
+  );
+}
+
+// ReadyAffordance is the per-row "→ ready" control. For proposed /
+// specced tasks it renders a small button that flips the stage to
+// `ready` via POST /control/teams/<id>/tasks/<task_id>/ready. The
+// optimistic patch lands instantly; on HTTP error we roll back and
+// surface the message via title= so the operator can hover for context
+// (no toast infra yet). For `ready` tasks we render a lit indicator —
+// no button — so the operator can see the signal is already set.
+function ReadyAffordance({ task }: { task: DashboardTask }) {
+  const teamID = useTeamStore((s) => s.teamID);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (task.stage === 'ready') {
+    return (
+      <span className="ready-dot" title="operator marked this task ready for dispatch" aria-label="ready">
+        ●
+      </span>
+    );
+  }
+  if (task.stage !== 'proposed' && task.stage !== 'specced') return null;
+  if (!teamID) return null;
+
+  async function onClick() {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    const prevStage = task.stage;
+    // Optimistic patch: flip the stage in-place so the row repaints
+    // immediately. Roll back on HTTP error.
+    useTeamStore.setState((state) => {
+      if (!state.snapshot) return {};
+      const open = state.snapshot.tasks.open.map((row) =>
+        row.id === task.id ? { ...row, stage: 'ready' } : row,
+      );
+      return {
+        snapshot: {
+          ...state.snapshot,
+          tasks: { ...state.snapshot.tasks, open },
+        },
+      };
+    });
+    try {
+      await markReady(teamID!, task.id);
+    } catch (err) {
+      // Roll the optimistic patch back to whatever stage the row had.
+      useTeamStore.setState((state) => {
+        if (!state.snapshot) return {};
+        const open = state.snapshot.tasks.open.map((row) =>
+          row.id === task.id ? { ...row, stage: prevStage } : row,
+        );
+        return {
+          snapshot: {
+            ...state.snapshot,
+            tasks: { ...state.snapshot.tasks, open },
+          },
+        };
+      });
+      if (err instanceof APIError) setError(err.message);
+      else setError(String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="mark-ready-btn"
+      onClick={onClick}
+      disabled={submitting}
+      title={error ?? 'mark ready for dispatch — leader picks it up on the next pulse tick'}
+      aria-label={`mark ${task.id} ready`}
+    >
+      → ready
+    </button>
   );
 }
 

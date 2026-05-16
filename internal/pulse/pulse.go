@@ -1016,6 +1016,7 @@ const defaultWakePrompt = `You're being woken on a pulse tick. Two things are no
 2. CALL update_leader_status before ending your turn — every tick, even an idle one. The status line is the canonical "what's the leader doing"; a stale status erodes operator trust.
 
 Scan in this order:
+- list_tasks(stage="ready") — operator-pre-flighted tasks awaiting your dispatch; highest-priority signal; pick them up before anything else.
 - list_tasks(open_only=true) — tasks that transitioned out of awaiting_approval (operator approvals append [APPROVED …] to notes) need implementation work dispatched or sub-tasks filed.
 - list_agents — stuck workers (state=busy with stale last_seen) or unexpectedly-stopped agents need reincarnation or escalation.
 - query_audit — recent operator decisions, blockers, unusual events.

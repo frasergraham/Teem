@@ -426,6 +426,7 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
   font-family: 'JetBrains Mono', ui-monospace, monospace;
 }
 .stage.proposed          { background: var(--c-panel-alt); color: var(--c-text-muted); }
+.stage.ready             { background: var(--c-signal-accent); color: var(--c-on-signal); }
 .stage.specced           { background: var(--c-panel-alt); color: var(--c-azure); }
 .stage.awaiting_approval { background: var(--c-azure); color: var(--c-on-signal); }
 .stage.planning          { background: var(--c-panel-alt); color: var(--c-signal-text); border: 1px solid var(--c-signal-text); }
@@ -450,6 +451,46 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
 }
 
 .tasks-empty { color: var(--c-text-dim); font-style: italic; font-size: 13px; padding: 6px 0; }
+
+/* "→ ready" inline button (TasksTable.tsx). Small, fits next to the
+   stage pill; uses the signal accent so the click target reads as
+   "this advances the pipeline." Disabled while the POST is in
+   flight so an impatient operator can't fire two concurrent
+   requests. */
+.mark-ready-btn {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border: 1px solid var(--c-signal);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--c-signal-text);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.mark-ready-btn:hover:not(:disabled) {
+  background: var(--c-signal);
+  color: var(--c-on-signal);
+}
+.mark-ready-btn:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+/* Ready indicator: tiny lit dot in place of the button once the
+   stage is `ready`. Uses --c-signal-accent so the eye lands on it
+   instantly when scanning the open-tasks list. */
+.ready-dot {
+  display: inline-block;
+  margin-left: 8px;
+  color: var(--c-signal-accent);
+  text-shadow: 0 0 6px var(--c-signal-accent);
+  font-size: 14px;
+  vertical-align: middle;
+  line-height: 1;
+}
 
 /* --- Chat panel -------------------------------------------------
    Mirrors the SSR `.chat-panel` block in cmd/teem/ui_dashboard.html

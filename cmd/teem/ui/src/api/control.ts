@@ -69,6 +69,22 @@ export function rejectTask(
   );
 }
 
+// markReady flips a task into Stage="ready" — the operator's
+// "pre-flighted, free to dispatch" signal. Idempotent on the server:
+// a re-post against an already-ready task returns 200 + the existing
+// task without writing. 409 on terminal stages (verified/abandoned)
+// or on race with a concurrent move into one of them.
+export function markReady(
+  teamID: string,
+  taskID: string,
+  signal?: AbortSignal,
+): Promise<TaskActionResult> {
+  return postJSON<TaskActionResult>(
+    `/control/teams/${encodeURIComponent(teamID)}/tasks/${encodeURIComponent(taskID)}/ready`,
+    { signal },
+  );
+}
+
 export function commentTask(
   teamID: string,
   taskID: string,

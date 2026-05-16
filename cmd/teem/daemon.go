@@ -778,6 +778,12 @@ func (d *daemon) handler() http.Handler {
 			// can't carry the bearer token. The GET on /pulse stays
 			// auth'd; only the action sub-paths are exempt.
 			d.handleControlTeamsItem(w, r)
+		case strings.HasPrefix(path, "/control/teams/") && isDashboardTaskReadyAction(path):
+			// Dashboard "→ ready" button. Same tailnet-boundary auth
+			// model as the pulse actions: the SPA's fetch can't carry
+			// the bearer token, so the unauth path is gated on the
+			// `/tasks/<id>/ready` suffix shape.
+			d.handleControlTeamsItem(w, r)
 		case strings.HasPrefix(path, "/control/teams/") && strings.HasSuffix(path, "/chat"):
 			// Dashboard chat panel. Same tailnet-boundary auth model as
 			// /ping; spawns a one-shot leader `claude -p` and streams
@@ -819,6 +825,20 @@ func isDashboardPulseAction(path string) bool {
 		}
 	}
 	return false
+}
+
+// isDashboardTaskReadyAction reports whether path is the
+// `/control/teams/<id>/tasks/<task_id>/ready` shape (and only that
+// shape). Used to gate the dashboard's "→ ready" button onto the
+// unauth-bypass list alongside pulse actions.
+func isDashboardTaskReadyAction(path string) bool {
+	if !strings.HasSuffix(path, "/ready") {
+		return false
+	}
+	rest := strings.TrimPrefix(path, "/control/teams/")
+	parts := strings.Split(rest, "/")
+	// <team-key>/tasks/<task-id>/ready → 4 parts.
+	return len(parts) == 4 && parts[1] == "tasks" && parts[3] == "ready"
 }
 
 // renderTeamIndex writes a minimal HTML page listing every registered
@@ -1362,6 +1382,13 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 		d.handlePulseControl(w, r, rt, "")
 	case strings.HasPrefix(sub, "pulse/"):
 		d.handlePulseControl(w, r, rt, strings.TrimPrefix(sub, "pulse/"))
+	case strings.HasPrefix(sub, "tasks/") && strings.HasSuffix(sub, "/ready"):
+		// `tasks/<id>/ready` is split out from the decision-action
+		// handler because it has different semantics: no body, idempotent
+		// on re-post, gated on a different (non-awaiting_approval) set
+		// of source stages.
+		inner := strings.TrimSuffix(strings.TrimPrefix(sub, "tasks/"), "/ready")
+		d.handleControlTaskReady(w, r, rt, inner)
 	case strings.HasPrefix(sub, "tasks/"):
 		d.handleControlTaskAction(w, r, rt, strings.TrimPrefix(sub, "tasks/"))
 	default:

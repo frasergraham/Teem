@@ -329,6 +329,143 @@ func TestControlTaskAction_ConcurrentCommentsBothLand(t *testing.T) {
 	}
 }
 
+// --- Task "ready" endpoint -------------------------------------------
+
+// TestControlTaskReady_FlipsProposedToReady covers the happy path: a
+// POST against a proposed task transitions it to `ready` and the JSON
+// response carries the updated task.
+func TestControlTaskReady_FlipsProposedToReady(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, token: "test-token"}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	task, err := rt.plan.AddTask(plan.NewTaskInput{Title: "ready me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/control/teams/alpha/tasks/"+task.ID+"/ready",
+		bytes.NewReader([]byte(`{}`)))
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	var got plan.Task
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v / %s", err, w.Body.String())
+	}
+	if got.Stage != plan.StageReady {
+		t.Errorf("stage = %q want ready", got.Stage)
+	}
+	stored, _ := rt.plan.Get(task.ID)
+	if stored.Stage != plan.StageReady {
+		t.Errorf("stored stage = %q want ready", stored.Stage)
+	}
+	t.Logf("smoke: POST /tasks/%s/ready → %d %s", task.ID, w.Code, w.Body.String())
+}
+
+// TestControlTaskReady_IsIdempotent re-posts against a task that's
+// already in `ready`. The second call must still return 200 + the
+// task (no body change, no error) so a double-click stays a no-op.
+func TestControlTaskReady_IsIdempotent(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, token: "test-token"}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "double-click"})
+
+	url := "/control/teams/alpha/tasks/" + task.ID + "/ready"
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(`{}`)))
+		w := httptest.NewRecorder()
+		d.handler().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("attempt %d: code=%d body=%s", i, w.Code, w.Body.String())
+		}
+	}
+	stored, _ := rt.plan.Get(task.ID)
+	if stored.Stage != plan.StageReady {
+		t.Errorf("stored stage = %q want ready", stored.Stage)
+	}
+}
+
+// TestControlTaskReady_TerminalIs409 covers the only two stages the
+// endpoint refuses outright: verified and abandoned. Both must return
+// 409 (operator can't dispatch something that's done or won't-do).
+func TestControlTaskReady_TerminalIs409(t *testing.T) {
+	for _, terminal := range []plan.Stage{plan.StageVerified, plan.StageAbandoned} {
+		t.Run(string(terminal), func(t *testing.T) {
+			d := &daemon{teams: map[string]*registeredTeam{}, token: "test-token"}
+			rt := newFullTestTeam(t, "alpha")
+			d.teams["alpha"] = rt
+			task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "terminal"})
+			// Walk the matrix into the terminal stage.
+			switch terminal {
+			case plan.StageVerified:
+				for _, s := range []plan.Stage{plan.StageCoding, plan.StageReviewing, plan.StageIntegrating, plan.StageVerified} {
+					if _, err := rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: s}); err != nil {
+						t.Fatalf("walk to %q: %v", s, err)
+					}
+				}
+			case plan.StageAbandoned:
+				if _, err := rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAbandoned}); err != nil {
+					t.Fatalf("walk to abandoned: %v", err)
+				}
+			}
+			req := httptest.NewRequest(http.MethodPost,
+				"/control/teams/alpha/tasks/"+task.ID+"/ready",
+				bytes.NewReader([]byte(`{}`)))
+			w := httptest.NewRecorder()
+			d.handler().ServeHTTP(w, req)
+			if w.Code != http.StatusConflict {
+				t.Errorf("code=%d want 409 (%s) body=%s", w.Code, terminal, w.Body.String())
+			}
+			stored, _ := rt.plan.Get(task.ID)
+			if stored.Stage != terminal {
+				t.Errorf("stage moved despite 409: %q != %q", stored.Stage, terminal)
+			}
+		})
+	}
+}
+
+// TestControlTaskReady_UnauthOK locks in the tailnet-boundary auth
+// model: the endpoint must accept a POST with no Authorization header.
+// The dashboard's SPA fetch can't carry the bearer token, so this gate
+// is the load-bearing one (paired with isDashboardTaskReadyAction's
+// suffix check).
+func TestControlTaskReady_UnauthOK(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, token: "test-token"}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "no auth"})
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/control/teams/alpha/tasks/"+task.ID+"/ready",
+		bytes.NewReader([]byte(`{}`)))
+	// no Authorization header
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("unauth POST got code=%d want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestControlTaskReady_UnknownTaskIs404 — sanity check on the not-found path.
+func TestControlTaskReady_UnknownTaskIs404(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, token: "test-token"}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/control/teams/alpha/tasks/t-does-not-exist/ready",
+		bytes.NewReader([]byte(`{}`)))
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("code=%d want 404", w.Code)
+	}
+}
+
 // seedRepoWithDocsBranchContent builds a temp git repo with a
 // teem/<agentID> branch holding the supplied markdown file. Used by
 // the renderBranchMarkdown unit tests (security + truncation guards).

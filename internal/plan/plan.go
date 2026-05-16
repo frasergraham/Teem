@@ -225,7 +225,7 @@ func isTerminalStatus(s Status) bool {
 // can't disagree about what "reviewing" implies for "open".
 func statusForStage(st Stage) Status {
 	switch st {
-	case StageProposed, StageSpecced:
+	case StageProposed, StageReady, StageSpecced:
 		return StatusPending
 	case StageAwaitingApproval, StagePlanning, StageCoding, StageReviewing, StageIntegrating:
 		return StatusInProgress
