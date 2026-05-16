@@ -373,6 +373,9 @@ func (d *daemon) runTelegramLeaderTurn(turnCtx context.Context, cancel context.C
 			"Sent at: %s\n",
 		time.Now().UTC().Format(time.RFC3339),
 	)
+	if burst := loadChatBurst(rt.auditSink, "leader-telegram", chatID, defaultBurstParams); burst != "" {
+		contextBody += "\n" + burst
+	}
 
 	startedAt := time.Now().UTC()
 	stdout, wait, err := runner(turnCtx, mcpConfig, rt.repoRoot, contextBody, userMessage)
@@ -388,6 +391,7 @@ func (d *daemon) runTelegramLeaderTurn(turnCtx context.Context, cancel context.C
 	text, parseErr := collectChatTurn(stdout, cap)
 	waitErr := wait()
 	d.recordChatUsage(rt, cap.Summary(), "leader-telegram")
+	d.recordChatTurn(rt, "leader-telegram", chatID, userMessage, text)
 
 	if errors.Is(turnCtx.Err(), context.DeadlineExceeded) {
 		if rep != nil && chatID != 0 {
