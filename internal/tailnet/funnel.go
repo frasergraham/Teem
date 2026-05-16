@@ -108,8 +108,11 @@ func (n *Node) fqdn(ctx context.Context) (string, error) {
 // a running tsnet node.
 func buildFunnelServeConfig(fqdn string, httpsPort uint16, path string, localPort int) *ipn.ServeConfig {
 	sc := &ipn.ServeConfig{}
+	// Include `path` in the proxy target so Tailscale Serve doesn't strip
+	// the mount path when forwarding. Without this, the backend listener
+	// sees a request for "/" and our exact-path handler 404s.
 	handler := &ipn.HTTPHandler{
-		Proxy: "http://127.0.0.1:" + strconv.Itoa(localPort),
+		Proxy: "http://127.0.0.1:" + strconv.Itoa(localPort) + path,
 	}
 	// Magic-DNS suffix is only consulted for service-handler hosts; for
 	// our plain-FQDN setup it's unused.

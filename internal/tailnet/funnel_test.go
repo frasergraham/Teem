@@ -39,7 +39,7 @@ func TestBuildFunnelServeConfig(t *testing.T) {
 	if !ok {
 		t.Fatalf("Web[%q].Handlers[%q] missing; got %+v", hp, path, webCfg.Handlers)
 	}
-	wantProxy := "http://127.0.0.1:" + strconv.Itoa(localPort)
+	wantProxy := "http://127.0.0.1:" + strconv.Itoa(localPort) + path
 	if h.Proxy != wantProxy {
 		t.Fatalf("Proxy = %q, want %q", h.Proxy, wantProxy)
 	}
