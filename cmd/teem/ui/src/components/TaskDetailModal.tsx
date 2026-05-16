@@ -267,24 +267,34 @@ function EvidenceBlock({ jobs }: { jobs: TaskJob[] }) {
 
 function TimelineBlock({ events }: { events: TaskTimelineEvent[] }) {
   if (events.length === 0) return null;
+  // Default-closed details. Long-running tasks can carry hundreds of
+  // rows and the modal becomes a wall of audit text; collapsing keeps
+  // the rollup + evidence sections visible-first. Same pattern as
+  // <details class="tasks-done"> in TasksTable.tsx.
   return (
-    <div className="task-modal-timeline">
-      <h3 className="task-modal-h3">
+    <details className="task-timeline-details">
+      <summary>
         Audit timeline <span className="count">{events.length}</span>
-      </h3>
+      </summary>
       <ul className="task-modal-timeline-list">
-        {events.map((e, i) => (
-          <li key={`${e.ts}-${i}`} className={`timeline-row source-${e.source}`}>
-            <span className="timeline-time" title={e.ts}>
-              {formatTime(e.ts)}
-            </span>
-            <span className={`timeline-kind kind-${e.kind}`}>{e.kind}</span>
-            {e.agent_id && <span className="timeline-agent">{e.agent_id}</span>}
-            {e.message && <span className="timeline-msg">{e.message}</span>}
-          </li>
-        ))}
+        {events.map((e, i) => {
+          // summary is server-rendered (api_task_detail.go
+          // summarizeTaskEvent). Older snapshots without `summary`
+          // fall back to `message` so a stale page keeps rendering.
+          const line = e.summary || e.message || '';
+          return (
+            <li key={`${e.ts}-${i}`} className={`timeline-row source-${e.source}`}>
+              <span className="timeline-time" title={e.ts}>
+                {formatTime(e.ts)}
+              </span>
+              <span className={`timeline-kind kind-${e.kind}`}>{e.kind}</span>
+              {e.agent_id && <span className="timeline-agent">{e.agent_id}</span>}
+              {line && <span className="timeline-msg">{line}</span>}
+            </li>
+          );
+        })}
       </ul>
-    </div>
+    </details>
   );
 }
 

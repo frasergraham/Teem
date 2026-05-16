@@ -25,6 +25,10 @@ export interface TaskTimelineEvent {
   agent_id?: string;
   job_id?: string;
   message?: string;
+  // Server-rendered human-readable line composed from kind + meta.
+  // Prefer this over `message` for rendering; older snapshots may
+  // omit it, in which case the SPA falls back to `message`.
+  summary?: string;
   source: 'task' | 'job';
   meta?: Record<string, unknown>;
 }

@@ -222,6 +222,89 @@ func TestAPITeamTranscript_RejectsPOST(t *testing.T) {
 	}
 }
 
+// TestSummarizeTaskEvent locks the per-kind composition rules for
+// the timeline `summary` field. Covers task_stage_changed both ways
+// (full meta vs missing from/to), job_complete with full meta vs
+// missing meta (no duration / no tool_calls), decision_note, and an
+// unrecognised kind that falls back to Message → kind name.
+func TestSummarizeTaskEvent(t *testing.T) {
+	cases := []struct {
+		name string
+		e    audit.Event
+		want string
+	}{
+		{
+			name: "task_stage_changed_full",
+			e: audit.Event{
+				Kind: audit.KindTaskStageChanged,
+				Meta: map[string]any{"from": "proposed", "to": "ready"},
+			},
+			want: "stage proposed → ready",
+		},
+		{
+			name: "task_stage_changed_empty_meta_falls_back",
+			e: audit.Event{
+				Kind:    audit.KindTaskStageChanged,
+				Message: "fallback",
+			},
+			want: "fallback",
+		},
+		{
+			name: "task_stage_changed_empty_meta_no_message",
+			e:    audit.Event{Kind: audit.KindTaskStageChanged},
+			want: "task_stage_changed",
+		},
+		{
+			name: "job_complete_full_meta",
+			e: audit.Event{
+				AgentID: "ada",
+				JobID:   "abcdef1234567890",
+				Kind:    audit.KindJobComplete,
+				Meta:    map[string]any{"duration_ms": float64(125000), "tool_calls": float64(7)},
+			},
+			want: "ada finished job abcdef12 (2m5s, 7 tool calls)",
+		},
+		{
+			name: "job_complete_missing_meta",
+			e: audit.Event{
+				AgentID: "ada",
+				JobID:   "abcdef1234567890",
+				Kind:    audit.KindJobComplete,
+			},
+			want: "ada finished job abcdef12",
+		},
+		{
+			name: "decision_note_uses_message",
+			e: audit.Event{
+				Kind:    audit.KindDecisionNote,
+				Message: "picked branch X",
+			},
+			want: "picked branch X",
+		},
+		{
+			name: "unknown_kind_falls_back_to_message",
+			e: audit.Event{
+				Kind:    audit.Kind("custom_thing"),
+				Message: "hi",
+			},
+			want: "hi",
+		},
+		{
+			name: "unknown_kind_no_message_returns_kind",
+			e:    audit.Event{Kind: audit.Kind("custom_thing")},
+			want: "custom_thing",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarizeTaskEvent(tc.e)
+			if got != tc.want {
+				t.Errorf("summarizeTaskEvent = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestAPITeamTranscript_Missing returns 404 when the file doesn't
 // exist on disk (e.g. transcript event was emitted but the file was
 // rotated). Distinct from "transcripts not configured" → 500.

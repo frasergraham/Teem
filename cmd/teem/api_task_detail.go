@@ -56,12 +56,16 @@ type apiTaskRecord struct {
 // apiTaskTimelineEvent is one row in the audit timeline. Source is
 // either "task" (event was tagged with meta.task_id) or "job" (event
 // belonged to an evidence job); the SPA may use that to badge rows.
+// Summary is a server-rendered, human-readable line composed from
+// the event's kind + meta; the SPA prefers it over Message for kinds
+// (notably task_stage_changed) whose Message is empty.
 type apiTaskTimelineEvent struct {
 	Timestamp time.Time      `json:"ts"`
 	Kind      string         `json:"kind"`
 	AgentID   string         `json:"agent_id,omitempty"`
 	JobID     string         `json:"job_id,omitempty"`
 	Message   string         `json:"message,omitempty"`
+	Summary   string         `json:"summary,omitempty"`
 	Source    string         `json:"source"`
 	Meta      map[string]any `json:"meta,omitempty"`
 }
@@ -190,6 +194,7 @@ func buildTaskTimeline(task plan.Task, events []audit.Event) []apiTaskTimelineEv
 			AgentID:   e.AgentID,
 			JobID:     e.JobID,
 			Message:   e.Message,
+			Summary:   summarizeTaskEvent(e),
 			Source:    source,
 			Meta:      e.Meta,
 		})
@@ -300,4 +305,120 @@ func buildTaskAgentRollups(jobs []apiTaskJob) []apiTaskAgentRollup {
 		return out[i].AgentID < out[j].AgentID
 	})
 	return out
+}
+
+// summarizeTaskEvent renders a one-line human-readable description of
+// an audit event for the task-detail modal's timeline. Kind-aware so
+// the operator sees "stage proposed → ready" rather than a bare
+// "task_stage_changed". Falls back to Message, then the kind name, so
+// no row ever renders as empty text.
+func summarizeTaskEvent(e audit.Event) string {
+	switch e.Kind {
+	case audit.KindTaskStageChanged:
+		from, _ := e.Meta["from"].(string)
+		to, _ := e.Meta["to"].(string)
+		if from != "" && to != "" {
+			return fmt.Sprintf("stage %s → %s", from, to)
+		}
+		if to != "" {
+			return fmt.Sprintf("stage → %s", to)
+		}
+		if e.Message != "" {
+			return e.Message
+		}
+		return string(e.Kind)
+	case audit.KindDecisionNote, audit.KindBlockerNote:
+		if e.Message != "" {
+			return e.Message
+		}
+		return string(e.Kind)
+	case audit.KindJobReceived:
+		return fmt.Sprintf("%s started job %s", e.AgentID, shortJobID(e.JobID))
+	case audit.KindJobComplete:
+		dur := metaDurationStr(e.Meta)
+		calls, hasCalls := metaToolCalls(e.Meta)
+		head := fmt.Sprintf("%s finished job %s", e.AgentID, shortJobID(e.JobID))
+		switch {
+		case dur != "" && hasCalls:
+			return fmt.Sprintf("%s (%s, %d tool calls)", head, dur, calls)
+		case dur != "":
+			return fmt.Sprintf("%s (%s)", head, dur)
+		case hasCalls:
+			return fmt.Sprintf("%s (%d tool calls)", head, calls)
+		default:
+			return head
+		}
+	case audit.KindJobError:
+		msg, _ := e.Meta["error"].(string)
+		if msg == "" {
+			msg = e.Message
+		}
+		head := fmt.Sprintf("%s errored on job %s", e.AgentID, shortJobID(e.JobID))
+		if msg != "" {
+			return fmt.Sprintf("%s: %s", head, msg)
+		}
+		return head
+	case audit.KindJobInterrupted:
+		return fmt.Sprintf("%s interrupted on job %s", e.AgentID, shortJobID(e.JobID))
+	case audit.KindJobTranscriptReady:
+		return fmt.Sprintf("transcript ready for job %s", shortJobID(e.JobID))
+	case audit.KindWorkerStopped:
+		return fmt.Sprintf("%s stopped", e.AgentID)
+	}
+	if e.Message != "" {
+		return e.Message
+	}
+	return string(e.Kind)
+}
+
+// shortJobID truncates a job_id to its first 8 chars for inline use.
+// Most job IDs are 16+ hex; if the id is already shorter we return it
+// unchanged. Empty input → empty output (caller handles the "no job"
+// case).
+func shortJobID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+// metaDurationStr returns durShort(duration_ms) or "" if the meta
+// key is missing/unparseable. JSON round-trip turns ints into float64
+// so we accept both.
+func metaDurationStr(m map[string]any) string {
+	if m == nil {
+		return ""
+	}
+	var ms int64
+	switch v := m["duration_ms"].(type) {
+	case float64:
+		ms = int64(v)
+	case int:
+		ms = int64(v)
+	case int64:
+		ms = v
+	default:
+		return ""
+	}
+	if ms <= 0 {
+		return ""
+	}
+	return durShort(time.Duration(ms) * time.Millisecond)
+}
+
+// metaToolCalls returns (count, ok); ok=false when the key is absent
+// or unparseable. Accepts float64 (JSON path) and int (in-memory).
+func metaToolCalls(m map[string]any) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	switch v := m["tool_calls"].(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	}
+	return 0, false
 }
