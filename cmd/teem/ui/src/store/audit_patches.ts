@@ -196,6 +196,17 @@ function handleChannelsState(snap: StateSnapshot, ev: AuditEvent): StateSnapshot
   return { ...snap, channels_state: state };
 }
 
+// truncateForTile mirrors cmd/teem/ui.go: byte-based clamp at `max`,
+// then back up off any UTF-8 continuation byte (10xxxxxx) so we never
+// split a multi-byte rune. Suffix with U+2026.
+function truncateForTile(s: string, max: number): string {
+  const bytes = new TextEncoder().encode(s);
+  if (bytes.length <= max) return s;
+  let end = max;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return new TextDecoder().decode(bytes.subarray(0, end)) + '…';
+}
+
 function handleLeaderStatusChanged(snap: StateSnapshot, ev: AuditEvent): StateSnapshot | null {
   const meta = ev.meta ?? {};
   const text = typeof meta.text === 'string' ? meta.text : '';
@@ -209,7 +220,7 @@ function handleLeaderStatusChanged(snap: StateSnapshot, ev: AuditEvent): StateSn
     text,
     updated_ago: '0s ago',
   };
-  return { ...snap, leader_status: nextLeader, status_headline: text };
+  return { ...snap, leader_status: nextLeader, status_headline: truncateForTile(text, 200) };
 }
 
 function handleUsageEvent(snap: StateSnapshot, ev: AuditEvent): StateSnapshot | null {
