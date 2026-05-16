@@ -254,7 +254,7 @@ func TestDashboard_RendersAwaitingApprovalSection(t *testing.T) {
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -298,7 +298,7 @@ func TestDashboard_AwaitingApprovalDetailsPersistsAcrossReload(t *testing.T) {
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -482,7 +482,7 @@ func TestDashboard_AwaitingApprovalSortedNewestFirst(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -529,7 +529,7 @@ func TestAwaitingApprovalCard_PlanShapedBranch(t *testing.T) {
 		AddEvidence: []string{"j1"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -572,7 +572,7 @@ func TestAwaitingApprovalCard_MixedBranch(t *testing.T) {
 		AddEvidence: []string{"j2"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -615,7 +615,7 @@ func TestAwaitingApprovalCard_BriefDeEmphasized(t *testing.T) {
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -755,7 +755,7 @@ func TestPlanArtifact_RenderMarkdownInline_DocsBranch(t *testing.T) {
 		AddEvidence: []string{"j1"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -800,7 +800,7 @@ func TestPlanArtifact_RenderMarkdown_TruncateLargeFile(t *testing.T) {
 		AddEvidence: []string{"jbig"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -844,7 +844,7 @@ func TestPlanArtifact_RenderMarkdown_NoUnsafeHTML(t *testing.T) {
 		AddEvidence: []string{"jevil"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

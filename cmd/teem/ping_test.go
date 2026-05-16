@@ -167,7 +167,7 @@ func TestTeamPage_RendersPingButtonAndFlash(t *testing.T) {
 	rt := newPingTeam(t, "alpha")
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha?flash=pinged", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy?flash=pinged", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -191,7 +191,7 @@ func TestTeamPage_RendersPingButtonAndFlash(t *testing.T) {
 	// embeds a same-origin inline <script> for sessionStorage expand-state
 	// persistence, so probe for the hostile payload itself rather than the
 	// generic tag.
-	req2 := httptest.NewRequest(http.MethodGet, "/teams/alpha?flash=%3Cscript%3Ealert(1)%3C/script%3E", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy?flash=%3Cscript%3Ealert(1)%3C/script%3E", nil)
 	w2 := httptest.NewRecorder()
 	d.handler().ServeHTTP(w2, req2)
 	if strings.Contains(w2.Body.String(), "alert(1)") {
@@ -212,11 +212,11 @@ func TestPing_HTMLAcceptRedirectsWithFlash(t *testing.T) {
 		t.Fatalf("code=%d want 303 body=%s", w.Code, w.Body.String())
 	}
 	got := w.Header().Get("Location")
-	if !strings.HasPrefix(got, "/teams/alpha?flash=pinged&ping_ts=") {
-		t.Errorf("Location=%q want prefix /teams/alpha?flash=pinged&ping_ts=", got)
+	if !strings.HasPrefix(got, "/teams/alpha/legacy?flash=pinged&ping_ts=") {
+		t.Errorf("Location=%q want prefix /teams/alpha/legacy?flash=pinged&ping_ts=", got)
 	}
 	// ping_ts must be a recent unix-seconds value the team page can parse.
-	const prefix = "/teams/alpha?flash=pinged&ping_ts="
+	const prefix = "/teams/alpha/legacy?flash=pinged&ping_ts="
 	tsStr := strings.TrimPrefix(got, prefix)
 	n, err := strconv.ParseInt(tsStr, 10, 64)
 	if err != nil {
@@ -246,7 +246,7 @@ func TestTeamPage_FlashUpgradesToTickOK(t *testing.T) {
 		t.Fatalf("write audit: %v", err)
 	}
 
-	url := "/teams/alpha?flash=pinged&ping_ts=" + strconv.FormatInt(pingTS.Unix(), 10)
+	url := "/teams/alpha/legacy?flash=pinged&ping_ts=" + strconv.FormatInt(pingTS.Unix(), 10)
 	req := httptest.NewRequest(http.MethodGet, url, nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
@@ -281,7 +281,7 @@ func TestTeamPage_FlashUpgradesToTickFailed(t *testing.T) {
 		t.Fatalf("write audit: %v", err)
 	}
 
-	url := "/teams/alpha?flash=pinged&ping_ts=" + strconv.FormatInt(pingTS.Unix(), 10)
+	url := "/teams/alpha/legacy?flash=pinged&ping_ts=" + strconv.FormatInt(pingTS.Unix(), 10)
 	req := httptest.NewRequest(http.MethodGet, url, nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
@@ -307,7 +307,7 @@ func TestTeamPage_FlashStaysPingedUntilOutcome(t *testing.T) {
 	d.teams["alpha"] = rt
 
 	pingTS := time.Now().Add(-1 * time.Second).Unix()
-	url := "/teams/alpha?flash=pinged&ping_ts=" + strconv.FormatInt(pingTS, 10)
+	url := "/teams/alpha/legacy?flash=pinged&ping_ts=" + strconv.FormatInt(pingTS, 10)
 	req := httptest.NewRequest(http.MethodGet, url, nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
@@ -428,7 +428,7 @@ func TestTeamPage_RendersPingNudgedFlash(t *testing.T) {
 	rt := newPingTeam(t, "alpha")
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha?flash=ping_nudged", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy?flash=ping_nudged", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

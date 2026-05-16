@@ -249,7 +249,7 @@ func TestTeamPage_ChatPanel_RendersWithSessionStorageScript(t *testing.T) {
 	rt := newFullTestTeam(t, "alpha")
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

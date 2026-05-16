@@ -116,7 +116,7 @@ func (d *daemon) handleDecisionActionForm(w http.ResponseWriter, r *http.Request
 	// The hooked audit sink runs channelHook on every Write, so the
 	// decision_note above already fans out to any connected leader
 	// session — no explicit PushChannel is needed here.
-	http.Redirect(w, r, fmt.Sprintf("/teams/%s?flash=task_commented", rt.team.ID), http.StatusSeeOther)
+	http.Redirect(w, r, fmt.Sprintf("/teams/%s/legacy?flash=task_commented", rt.team.ID), http.StatusSeeOther)
 }
 
 func decisionActionMessage(action, comment string) string {

@@ -173,8 +173,8 @@ func TestPulseEndpoint_Config_FormPost(t *testing.T) {
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("code=%d want 303 body=%s", w.Code, w.Body.String())
 	}
-	if loc := w.Header().Get("Location"); loc != "/teams/alpha" {
-		t.Errorf("Location=%q want /teams/alpha", loc)
+	if loc := w.Header().Get("Location"); loc != "/teams/alpha/legacy" {
+		t.Errorf("Location=%q want /teams/alpha/legacy", loc)
 	}
 	if got := rt.pulse.Interval(); got != 2*time.Minute {
 		t.Errorf("Interval after form-post = %s, want 2m", got)
@@ -223,7 +223,7 @@ func TestTeamPage_PulsePanel_RendersCurrentState(t *testing.T) {
 	d.teams["alpha"] = rt
 
 	// Off state.
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -255,7 +255,7 @@ func TestTeamPage_PulsePanel_RendersCurrentState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req2 := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req2 := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w2 := httptest.NewRecorder()
 	d.handler().ServeHTTP(w2, req2)
 	body = w2.Body.String()

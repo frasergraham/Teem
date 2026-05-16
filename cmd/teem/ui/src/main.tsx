@@ -6,7 +6,7 @@ import { connect } from './api/ws';
 import { useTeamStore } from './store/team';
 import { DashboardLayout } from './components/DashboardLayout';
 
-const TEAM_ID_RE = /\/teams\/(t-[a-f0-9]+|[a-z0-9-]+)\/v2/;
+const TEAM_ID_RE = /\/teams\/(t-[a-f0-9]+|[a-z0-9-]+)(?:\/v2)?(?:\/|$)/;
 
 function parseTeamID(pathname: string): string | null {
   const m = pathname.match(TEAM_ID_RE);

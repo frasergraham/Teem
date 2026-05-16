@@ -68,7 +68,7 @@ func TestDashboard_FiltersStoppedWorkers(t *testing.T) {
 
 	// Worker identity and placement only render on the per-team detail
 	// page; the summary index at "/" carries counters, not chip rows.
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -92,7 +92,7 @@ func TestDashboard_ShowsPlacement(t *testing.T) {
 	rt.registry.Add(mcpsrv.AgentEntry{ID: "reviewer-1", Role: "reviewer", State: mcpsrv.StateRunning})
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -117,7 +117,7 @@ func TestDashboard_ShowsLeaderStatusAndTasks(t *testing.T) {
 
 	_ = rt.leaderStatus.Set("leader", "Reviewing T1+T6 diff", []string{task.ID})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -254,7 +254,7 @@ func TestDashboard_MarksOrphanedAssigneeStale(t *testing.T) {
 
 	// Task-level styling lives on the per-team detail page; the summary
 	// index only carries counters and the leader status snippet.
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -303,7 +303,7 @@ func TestDashboard_AssigneeExplicit(t *testing.T) {
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{AssignedTo: &owner, Stage: plan.StageCoding})
 	rt.registry.Add(mcpsrv.AgentEntry{ID: owner, Role: "worker", State: mcpsrv.StateBusy})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -350,7 +350,7 @@ func TestDashboard_AssigneeDerivedFromEvidence(t *testing.T) {
 		Kind:      audit.KindJobReceived,
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -381,7 +381,7 @@ func TestDashboard_AssigneeBlankWhenNoneAvailable(t *testing.T) {
 		AddEvidence: []string{"j-missing"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -448,7 +448,7 @@ func TestTeamDetail_RendersBranchesSection(t *testing.T) {
 	d.teams["alpha"] = rt
 
 	// Per-team detail page renders the full section.
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -493,7 +493,7 @@ func TestTeamDetail_NoRepoShowsPlaceholder(t *testing.T) {
 	rt.repoRoot = ""
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -520,7 +520,7 @@ func TestTeamPage_BranchesCollapsedByDefault(t *testing.T) {
 	rt.repoRoot = dir
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -586,7 +586,7 @@ func TestTeamPage_NoBranches_StillRenders(t *testing.T) {
 	rt.repoRoot = t.TempDir() // empty dir → listTeemBranches yields nil
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -706,7 +706,7 @@ func TestTeamDetail_RendersSingleTeam(t *testing.T) {
 	d.teams["alpha-team"] = rt
 	d.teams["beta"] = rtOther
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha-team", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha-team/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -770,7 +770,7 @@ func TestResolveTeam_IDAndNameAlias(t *testing.T) {
 
 	// Bare-team page must render for both URL forms.
 	for _, key := range []string{"t-abc1234567890def", "example-team"} {
-		req := httptest.NewRequest(http.MethodGet, "/teams/"+key, nil)
+		req := httptest.NewRequest(http.MethodGet, "/teams/"+key+"/legacy", nil)
 		w := httptest.NewRecorder()
 		d.handler().ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
@@ -834,7 +834,7 @@ func TestTeamDetail_HeroSection(t *testing.T) {
 	t3, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "awaiting"})
 	_, _ = rt.plan.UpdateTask(t3.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -908,7 +908,7 @@ func TestTeamPage_StatusPanel_HasBridgeConsoleLook(t *testing.T) {
 	headline := "Cutting the T20 release; reviewing T17 diff"
 	_ = rt.leaderStatus.Set("leader", headline, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -942,7 +942,7 @@ func TestTeamPage_WorkersPanel_PositionedAfterStatus(t *testing.T) {
 	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "Refactor flow"})
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval, AddEvidence: []string{"j-1"}})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -981,7 +981,7 @@ func TestTeamPage_WorkersPanel_UsesPersonaNames(t *testing.T) {
 	rt.registry.Add(mcpsrv.AgentEntry{ID: "worker-uma", Role: "worker", State: mcpsrv.StateBusy})
 	rt.registry.Add(mcpsrv.AgentEntry{ID: "reviewer-bex", Role: "reviewer", State: mcpsrv.StateRunning})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -1021,7 +1021,7 @@ func TestTeamPage_WorkersPanel_ZeroWorkersStillRenders(t *testing.T) {
 	rt := newFullTestTeam(t, "alpha")
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -1045,7 +1045,7 @@ func TestTeamDetail_HeroEmptyDay(t *testing.T) {
 	d.teams["alpha"] = rt
 	// No agents, no tasks → 0 hero numerals, empty stage bar.
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -1093,7 +1093,7 @@ func TestDecisionsList_AwaitingApproval(t *testing.T) {
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -1129,7 +1129,7 @@ func TestDecisionsList_DecisionWithQuestionSeverity(t *testing.T) {
 		Meta:      map[string]any{"task_id": task.ID, "severity": "question"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -1195,7 +1195,7 @@ func TestDecisionsList_OpenBlocker(t *testing.T) {
 		Meta:      map[string]any{"task_id": task.ID},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -1256,7 +1256,7 @@ func TestDecisionsList_SortedNewestFirst(t *testing.T) {
 		Meta:      map[string]any{"task_id": bTask.ID},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -1291,7 +1291,7 @@ func TestDecisionsList_QuestionDismissedAfterReply(t *testing.T) {
 		Meta:      map[string]any{"task_id": task.ID, "severity": "question"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if !strings.Contains(decisionsSection(t, w.Body.String()), "QUESTION_BODY_MARKER") {
@@ -1328,7 +1328,7 @@ func TestDecisionsList_UnansweredQuestionStillRenders(t *testing.T) {
 		Meta:      map[string]any{"task_id": task.ID, "severity": "question"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if !strings.Contains(decisionsSection(t, w.Body.String()), "UNANSWERED_QUESTION_MARKER") {
@@ -1359,7 +1359,7 @@ func TestDecisionsList_ReplyForDifferentTask_DoesNotDismiss(t *testing.T) {
 		Meta:      map[string]any{"task_id": taskB.ID, "severity": "info"},
 	})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if !strings.Contains(decisionsSection(t, w.Body.String()), "TASK_A_QUESTION_MARKER") {
@@ -1372,7 +1372,7 @@ func TestDecisionsList_EmptyState(t *testing.T) {
 	rt := newFullTestTeam(t, "alpha")
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -1396,7 +1396,7 @@ func TestDecisionsList_PreservesApprovalActions(t *testing.T) {
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageSpecced})
 	_, _ = rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAwaitingApproval})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()

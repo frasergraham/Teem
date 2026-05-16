@@ -39,7 +39,7 @@ func TestTeamPage_UsageCard_RendersWhenConfigured(t *testing.T) {
 		t.Fatalf("record: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -73,7 +73,7 @@ func TestTeamPage_UsageCard_RendersHintWhenUnconfigured(t *testing.T) {
 	// daily_token_budget = 0 → hint, not bar.
 	d.usageAgg = newUsageAgg(t, usage.Config{ResetAnchor: "00:00 UTC"})
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -111,7 +111,7 @@ func TestTeamPage_UsageCard_ThrottlingBadge(t *testing.T) {
 		t.Fatalf("record: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -149,7 +149,7 @@ func TestTeamPage_UsageCard_PerModelBreakdown(t *testing.T) {
 		t.Fatalf("record sonnet: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -194,7 +194,7 @@ func TestTeamPage_UsageCard_BarColours(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("record: %v", err)
 			}
-			req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+			req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 			w := httptest.NewRecorder()
 			d.handler().ServeHTTP(w, req)
 			body := w.Body.String()

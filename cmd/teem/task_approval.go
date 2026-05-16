@@ -267,7 +267,7 @@ func (d *daemon) handleTaskActionForm(w http.ResponseWriter, r *http.Request, rt
 		return
 	}
 	flash := flashFor(dec)
-	http.Redirect(w, r, fmt.Sprintf("/teams/%s?flash=%s", rt.team.ID, flash), http.StatusSeeOther)
+	http.Redirect(w, r, fmt.Sprintf("/teams/%s/legacy?flash=%s", rt.team.ID, flash), http.StatusSeeOther)
 }
 
 // resolveActionInput maps the path action verb + body to a (decision,

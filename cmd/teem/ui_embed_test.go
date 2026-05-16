@@ -32,6 +32,35 @@ func TestSPAEmbedded_IndexAtV2(t *testing.T) {
 	}
 }
 
+func TestSPAEmbedded_TeamRootServesSPA(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `<div id="root">`) {
+		t.Errorf("/teams/<id> did not serve SPA shell; body excerpt:\n%s", excerpt(w.Body.String()))
+	}
+}
+
+func TestSPAEmbedded_UnknownTeam404(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	req := httptest.NewRequest(http.MethodGet, "/teams/nonexistent", nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("code=%d want 404 body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestSPAEmbedded_HistoryFallback(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
 	rt := newFullTestTeam(t, "alpha")

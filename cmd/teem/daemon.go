@@ -1446,7 +1446,7 @@ func (d *daemon) handlePulseControl(w http.ResponseWriter, r *http.Request, rt *
 		// Dashboard form posts come with Accept: text/html — redirect
 		// back to the team page so the operator stays in context.
 		if strings.Contains(r.Header.Get("Accept"), "text/html") {
-			http.Redirect(w, r, "/teams/"+rt.team.ID, http.StatusSeeOther)
+			http.Redirect(w, r, "/teams/"+rt.team.ID+"/legacy", http.StatusSeeOther)
 			return
 		}
 		writeJSON(w, http.StatusOK, currentPulseStatus(rt))
@@ -1595,7 +1595,7 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 // can correlate the redirect with the leader's pulse_tick audit event.
 func (d *daemon) pingRespond(w http.ResponseWriter, r *http.Request, teamID string, code int, flash, body string, pingTS int64) {
 	if strings.Contains(r.Header.Get("Accept"), "text/html") {
-		loc := "/teams/" + teamID + "?flash=" + flash
+		loc := "/teams/" + teamID + "/legacy?flash=" + flash
 		if pingTS > 0 {
 			loc += "&ping_ts=" + strconv.FormatInt(pingTS, 10)
 		}
@@ -2789,12 +2789,18 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/teams/")
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
-		// Bare /teams/<id> — render the per-team detail SSR page.
+		// Phase 3: bare /teams/<id> serves the SPA. The legacy SSR page
+		// has moved to /teams/<id>/legacy. Resolve the team first so a
+		// stale id 404s instead of silently rendering the shell.
 		if rest == "" {
 			http.NotFound(w, r)
 			return
 		}
-		d.renderTeamPage(w, r, rest)
+		if d.resolveTeam(rest) == nil {
+			http.NotFound(w, r)
+			return
+		}
+		serveSPA(w, r, "")
 		return
 	}
 	id, suffix := rest[:slash], rest[slash:]
@@ -2818,10 +2824,13 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		d.handleTranscripts(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
 	case suffix == "/channel-events" || strings.HasPrefix(suffix, "/channel-events?"):
 		d.handleChannelEvents(w, r, rt)
+	case suffix == "/legacy" || suffix == "/legacy/" || strings.HasPrefix(suffix, "/legacy?"):
+		// SSR dashboard — moved here from bare /teams/<id> in Phase 3.
+		// Phase 4 will remove this handler entirely.
+		d.renderTeamPage(w, r, id)
 	case suffix == "/v2" || suffix == "/v2/" || strings.HasPrefix(suffix, "/v2/"):
-		// Phase-1 SPA mount. The SSR page at /teams/<id> is unchanged;
-		// /v2 serves the React bundle off the embedded ui/dist FS with a
-		// history fallback so deep links resolve to index.html.
+		// Transitional alias for any bookmarks captured during Phase 1/2;
+		// both /v2[/...] and bare /teams/<id> now serve the same bundle.
 		rest := strings.TrimPrefix(suffix, "/v2")
 		serveSPA(w, r, rest)
 	default:

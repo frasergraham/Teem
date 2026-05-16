@@ -77,7 +77,7 @@ func TestDashboardTask_RendersCostColumn(t *testing.T) {
 	writeUsageEvent(t, rt.auditSink, "worker-uma", "job-42", "claude-opus-4-7",
 		1_000_000, 500_000, 0, 0, time.Now())
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -116,7 +116,7 @@ func TestDashboard_HeroSpend_RendersWhenPricingPresent(t *testing.T) {
 	writeUsageEvent(t, rt.auditSink, "w1", "j1", "claude-opus-4-7", 1_000_000, 0, 0, 0, now)
 	writeUsageEvent(t, rt.auditSink, "w2", "j2", "claude-opus-4-7", 1_000_000, 0, 0, 0, now)
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -148,7 +148,7 @@ func TestDashboard_HeroSpend_HiddenWhenPricingAbsent(t *testing.T) {
 	writeUsageEvent(t, rt.auditSink, "w1", "job-42", "claude-opus-4-7",
 		1_000_000, 500_000, 0, 0, time.Now())
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
@@ -184,7 +184,7 @@ func TestDashboardTask_TodaysSpend_SeparateFromPerTaskSum(t *testing.T) {
 	// shared job: $15. Both tasks list it in evidence.
 	writeUsageEvent(t, rt.auditSink, "w1", "shared", "claude-opus-4-7", 1_000_000, 0, 0, 0, time.Now())
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	body := w.Body.String()
