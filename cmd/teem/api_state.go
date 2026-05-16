@@ -30,6 +30,8 @@ func (d *daemon) handleAPITeamRoute(w http.ResponseWriter, r *http.Request) {
 	switch suffix {
 	case "/state":
 		d.handleAPITeamState(w, r, rt)
+	case "/events":
+		d.handleAPITeamEvents(w, r, rt)
 	default:
 		http.NotFound(w, r)
 	}

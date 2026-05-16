@@ -43,6 +43,7 @@ import (
 	"github.com/frasergraham/teem/internal/tailnet"
 	"github.com/frasergraham/teem/internal/team"
 	"github.com/frasergraham/teem/internal/usage"
+	"github.com/frasergraham/teem/internal/wsbus"
 )
 
 // leaderAwareRoles returns a RolesFunc whose result is the team's
@@ -382,6 +383,13 @@ type registeredTeam struct {
 	// teem-channel SSE subscriber. One bus per team; survives daemon
 	// lifetime, no persistence.
 	channelBus *channelbus.Bus
+
+	// wsbus fans audit + snapshot-invalidate envelopes out to SPA
+	// WebSocket clients connected to /api/teams/<id>/events. Holds a
+	// ring buffer of recent envelopes for since_seq backfill on
+	// reconnect. In-memory only; restarting the daemon resets the seq
+	// counter (clients fall back to snapshot_invalidate).
+	wsbus *wsbus.Bus
 
 	// detectionMu guards channelsLive and serializes the per-team
 	// channels-live ↔ fallback state machine. Held around BOTH the
@@ -1784,6 +1792,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	bs := bus.NewMemBus()
 	reg := mcpsrv.NewRegistry()
 	chBus := channelbus.New(0)
+	wsB := wsbus.New(2000)
 
 	// Archetype memory store: per-team directory of per-role markdown
 	// files the leader injects as baseline context for every freshly
@@ -2024,6 +2033,22 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		pulseInst.NudgeFromAudit(events)
 	}
 
+	// SPA WebSocket hook: publish every audit event onto the per-team
+	// wsbus so /api/teams/<id>/events clients can react in real time.
+	// Fire-and-forget; the bus drops events for slow subscribers
+	// individually (see internal/wsbus).
+	wsbusHook := func(events []audit.Event) {
+		for i := range events {
+			ev := events[i]
+			wsB.Publish(wsbus.Envelope{
+				Kind:  "audit",
+				Seq:   wsB.NextSeq(),
+				TS:    time.Now().UTC(),
+				Event: &ev,
+			})
+		}
+	}
+
 	// Summarizer goroutine: rolling digest + retention pruning per
 	// role. Best-effort — failures log to stderr and the next tick
 	// retries. Uses the operator's Claude Code auth via `claude -p`
@@ -2076,7 +2101,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		// leader chat, and nudge pulse's debounced audit-nudge tick
 		// (suppressed by pulse when channels are live; active when
 		// chat is disconnected — see docs/wake-strategy.md §3 L2).
-		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, d.makeUsageHook())),
+		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, wsbusHook, d.makeUsageHook())),
 		plan:           planStore,
 		notes:          notesInbox,
 		pulse:          pulseInst,
@@ -2090,6 +2115,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		transcriptsDir: transcriptsDir,
 		repoRoot:       repoRoot,
 		channelBus:     chBus,
+		wsbus:          wsB,
 	}, nil
 }
 
