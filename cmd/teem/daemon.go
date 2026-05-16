@@ -306,7 +306,7 @@ type daemon struct {
 	// gesture path: when non-nil it replaces the production
 	// d.messagingTelegram.LookupByMessageID call. Tests inject a fake
 	// mapping without standing up a real notifier.
-	messagingMessageIDLookup func(int64) (string, messaging.ReplyContext, bool)
+	messagingMessageIDLookup func(int64) (string, bool)
 	// messagingReplyTokens correlates outbound Telegram pings with inbound
 	// /reply <token> messages. Issued at outbound emit, consumed by the
 	// inbound webhook handler. Nil when messaging is disabled.

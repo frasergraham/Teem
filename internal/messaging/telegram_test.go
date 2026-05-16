@@ -132,15 +132,12 @@ func TestTelegramNotifier_NotifyRecordsMessageID(t *testing.T) {
 		t.Fatalf("Notify: %v", err)
 	}
 
-	tok, ctx, ok := n.LookupByMessageID(42)
+	tok, ok := n.LookupByMessageID(42)
 	if !ok {
 		t.Fatal("LookupByMessageID(42) ok=false; expected the message_id to have been recorded")
 	}
 	if tok != "abcd1234" {
 		t.Errorf("token=%q want abcd1234", tok)
-	}
-	if ctx.TeamID != "alpha" || ctx.TaskID != "t-3a2f" || ctx.AgentID != "worker-una" {
-		t.Errorf("ctx=%+v want {alpha t-3a2f worker-una}", ctx)
 	}
 }
 
@@ -155,19 +152,19 @@ func TestTelegramNotifier_NotifyWithoutReplyTokenSkipsRecord(t *testing.T) {
 	if err := n.Notify(context.Background(), Message{Title: "no token"}); err != nil {
 		t.Fatalf("Notify: %v", err)
 	}
-	if _, _, ok := n.LookupByMessageID(7); ok {
+	if _, ok := n.LookupByMessageID(7); ok {
 		t.Fatal("expected LookupByMessageID(7) to return ok=false when no ReplyToken was attached")
 	}
 }
 
 func TestTelegramNotifier_LookupExpired(t *testing.T) {
 	n := NewTelegramNotifierWithBase("TOK", 1, "http://unused", nil)
-	n.recordMessageID(99, "tok-99", ReplyContext{TeamID: "alpha"})
+	n.recordMessageID(99, "tok-99")
 
 	// Skew the clock past the TTL window so the next lookup evicts.
 	n.nowFn = func() time.Time { return time.Now().Add(messageIDTTL + time.Hour) }
 
-	if _, _, ok := n.LookupByMessageID(99); ok {
+	if _, ok := n.LookupByMessageID(99); ok {
 		t.Fatal("expected expired entry to return ok=false")
 	}
 	// And it should have been evicted.
@@ -181,12 +178,12 @@ func TestTelegramNotifier_LRUCap(t *testing.T) {
 	// Insert one more than the cap. Oldest (id=1) must be evicted;
 	// newest (id=cap+1) must still be present.
 	for i := int64(1); i <= int64(messageIDCap)+1; i++ {
-		n.recordMessageID(i, "t", ReplyContext{})
+		n.recordMessageID(i, "t")
 	}
-	if _, _, ok := n.LookupByMessageID(1); ok {
+	if _, ok := n.LookupByMessageID(1); ok {
 		t.Fatalf("oldest entry (id=1) should have been LRU-evicted after %d inserts", messageIDCap+1)
 	}
-	if _, _, ok := n.LookupByMessageID(int64(messageIDCap) + 1); !ok {
+	if _, ok := n.LookupByMessageID(int64(messageIDCap) + 1); !ok {
 		t.Fatalf("newest entry (id=%d) should still be present", messageIDCap+1)
 	}
 	if got := n.messageIDLst.Len(); got != messageIDCap {
