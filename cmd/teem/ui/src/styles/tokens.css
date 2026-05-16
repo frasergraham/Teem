@@ -203,6 +203,17 @@ body.team-detail-page {
   color: var(--c-text);
 }
 .status-headline.empty { color: var(--c-text-dim); }
+.status-headline .when {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--c-text-dim);
+  letter-spacing: 0.02em;
+  margin-left: 12px;
+  white-space: nowrap;
+  vertical-align: baseline;
+}
 
 .hero-numbers {
   display: flex; gap: 28px; align-items: baseline; flex-wrap: wrap;
@@ -601,6 +612,183 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
 .chat-panel details > summary::-webkit-details-marker { display: none; }
 .chat-panel h3.panel-label {
   margin: 0 0 12px 0;
+}
+.chat-panel h3.panel-label .count {
+  color: var(--c-text-dim);
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+}
+
+/* --- Pulse panel ------------------------------------------------
+   Ported from the SSR bridge-console rules in cmd/teem/ui_dashboard.html
+   (~lines 905–1280). body.team-detail-page prefix dropped — the SPA
+   sets that class on mount via DashboardLayout, and the SPA never
+   renders a pulse panel outside that context. */
+
+.pulse-panel {
+  background: var(--c-panel);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 20px 22px;
+}
+.pulse-panel .panel-label .state {
+  color: var(--c-text-dim);
+  font-weight: 600;
+  letter-spacing: 0.14em;
+}
+.pulse-panel .panel-label .state.on     { color: var(--c-signal-text); }
+.pulse-panel .panel-label .state.paused { color: var(--c-signal-paused); }
+.pulse-grid {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.pulse-toggle-cell {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+}
+.pulse-toggle-form { margin: 0; }
+.pulse-lamp {
+  background: transparent;
+  border: 1px dashed var(--c-border-2);
+  border-radius: 999px;
+  padding: 16px 18px 12px;
+  cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  color: var(--c-text-dim);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  transition: border-color 160ms ease, color 160ms ease;
+}
+.pulse-lamp:hover { border-color: var(--c-signal); color: var(--c-text); }
+.pulse-lamp:disabled { cursor: not-allowed; opacity: 0.7; }
+.pulse-lamp .lamp-orb {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: var(--c-tile);
+  border: 1px solid var(--c-border-2);
+  box-shadow: inset 0 0 8px rgba(0,0,0,0.4);
+  transition: background 220ms ease, box-shadow 220ms ease, border-color 220ms ease;
+}
+.pulse-lamp.on { color: var(--c-signal-text); border-color: var(--c-signal); }
+.pulse-lamp.on .lamp-orb {
+  background: var(--c-signal);
+  border-color: var(--c-signal-accent);
+  box-shadow:
+    0 0 0 4px rgba(255, 179, 71, 0.10),
+    0 0 22px rgba(255, 179, 71, 0.55),
+    inset 0 0 6px rgba(255, 220, 150, 0.6);
+  animation: pulse-lamp-breathe 2.4s ease-in-out infinite;
+}
+.pulse-lamp.on.paused .lamp-orb {
+  background: var(--c-signal-paused);
+  box-shadow:
+    0 0 0 4px rgba(210, 154, 74, 0.10),
+    0 0 12px rgba(210, 154, 74, 0.40);
+  animation: none;
+}
+@keyframes pulse-lamp-breathe {
+  0%, 100% { opacity: 0.78; }
+  50%      { opacity: 1; }
+}
+.pulse-meta {
+  color: var(--c-text-dim);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  text-align: center;
+  line-height: 1.5;
+}
+.pulse-countdown { color: var(--c-signal-text); }
+.pulse-config-form {
+  display: flex; flex-direction: column; gap: 12px;
+  margin: 0;
+}
+.pulse-row { display: flex; flex-direction: column; gap: 6px; }
+.pulse-row.interval-row { flex-direction: row; align-items: center; gap: 10px; }
+.pulse-row.interval-row label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+  margin: 0;
+}
+.pulse-row.interval-row input[type=number] {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-2);
+  color: var(--c-text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  width: 80px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+}
+.pulse-row.interval-row select {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-2);
+  color: var(--c-text);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+.pulse-row.prompt-row label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+  display: flex; align-items: center; gap: 10px;
+}
+.pulse-row.prompt-row label .hint {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  color: var(--c-text-dim);
+  font-style: italic;
+}
+.pulse-row.prompt-row textarea {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-2);
+  color: var(--c-text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 110px;
+}
+.pulse-row.prompt-row textarea::placeholder { color: var(--c-placeholder-dim); }
+.pulse-row.actions-row { flex-direction: row; justify-content: flex-end; }
+.pulse-error {
+  color: var(--c-error-text);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+.pulse-save {
+  background: var(--c-tile);
+  border: 1px solid var(--c-border-2);
+  color: var(--c-signal-text);
+  border-radius: 8px;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  transition: box-shadow 160ms ease, background-color 160ms ease;
+}
+.pulse-save:hover {
+  background: var(--c-tile-hover);
+  border-color: var(--c-signal);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--c-signal) 30%, transparent);
+}
+.pulse-save:disabled { opacity: 0.5; cursor: not-allowed; }
+@media (max-width: 720px) {
+  .pulse-grid { grid-template-columns: 1fr; }
 }
 
 /* --- Settings menu (per-team section toggles) ------------------- */

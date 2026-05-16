@@ -11,6 +11,7 @@ export function HeroPanel() {
   const hero = useTeamStore((s) => s.snapshot?.hero);
   const statusHeadline = useTeamStore((s) => s.snapshot?.status_headline ?? '');
   const hasLeaderStatus = useTeamStore((s) => Boolean(s.snapshot?.leader_status));
+  const leaderUpdatedAgo = useTeamStore((s) => s.snapshot?.leader_status?.updated_ago ?? '');
   const hasPricing = useTeamStore((s) => Boolean(s.snapshot?.has_pricing));
   const pricingStale = useTeamStore((s) => Boolean(s.snapshot?.pricing_stale));
   const spendDisplay = useTeamStore((s) => s.snapshot?.hero_spend_display ?? '');
@@ -21,7 +22,12 @@ export function HeroPanel() {
     <section className="hero status-panel" aria-label="team summary">
       <div className="status-headline-row">
         <span className="status-lamp" aria-hidden="true" />
-        <p className={`status-headline${!hasLeaderStatus ? ' empty' : ''}`}>{statusHeadline}</p>
+        <p className={`status-headline${!hasLeaderStatus ? ' empty' : ''}`}>
+          {statusHeadline}
+          {hasLeaderStatus && leaderUpdatedAgo && (
+            <span className="when">{leaderUpdatedAgo}</span>
+          )}
+        </p>
       </div>
 
       <div className="hero-numbers">
