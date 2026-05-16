@@ -130,9 +130,13 @@ function handleDecisionNote(snap: StateSnapshot, ev: AuditEvent): StateSnapshot 
 }
 
 // handleJobLifecycle bumps the matching worker row's `age` to "0s" as a
-// proxy for last_seen. Worker.Activity is sourced server-side from
-// leader_status / open-task assignment and isn't something we can
-// derive from a single audit event, so we leave it alone.
+// proxy for last_seen and tracks `current_job_id` so the Watch button
+// appears / disappears without waiting for a full /state refresh.
+// job_received sets current_job_id; job_complete / job_error /
+// job_interrupted clear it when they match the row's job. Activity is
+// sourced server-side from leader_status / open-task assignment and
+// isn't something we can derive from a single audit event, so we leave
+// it alone.
 function handleJobLifecycle(snap: StateSnapshot, ev: AuditEvent): StateSnapshot | null {
   const agent = ev.agent_id;
   if (!agent) return null;
@@ -140,9 +144,24 @@ function handleJobLifecycle(snap: StateSnapshot, ev: AuditEvent): StateSnapshot 
   const idx = workers.findIndex((w) => w.agent_id === agent);
   if (idx < 0) return null;
   const cur = workers[idx];
-  if (cur.age === '0s') return null;
+  const jobID = ev.job_id ?? '';
+  let nextCurrent = cur.current_job_id;
+  switch (ev.kind) {
+    case 'job_received':
+      if (jobID && jobID !== cur.current_job_id) nextCurrent = jobID;
+      break;
+    case 'job_complete':
+    case 'job_error':
+    case 'job_interrupted':
+      if (jobID && jobID === cur.current_job_id) nextCurrent = '';
+      break;
+    default:
+      // job_transcript_ready and friends: leave current_job_id alone.
+      break;
+  }
+  if (cur.age === '0s' && nextCurrent === cur.current_job_id) return null;
   const next = workers.slice();
-  next[idx] = { ...cur, age: '0s' };
+  next[idx] = { ...cur, age: '0s', current_job_id: nextCurrent };
   return { ...snap, workers: next };
 }
 
