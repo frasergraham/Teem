@@ -602,3 +602,119 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
 .chat-panel h3.panel-label {
   margin: 0 0 12px 0;
 }
+
+/* --- Settings menu (per-team section toggles) ------------------- */
+
+.settings-gear {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--c-border, var(--border));
+  color: var(--c-text-muted, var(--muted));
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 8px;
+}
+.settings-gear:hover {
+  background: var(--c-tile-hover, var(--pill-bg));
+  color: var(--c-text, var(--fg));
+  border-color: var(--c-border-hover, var(--border));
+}
+.settings-gear:focus-visible {
+  outline: 2px solid var(--c-signal, var(--accent));
+  outline-offset: 1px;
+}
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 64px 16px 16px;
+  z-index: 1000;
+}
+.settings-modal {
+  background: var(--c-panel, var(--card));
+  color: var(--c-text, var(--fg));
+  border: 1px solid var(--c-border, var(--border));
+  border-radius: 10px;
+  width: min(420px, 100%);
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.4);
+}
+.settings-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--c-border, var(--border));
+}
+.settings-header h2 {
+  margin: 0;
+  flex: 1;
+  font-size: 15px;
+  font-weight: 600;
+  font-family: 'Fraunces', Georgia, serif;
+}
+.settings-close {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--c-text-muted, var(--muted));
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.settings-close:hover { color: var(--c-text, var(--fg)); }
+.settings-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+.settings-list li {
+  padding: 4px 0;
+}
+.settings-list label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.settings-list input[type='checkbox'] {
+  margin: 0;
+  cursor: pointer;
+}
+.settings-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--c-border, var(--border));
+  display: flex;
+  justify-content: flex-end;
+}
+.settings-reset {
+  appearance: none;
+  background: transparent;
+  color: var(--c-text-muted, var(--muted));
+  border: 1px solid var(--c-border, var(--border));
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-reset:hover {
+  background: var(--c-tile-hover, var(--pill-bg));
+  color: var(--c-text, var(--fg));
+  border-color: var(--c-border-hover, var(--border));
+}
