@@ -37,7 +37,7 @@ func newTestTeam(t *testing.T, name string) *registeredTeam {
 	}
 }
 
-func writeAudit(t *testing.T, sink *audit.FileSink, events ...audit.Event) {
+func writeAudit(t *testing.T, sink audit.Sink, events ...audit.Event) {
 	t.Helper()
 	for _, e := range events {
 		if err := sink.Write(e); err != nil {

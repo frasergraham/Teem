@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -147,29 +146,23 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 	writeSSE(w, flusher, "done", "")
 }
 
-// recordChatUsage emits a KindUsageEvent for an operator chat turn and
-// updates the daemon-global aggregator so chat spend hits the same
-// budget gate as pulse ticks and worker jobs. agentID is supplied by
-// the caller — "leader-chat" for the dashboard panel, "leader-telegram-chat"
-// for inbound Telegram /reply — distinct from "leader" (pulse) so
-// dashboards can tell who burned the tokens. Direct auditSink.Write
-// bypasses the HTTP audit hooks, so we have to call usageAgg.Record
-// explicitly (the audit hook chain only fires for events that come in
-// over the /audit endpoint).
+// recordChatUsage emits a KindUsageEvent for an operator chat turn.
+// agentID is supplied by the caller — "leader-chat" for the dashboard
+// panel, "leader-telegram-chat" for inbound Telegram /reply — distinct
+// from "leader" (pulse) so dashboards can tell who burned the tokens.
+// The wrapped audit sink runs the hook chain on Write, so the
+// daemon-global usage aggregator picks the event up via the usage
+// hook — no explicit Record call is needed.
 func (d *daemon) recordChatUsage(rt *registeredTeam, s usage.UsageSummary, agentID string) {
-	if rt != nil && rt.auditSink != nil {
-		_ = rt.auditSink.Write(audit.Event{
-			Timestamp: time.Now().UTC(),
-			AgentID:   agentID,
-			Kind:      audit.KindUsageEvent,
-			Meta:      usage.AuditMeta(s, agentID, ""),
-		})
+	if rt == nil || rt.auditSink == nil {
+		return
 	}
-	if d.usageAgg != nil {
-		if err := d.usageAgg.Record(s); err != nil {
-			fmt.Fprintf(os.Stderr, "[teemd] chat: usage record: %v\n", err)
-		}
-	}
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   agentID,
+		Kind:      audit.KindUsageEvent,
+		Meta:      usage.AuditMeta(s, agentID, ""),
+	})
 }
 
 // streamChatResponse parses Claude Code's stream-json output and

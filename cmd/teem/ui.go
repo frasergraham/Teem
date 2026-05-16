@@ -682,7 +682,7 @@ func parseUnixSeconds(v string) (time.Time, bool) {
 // We pad the since cursor by one second because the audit timestamp is
 // stamped at the start of Tick() while ping_ts is stamped just before
 // safeGo dispatch — those can land in opposite microsecond orders.
-func resolvePingOutcome(sink *audit.FileSink, sinceTS time.Time) (string, string, bool) {
+func resolvePingOutcome(sink audit.Sink, sinceTS time.Time) (string, string, bool) {
 	since := sinceTS.Add(-1 * time.Second)
 	events, err := sink.Query("leader", since, 32)
 	if err != nil {

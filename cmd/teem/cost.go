@@ -16,7 +16,7 @@ import (
 // Returns nil when no sink is configured (a freshly-spun-up daemon
 // that hasn't seen any usage events) so the caller's downstream
 // PerTaskCost / TodaysSpend safely return zero values.
-func buildCostEvents(sink *audit.FileSink, since time.Time) []usage.CostEvent {
+func buildCostEvents(sink audit.Sink, since time.Time) []usage.CostEvent {
 	if sink == nil {
 		return nil
 	}
