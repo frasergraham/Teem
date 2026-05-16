@@ -452,6 +452,23 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
 
 .tasks-empty { color: var(--c-text-dim); font-style: italic; font-size: 13px; padding: 6px 0; }
 
+.tasks-done { margin-top: 12px; }
+.tasks-done > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--c-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 6px 0;
+}
+.tasks-done > summary:hover { color: var(--c-text); }
+.tasks-done > summary .count {
+  font-weight: 600;
+  color: var(--c-text);
+  margin-left: 4px;
+}
+.tasks-done table.tasks { opacity: 0.72; margin-top: 4px; }
+
 /* "→ ready" inline button (TasksTable.tsx). Small, fits next to the
    stage pill; uses the signal accent so the click target reads as
    "this advances the pipeline." Disabled while the POST is in

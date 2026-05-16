@@ -13,6 +13,7 @@ import { DashboardTask, useTeamStore } from '../store/team';
 // is a rendered duration string that can't be sorted).
 export function TasksTable() {
   const open = useTeamStore((s) => s.snapshot?.tasks.open ?? emptyTasks);
+  const recentDone = useTeamStore((s) => s.snapshot?.tasks.recent_done ?? emptyTasks);
   return (
     <section className="tasks-panel" aria-label="open tasks">
       <h3 className="panel-label">
@@ -37,6 +38,29 @@ export function TasksTable() {
             ))}
           </tbody>
         </table>
+      )}
+      {recentDone.length > 0 && (
+        <details className="tasks-done">
+          <summary>
+            Recently completed <span className="count">{recentDone.length}</span>
+          </summary>
+          <table className="tasks">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Title</th>
+                <th>Stage</th>
+                <th>Assignee</th>
+                <th>Verified</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentDone.map((t) => (
+                <TaskRow key={t.id} task={t} />
+              ))}
+            </tbody>
+          </table>
+        </details>
       )}
     </section>
   );
