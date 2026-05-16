@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/audit"
+	"github.com/frasergraham/teem/internal/team"
 )
 
 // pmLoopDefaultInterval is the scheduled-tick cadence used when a
@@ -135,7 +136,7 @@ func (c PMLoopConfig) Loop(ctx context.Context) {
 // worker. Every path emits a pm_tick audit event so the operator can
 // see the cadence in `teem audit`.
 func (c PMLoopConfig) tick(ctx context.Context) {
-	agentID, err := c.Spawner.Spawn(ctx, "project_manager", "")
+	agentID, err := c.Spawner.Spawn(ctx, team.PMArchetypeRole, "")
 	if err != nil {
 		outcome := audit.PMOutcomeError
 		if isAtCapacityErr(err) {

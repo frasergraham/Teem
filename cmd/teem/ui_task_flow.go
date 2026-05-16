@@ -73,8 +73,9 @@ func (d *daemon) renderTaskFlow(w http.ResponseWriter, _ *http.Request, rt *regi
 		http.NotFound(w, nil)
 		return
 	}
+	tv := d.snapshotTeam(rt)
 	view := taskFlowView{
-		Team:         rt.team.Name,
+		Team:         tv.Name,
 		NowFormatted: time.Now().Local().Format("Mon Jan 2 15:04:05"),
 		Task: taskFlowBanner{
 			ID:         task.ID,

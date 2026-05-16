@@ -48,11 +48,6 @@ func safeReregisterDelta(existing, fresh *team.Team) (displayChanged bool, struc
 	return displayChanged, structuralChanges
 }
 
-// pmArchetypeRole is the hardcoded role name MaybePMArchetype synthesises;
-// kept here so the archetype-diff filter doesn't have to round-trip
-// through MaybePMArchetype (which returns nil on the trackerless side).
-const pmArchetypeRole = "project_manager"
-
 // augmentedArchetypes returns the team's declared archetypes plus the
 // synthesised project_manager (if Tracker.Type is set). The existing
 // team has had MaybePMArchetype appended at first-register; a fresh
@@ -67,7 +62,7 @@ func augmentedArchetypes(t *team.Team, skipPM bool) []team.ArchetypeSpec {
 	if skipPM {
 		filtered := make([]team.ArchetypeSpec, 0, len(archs))
 		for _, a := range archs {
-			if a.Role == pmArchetypeRole {
+			if a.Role == team.PMArchetypeRole {
 				continue
 			}
 			filtered = append(filtered, a)

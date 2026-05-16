@@ -45,13 +45,12 @@ type apiTeamStateResponse struct {
 }
 
 func (d *daemon) handleAPITeamState(w http.ResponseWriter, _ *http.Request, rt *registeredTeam) {
-	name := ""
+	tv := d.snapshotTeam(rt)
 	id := ""
 	if rt.team != nil {
-		name = rt.team.Name
 		id = rt.team.ID
 	}
-	resp := apiTeamStateResponse{Team: apiTeam{ID: id, Name: name}}
+	resp := apiTeamStateResponse{Team: apiTeam{ID: id, Name: tv.Name}}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(resp)

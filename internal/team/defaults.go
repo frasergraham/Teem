@@ -127,6 +127,12 @@ var DefaultArchetypes = []ArchetypeSpec{
 	},
 }
 
+// PMArchetypeRole is the canonical role name MaybePMArchetype
+// synthesises. Exported so callers outside this package (the
+// register-delta filter, the PM loop spawn site) can reference the
+// single source of truth instead of duplicating the literal.
+const PMArchetypeRole = "project_manager"
+
 // MaybePMArchetype returns a synthesised project_manager archetype
 // when the team is wired to an external tracker (Tracker != nil), and
 // nil otherwise. The daemon appends the returned spec to the runtime
@@ -147,7 +153,7 @@ func MaybePMArchetype(t *Team) *ArchetypeSpec {
 		return nil
 	}
 	return &ArchetypeSpec{
-		Role:          "project_manager",
+		Role:          PMArchetypeRole,
 		Description:   fmt.Sprintf("Partner/consultant for the leader. Owns the %s tracker, files new tasks into the Teem plan, never writes code.", t.Tracker.Type),
 		Placement:     "local",
 		MaxConcurrent: 1,
