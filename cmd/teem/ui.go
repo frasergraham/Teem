@@ -199,6 +199,13 @@ type workerRow struct {
 	RoleColourClass string `json:"role_colour_class"`
 	Activity        string `json:"activity"`
 	Age             string `json:"age"`
+	// CurrentJobID is the agent's most recent open job — the latest
+	// job_received event for this agent_id with no matching
+	// terminal (job_complete / job_error / job_interrupted) event.
+	// Empty when the agent has no in-flight job. The SPA wires a
+	// "Watch" button on the row that opens the live-transcript
+	// modal (WatchTranscriptModal) when this is non-empty.
+	CurrentJobID string `json:"current_job_id,omitempty"`
 }
 
 // teamHero is the data behind the prominent at-a-glance hero band at
@@ -585,7 +592,7 @@ func teamSnapshot(v teamView) dashboardTeam {
 	// stage bar. Computed last so it can read the already-collected
 	// counters and the live agent set.
 	out.Hero = buildTeamHero(rt, &out)
-	out.Workers = buildWorkers(&out)
+	out.Workers = buildWorkers(&out, currentJobsByAgent(rt))
 	out.StatusHeadline = buildStatusHeadline(&out)
 	out.Decisions = buildDecisions(rt, &out)
 
@@ -1014,7 +1021,12 @@ func splitInterval(d time.Duration) (int, string) {
 // of the page). Activity prefers the agent's leader-status entry when
 // one exists (operator-visible signal), then falls back to the first
 // open task assigned to that agent. Empty otherwise.
-func buildWorkers(team *dashboardTeam) []workerRow {
+//
+// CurrentJobID is populated from currentJobsByAgent (the latest
+// job_received for that agent without a terminal job_complete /
+// job_error / job_interrupted). The SPA uses this to decide whether
+// to render the "Watch" button on the row.
+func buildWorkers(team *dashboardTeam, currentJobsByAgent map[string]string) []workerRow {
 	if len(team.Agents) == 0 {
 		return nil
 	}
@@ -1055,6 +1067,7 @@ func buildWorkers(team *dashboardTeam) []workerRow {
 			RoleTag:         tag,
 			RoleColourClass: colour,
 			Age:             a.LastSeen,
+			CurrentJobID:    currentJobsByAgent[a.ID],
 		}
 		switch {
 		case statusByAgent[a.ID] != "":
@@ -1065,6 +1078,60 @@ func buildWorkers(team *dashboardTeam) []workerRow {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// currentJobsByAgent walks the recent audit events and returns
+// agent_id → job_id for jobs that are in flight: the latest
+// job_received event for that agent_id with no matching terminal
+// (job_complete / job_error / job_interrupted) event. Empty when the
+// audit sink is nil or no recent job_received fired.
+//
+// Window matches buildJobLookup (72h): enough to span an unattended
+// run that survives a daemon bounce, narrow enough to keep the scan
+// cheap. Walk newest-first so the first job_received we see for an
+// agent is the latest one; ignore older receipts after that.
+func currentJobsByAgent(rt *registeredTeam) map[string]string {
+	out := map[string]string{}
+	if rt == nil || rt.auditSink == nil {
+		return out
+	}
+	events, err := rt.auditSink.Query("", time.Now().Add(-72*time.Hour), 5000)
+	if err != nil || len(events) == 0 {
+		return out
+	}
+	// FileSink.Query returns oldest-first; track terminations and the
+	// latest job_received per agent in a single pass.
+	terminated := map[string]bool{}
+	latestStart := map[string]struct {
+		jobID string
+		ts    time.Time
+	}{}
+	for _, e := range events {
+		if e.JobID == "" {
+			continue
+		}
+		switch e.Kind {
+		case audit.KindJobComplete, audit.KindJobError, audit.KindJobInterrupted:
+			terminated[e.JobID] = true
+		case audit.KindJobReceived:
+			if e.AgentID == "" {
+				continue
+			}
+			cur, ok := latestStart[e.AgentID]
+			if !ok || e.Timestamp.After(cur.ts) {
+				latestStart[e.AgentID] = struct {
+					jobID string
+					ts    time.Time
+				}{jobID: e.JobID, ts: e.Timestamp}
+			}
+		}
+	}
+	for agent, ls := range latestStart {
+		if !terminated[ls.jobID] {
+			out[agent] = ls.jobID
+		}
+	}
+	return out
 }
 
 // personaOrFallback runs team.PersonaName and falls back to the raw id

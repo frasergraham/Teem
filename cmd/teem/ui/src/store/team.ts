@@ -42,6 +42,11 @@ export interface Worker {
   role_colour_class: string;
   activity: string;
   age: string;
+  // current_job_id: most recent job_received without a terminal
+  // job_complete/error/interrupted. Empty when the agent has no
+  // in-flight job. Drives the "Watch" button rendering in
+  // WorkersPanel.
+  current_job_id?: string;
 }
 
 export interface DashboardTask {

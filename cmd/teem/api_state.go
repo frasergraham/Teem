@@ -19,6 +19,9 @@ import (
 //	                                         evidence jobs with
 //	                                         transcript URLs).
 //	GET /api/teams/<id>/transcripts/<a>/<j>→ raw NDJSON transcript.
+//	GET /api/teams/<id>/transcripts/<a>/<j>/watch
+//	                                        → SSE stream of the live
+//	                                          NDJSON transcript file.
 //
 // Auth model matches the dashboard's tailnet boundary: no bearer
 // required. All endpoints are read-only.
@@ -48,7 +51,14 @@ func (d *daemon) handleAPITeamRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		d.handleAPITeamTaskDetail(w, r, rt, taskID)
 	case strings.HasPrefix(suffix, "/transcripts/"):
-		d.handleAPITeamTranscriptGet(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
+		rest := strings.TrimPrefix(suffix, "/transcripts/")
+		// /transcripts/<agent>/<job>/watch  → live SSE stream
+		// /transcripts/<agent>/<job>        → raw NDJSON (current contents)
+		if a, j, ok := splitWatchPath(rest); ok {
+			d.handleAPITeamTranscriptWatch(w, r, rt, a, j)
+		} else {
+			d.handleAPITeamTranscriptGet(w, r, rt, rest)
+		}
 	default:
 		http.NotFound(w, r)
 	}

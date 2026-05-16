@@ -323,11 +323,37 @@ body.team-detail-page {
 .workers { display: flex; flex-direction: column; gap: 0; }
 .worker-row {
   display: grid;
-  grid-template-columns: minmax(180px, auto) auto 1fr auto;
+  grid-template-columns: minmax(180px, auto) auto 1fr auto auto;
   gap: 18px;
   align-items: baseline;
   padding: 10px 0;
   border-top: 1px dashed var(--c-rule);
+}
+.worker-row .worker-watch-btn {
+  appearance: none;
+  background: transparent;
+  color: var(--c-azure);
+  border: 1px solid var(--c-rule);
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 2px 9px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+.worker-row .worker-watch-btn:hover {
+  border-color: var(--c-azure);
+  background: rgba(125, 211, 252, 0.08);
+}
+.worker-row .worker-watch-btn:focus-visible {
+  outline: 2px solid var(--c-signal-accent, var(--c-azure));
+  outline-offset: 2px;
+}
+.worker-row .worker-watch-placeholder {
+  display: inline-block;
+  width: 0;
+  height: 0;
 }
 .worker-row:first-child { border-top: none; padding-top: 4px; }
 .worker-row:last-child  { padding-bottom: 2px; }
@@ -1298,4 +1324,105 @@ table.tasks tbody tr.task-row:focus-visible {
   color: var(--c-text-dim);
   font-style: italic;
   font-size: 13px;
+}
+
+/* Watch modal — live transcript stream. Sits on top of the
+   task-modal-* shell (same backdrop, header layout, close button) so
+   only the body and a couple of pills need their own tokens. */
+.watch-modal-card {
+  width: min(880px, 100%);
+  max-height: 88vh;
+}
+.watch-state {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  border: 1px solid var(--c-rule, var(--border));
+}
+.watch-state.streaming {
+  background: rgba(125, 211, 252, 0.10);
+  color: var(--c-azure);
+  border-color: var(--c-azure);
+}
+.watch-state.done {
+  background: var(--c-panel-alt, var(--pill-bg));
+  color: var(--c-text-muted, var(--muted));
+}
+.watch-state.error {
+  background: rgba(220, 80, 80, 0.10);
+  color: #ef6868;
+  border-color: #ef6868;
+}
+.watch-events {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--c-panel, var(--card));
+}
+.watch-empty {
+  color: var(--c-text-dim);
+  font-style: italic;
+  padding: 12px 0;
+  text-align: center;
+}
+.watch-event {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border-left: 2px solid transparent;
+  background: transparent;
+}
+.watch-event-kind {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+}
+.watch-event-text {
+  color: var(--c-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.watch-event.assistant {
+  border-left-color: var(--c-azure);
+  background: rgba(125, 211, 252, 0.06);
+}
+.watch-event.assistant .watch-event-kind { color: var(--c-azure); }
+.watch-event.tool {
+  border-left-color: var(--c-role-reviewer, var(--c-text-muted));
+}
+.watch-event.tool .watch-event-kind { color: var(--c-role-reviewer, var(--c-text-muted)); }
+.watch-event.system {
+  border-left-color: var(--c-text-dim);
+  background: rgba(127, 127, 127, 0.04);
+}
+.watch-event.result {
+  border-left-color: var(--c-role-integrator, var(--c-azure));
+  background: var(--c-panel-alt, var(--pill-bg));
+}
+.watch-event.result .watch-event-kind {
+  color: var(--c-role-integrator, var(--c-azure));
+}
+.watch-event.error {
+  border-left-color: #ef6868;
+  background: rgba(220, 80, 80, 0.08);
+}
+.watch-event.error .watch-event-kind { color: #ef6868; }
+.watch-event.unknown {
+  color: var(--c-text-dim);
+  font-style: italic;
 }
