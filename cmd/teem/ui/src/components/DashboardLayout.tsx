@@ -3,6 +3,7 @@ import { ConnState, useTeamStore } from '../store/team';
 import { HeroPanel } from './HeroPanel';
 import { WorkersPanel } from './WorkersPanel';
 import { TasksTable } from './TasksTable';
+import { ChatPanel } from './ChatPanel';
 
 // DashboardLayout is the top-level SPA frame: sticky header (team name,
 // leader status text, connection-state dot) plus the three Phase 2c-ii
@@ -29,6 +30,7 @@ export function DashboardLayout() {
         <HeroPanel />
         <WorkersPanel />
         <TasksTable />
+        <ChatPanel />
       </main>
     </>
   );

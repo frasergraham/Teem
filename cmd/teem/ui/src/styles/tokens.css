@@ -439,3 +439,166 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
 }
 
 .tasks-empty { color: var(--c-text-dim); font-style: italic; font-size: 13px; padding: 6px 0; }
+
+/* --- Chat panel -------------------------------------------------
+   Mirrors the SSR `.chat-panel` block in cmd/teem/ui_dashboard.html
+   so the SPA chat renders identically. Un-scoped on body class:
+   DashboardLayout adds body.team-detail-page on mount, but these
+   rules don't strictly need it since the SPA never renders chat
+   outside that context. */
+
+.chat-panel {
+  background: var(--c-panel);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 20px 22px;
+}
+.chat-log {
+  display: flex; flex-direction: column;
+  gap: 12px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 4px 6px 18px 0;
+  margin-bottom: 12px;
+  mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 22px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 22px), transparent 100%);
+}
+.chat-log::-webkit-scrollbar { width: 6px; }
+.chat-log::-webkit-scrollbar-thumb { background: var(--c-border); border-radius: 3px; }
+.chat-log:empty::before {
+  content: "No messages yet — send something to wake the leader.";
+  color: var(--c-text-dim); font-style: italic; font-size: 13px;
+}
+.chat-msg {
+  display: flex; gap: 10px;
+  max-width: 88%;
+}
+.chat-msg .avatar {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.chat-msg.user { align-self: flex-end; flex-direction: row-reverse; }
+.chat-msg.user .avatar {
+  background: rgba(125,211,252,0.12); color: var(--c-azure);
+  border: 1px solid rgba(125,211,252,0.30);
+}
+.chat-msg.leader .avatar {
+  background: rgba(255,179,71,0.12); color: var(--c-signal-text);
+  border: 1px solid rgba(255,179,71,0.30);
+}
+.chat-msg .body {
+  background: var(--c-panel-alt);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--c-text);
+  word-wrap: break-word;
+}
+.chat-msg .body > :first-child { margin-top: 0; }
+.chat-msg .body > :last-child  { margin-bottom: 0; }
+.chat-msg .body p { margin: 0.4em 0; }
+.chat-msg .body pre {
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+.chat-msg .body code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+.chat-msg.user .body {
+  background: linear-gradient(180deg, rgba(125,211,252,0.08), rgba(125,211,252,0.02));
+  border-color: rgba(125,211,252,0.20);
+  border-top-right-radius: 2px;
+}
+.chat-msg.leader .body { border-top-left-radius: 2px; }
+.chat-msg.leader.pending .body { color: var(--c-text-dim); font-style: italic; }
+.chat-msg.error .body {
+  border-color: rgba(239,68,68,0.40); color: var(--c-error-text);
+}
+.chat-msg .stamp {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--c-text-dim);
+  margin-top: 4px;
+  letter-spacing: 0.02em;
+}
+.chat-msg.user .stamp { text-align: right; }
+.chat-compose {
+  display: flex; gap: 10px; align-items: stretch;
+  border-top: 1px dashed var(--c-rule);
+  padding-top: 12px;
+}
+.chat-input {
+  flex: 1;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--c-text);
+  font-family: 'Bricolage Grotesque', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 180px;
+}
+.chat-input:focus {
+  outline: none;
+  border-color: var(--c-signal);
+  box-shadow: 0 0 0 3px rgba(255,179,71,0.12);
+}
+.chat-input::placeholder { color: var(--c-text-dim); font-style: italic; }
+.chat-send {
+  appearance: none;
+  background: var(--c-signal);
+  color: var(--c-on-signal-warm, var(--c-on-signal));
+  border: none;
+  border-radius: 8px;
+  padding: 0 22px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.chat-send:hover { background: var(--c-signal-hover); }
+.chat-send:disabled { opacity: 0.45; cursor: not-allowed; }
+.chat-hint {
+  margin-top: 8px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--c-text-dim);
+  letter-spacing: 0.04em;
+}
+.chat-hint kbd {
+  background: var(--c-border);
+  border: 1px solid var(--c-border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--c-text-muted);
+}
+.chat-panel details > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.chat-panel details > summary::-webkit-details-marker { display: none; }
+.chat-panel h3.panel-label {
+  margin: 0 0 12px 0;
+}
