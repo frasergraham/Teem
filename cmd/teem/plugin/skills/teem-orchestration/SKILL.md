@@ -62,7 +62,10 @@ The `teem` MCP server exposes these tools.
   plan. Returns stage + stage_entered_at so callers can see how long
   a task has been parked.
 - `link_task_to_job(task_id, job_id)` — register that this job is the
-  work for this task (shortcut for update_task add_evidence).
+  work for this task (shortcut for update_task add_evidence). RARELY
+  needed: `assign_job` already links its returned job_id to the task
+  you passed in. Use this only to back-fill evidence after the fact
+  (e.g. ad-hoc work you want to attribute to a task post-hoc).
 
 Use the plan as durable memory across sessions and across daemon
 restarts. At the start of a non-trivial piece of work, break it into
@@ -206,7 +209,14 @@ and knows the current state without re-reading git history.
   Each entry: `{name, role, first_seen, last_seen, in_use,
   source}` where `source` is `wordlist` (allocator-picked),
   `named` (you supplied it), or `legacy` (migrated pre-T9 id).
-- `assign_job(agent_id, prompt, context?)` — hand a job to a worker.
+- `assign_job(agent_id, task_id, prompt, context?)` — hand a job to a
+  worker. `task_id` is REQUIRED — every job is task-scoped. The daemon
+  enforces it: missing or unknown task_id is rejected. There are no
+  standalone jobs. The daemon synchronously appends the new job_id to
+  that task's evidence and tags every subsequent audit event from this
+  job with `meta.task_id`, so the task-detail timeline reconstructs
+  full provenance (who planned it, coded it, reviewed it, etc.)
+  automatically. If you don't have a task yet, `add_task` first.
   Returns a `job_id` immediately; the job runs in the worker's own
   Claude Code process.
 - `get_results(job_id)` — poll for a job's result. Returns
@@ -283,8 +293,10 @@ Do it yourself when:
 2. **Spawn** — if the right role isn't already running (`list_agents`),
    `spawn_agent`. For Fargate, mention you're waiting on a cold start
    and keep the user oriented.
-3. **Assign** — `assign_job` with a tight, self-contained prompt.
-   Include context the worker won't have (paths, constraints, success
+3. **Assign** — `assign_job(agent_id, task_id, prompt, context?)` with
+   a tight, self-contained prompt. `task_id` is required — every job
+   is task-scoped, so `add_task` first if you don't have one. Include
+   context the worker won't have (paths, constraints, success
    criteria). Workers don't see your chat history.
 4. **Poll** — `get_results`. Don't poll in a tight loop; check
    periodically while doing other useful work.

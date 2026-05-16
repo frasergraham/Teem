@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -89,10 +90,23 @@ func (s *Server) handleListRoster(_ context.Context, req mcpgo.CallToolRequest) 
 	return mcpgo.NewToolResultText(string(body)), nil
 }
 
+// taskIDPattern is the canonical regex for plan task ids: "t-" followed
+// by 8 lowercase hex chars. Used as a fast-fail input check so a
+// typo'd task_id surfaces a clearer error than the plan-side
+// "not found" message.
+var taskIDPattern = regexp.MustCompile(`^t-[a-f0-9]{8}$`)
+
 func (s *Server) handleAssignJob(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 	agentID, err := req.RequireString("agent_id")
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
+	}
+	taskID, err := req.RequireString("task_id")
+	if err != nil {
+		return mcpgo.NewToolResultError("task_id is required (every job is task-scoped; create a task with add_task first)"), nil
+	}
+	if !taskIDPattern.MatchString(taskID) {
+		return mcpgo.NewToolResultErrorf("task_id %q does not match the canonical format ^t-[a-f0-9]{8}$", taskID), nil
 	}
 	prompt, err := req.RequireString("prompt")
 	if err != nil {
@@ -102,11 +116,27 @@ func (s *Server) handleAssignJob(ctx context.Context, req mcpgo.CallToolRequest)
 	if _, ok := s.registry.Get(agentID); !ok {
 		return mcpgo.NewToolResultErrorf("agent %q not found; spawn it first", agentID), nil
 	}
+	if s.plan == nil {
+		return mcpgo.NewToolResultError("plan store is not configured — assign_job needs a task_id to attribute work"), nil
+	}
+	if _, ok := s.plan.Get(taskID); !ok {
+		return mcpgo.NewToolResultErrorf("task %q not found in the plan", taskID), nil
+	}
 	jobID, err := s.spawner.AssignJob(ctx, agentID, prompt, contextNote)
 	if err != nil {
 		return mcpgo.NewToolResultErrorFromErr("assign_job failed", err), nil
 	}
-	out, _ := json.Marshal(map[string]string{"job_id": jobID})
+	// Link the new job to the task synchronously: plan.Evidence is the
+	// durable record (survives daemon restart, rehydrates the index)
+	// and JobTaskIndex is the fast in-memory lookup that drives
+	// audit-event task_id injection. Both updates use the same
+	// jobID so a restart that replays plan-from-disk reconstructs
+	// the index exactly.
+	if _, err := s.plan.LinkJob(taskID, jobID); err != nil {
+		return mcpgo.NewToolResultErrorFromErr("assign_job: link evidence", err), nil
+	}
+	s.jobTaskIdx.Set(jobID, taskID)
+	out, _ := json.Marshal(map[string]string{"job_id": jobID, "task_id": taskID})
 	return mcpgo.NewToolResultText(string(out)), nil
 }
 

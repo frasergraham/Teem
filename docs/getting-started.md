@@ -93,7 +93,7 @@ skill is loaded; the leader has these MCP tools available:
 |---|---|
 | `read_team` / `list_agents` | Roster + active instances |
 | `spawn_agent(role)` | Provision a new instance of a role |
-| `assign_job(agent_id, prompt)` | Hand a job to a worker |
+| `assign_job(agent_id, task_id, prompt)` | Hand a task-scoped job to a worker (task_id required; daemon links evidence + tags audit events) |
 | `get_results(job_id)` | Poll for job output |
 | `stop_agent(agent_id)` | Tear down a running worker |
 | `add_archetype` / `remove_archetype` / `update_archetype` | Mutate the role roster at runtime |
