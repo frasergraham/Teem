@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1090,6 +1091,11 @@ func TestPulse_SetWakePromptPersistsConfig(t *testing.T) {
 	if loaded.WakePrompt != "Scan loudly." {
 		t.Errorf("persisted WakePrompt = %q, want %q", loaded.WakePrompt, "Scan loudly.")
 	}
+	// The combined document should always carry both fields; an empty
+	// Interval here would mean SetWakePrompt dropped the cadence half.
+	if loaded.Interval == "" {
+		t.Errorf("persisted Interval is empty; SetWakePrompt should write combined config")
+	}
 
 	// Clearing writes wake_prompt:"" and the next New picks default.
 	if err := p.SetWakePrompt(""); err != nil {
@@ -1117,5 +1123,62 @@ func TestPulse_TickStillFiresWhenInvokedDirectlyUnderChannelsLive(t *testing.T) 
 	// A successful direct Tick now emits pulse_tick + usage_event.
 	if got := countKind(events, "pulse_tick"); got != 1 {
 		t.Errorf("direct Tick should not be gated by channels-live; pulse_tick events=%d", got)
+	}
+}
+
+// TestPulse_ConcurrentSetIntervalPersistsConsistently exercises the
+// race window between intervalNs.Store and persistConfig: without
+// persistMu, writer B's Store can land between writer A's Store and
+// A's disk write, leaving in-memory and on-disk holding different
+// values. With persistMu the (store + persist) pair is atomic, so
+// whichever goroutine wins last is reflected on both sides.
+func TestPulse_ConcurrentSetIntervalPersistsConsistently(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:    "x",
+		LoadSession: func() (string, bool, error) { return "", false, nil },
+		PauseFile:   filepath.Join(dir, "paused"),
+		ConfigPath:  filepath.Join(dir, "pulse_config.json"),
+		MCPConfig:   filepath.Join(dir, "mcp.json"),
+		RepoRoot:    dir,
+		Audit:       tempSink(t),
+		Interval:    5 * time.Minute,
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+	p := New(cfg)
+
+	const (
+		writers = 8
+		iters   = 50
+	)
+	// Distinct durations per goroutine so any survivor leaves an
+	// unmistakable fingerprint on disk.
+	durations := make([]time.Duration, writers)
+	for i := range durations {
+		durations[i] = time.Duration(i+1) * time.Minute
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(writers)
+	for i := 0; i < writers; i++ {
+		go func(d time.Duration) {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				p.SetInterval(d)
+			}
+		}(durations[i])
+	}
+	wg.Wait()
+
+	loaded, ok := loadPulseConfigFile(cfg.ConfigPath)
+	if !ok {
+		t.Fatalf("pulse_config.json should exist + parse after concurrent SetInterval")
+	}
+	diskInterval, err := time.ParseDuration(loaded.Interval)
+	if err != nil {
+		t.Fatalf("loaded.Interval %q does not parse: %v", loaded.Interval, err)
+	}
+	if diskInterval != p.Interval() {
+		t.Errorf("in-memory Interval (%s) and on-disk Interval (%s) diverge after concurrent SetInterval", p.Interval(), diskInterval)
 	}
 }

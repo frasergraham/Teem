@@ -152,6 +152,16 @@ type Pulse struct {
 	// atomically so the timer loop's effectiveInterval read doesn't
 	// race the dashboard's SetInterval / UpdateConfig writes.
 	intervalNs atomic.Int64
+
+	// persistMu serializes the (mutate in-memory + persistConfig)
+	// pair on the write path so two concurrent SetInterval /
+	// SetWakePrompt / UpdateConfig calls cannot interleave their
+	// store and disk-write halves. Without this lock, writer B's
+	// atomic.Store could land between writer A's Store and A's
+	// persistConfig, leaving in-memory holding B's value while disk
+	// holds A's. Read paths (Interval, WakePrompt) do NOT take this
+	// mutex — they stay on the atomic.
+	persistMu sync.Mutex
 }
 
 // New constructs a Pulse from a Config. Sensible defaults are applied
@@ -181,6 +191,7 @@ func New(cfg Config) *Pulse {
 	// Persisted config wins over cfg defaults so a daemon restart
 	// honors the last-set interval / wake prompt without operator
 	// intervention. Missing or malformed → fall back to defaults.
+	// Disk wins; see TestPulse_LoadsIntervalFromConfigFile.
 	if loaded, ok := loadPulseConfigFile(cfg.ConfigPath); ok {
 		if loaded.Interval != "" {
 			if d, err := time.ParseDuration(loaded.Interval); err == nil && d > 0 {
@@ -297,6 +308,14 @@ func DefaultWakePrompt() string { return defaultWakePrompt }
 // default. Safe to call while pulse is running; the next tick's
 // invokeClaude call observes the new value.
 func (p *Pulse) SetWakePrompt(text string) error {
+	p.persistMu.Lock()
+	defer p.persistMu.Unlock()
+	return p.setWakePromptLocked(text)
+}
+
+// setWakePromptLocked is SetWakePrompt's body without the lock — call
+// only from a code path that already holds persistMu.
+func (p *Pulse) setWakePromptLocked(text string) error {
 	trimmed := strings.TrimSpace(text)
 	var fileErr error
 	if trimmed == "" {
@@ -442,10 +461,13 @@ func (p *Pulse) Busy() bool {
 // change takes effect on the next tick wakeup. The new value is
 // persisted to ConfigPath so a daemon restart picks it up.
 func (p *Pulse) SetInterval(d time.Duration) {
-	if d > 0 {
-		p.intervalNs.Store(int64(d))
-		_ = p.persistConfig()
+	if d <= 0 {
+		return
 	}
+	p.persistMu.Lock()
+	defer p.persistMu.Unlock()
+	p.intervalNs.Store(int64(d))
+	_ = p.persistConfig()
 }
 
 // UpdateConfig changes the cadence and/or wake prompt on a running
@@ -455,13 +477,15 @@ func (p *Pulse) SetInterval(d time.Duration) {
 // existing prompt. Returns the wake-prompt persistence error (if any)
 // — the interval change is in-memory only and cannot fail.
 func (p *Pulse) UpdateConfig(interval time.Duration, wakePrompt *string) error {
+	p.persistMu.Lock()
+	defer p.persistMu.Unlock()
 	if interval > 0 {
 		p.intervalNs.Store(int64(interval))
 	}
 	if wakePrompt != nil {
-		// SetWakePrompt persists the combined config, so the new
-		// interval lands on disk in the same write.
-		return p.SetWakePrompt(*wakePrompt)
+		// setWakePromptLocked persists the combined config, so the
+		// new interval lands on disk in the same write.
+		return p.setWakePromptLocked(*wakePrompt)
 	}
 	if interval > 0 {
 		return p.persistConfig()
