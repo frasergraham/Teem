@@ -194,7 +194,7 @@ func parsePortNumber(addr string) int {
 // reach to the webhook endpoint alone.
 func newWebhookHandler(d *daemon) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/messaging/telegram/webhook" {
+		if r.URL.Path != messaging.WebhookPath {
 			http.NotFound(w, r)
 			return
 		}

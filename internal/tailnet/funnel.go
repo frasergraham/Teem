@@ -20,37 +20,38 @@ const FunnelHTTPSPort uint16 = 443
 // https://<node-fqdn>/<path> arriving via Tailscale Funnel are proxied
 // to http://127.0.0.1:<localPort>. The tailnet ACL must allow Funnel
 // for this node; if not, EnableFunnel returns a wrapped error telling
-// the operator how to fix it.
+// the operator how to fix it. Returns the resolved fqdn on success so
+// callers can log / surface it without a second LocalClient round-trip.
 //
 // The webhook listener must be bound on 127.0.0.1 — tsnet's serve
 // daemon proxies from the funnel-terminated HTTPS endpoint into the
 // host loopback, not onto the tsnet node's own listener.
-func (n *Node) EnableFunnel(ctx context.Context, path string, localPort int) error {
+func (n *Node) EnableFunnel(ctx context.Context, path string, localPort int) (string, error) {
 	if n == nil || n.srv == nil {
-		return errors.New("tailnet: node not initialised")
+		return "", errors.New("tailnet: node not initialised")
 	}
 	if path == "" || path[0] != '/' {
-		return fmt.Errorf("tailnet: funnel path %q must start with /", path)
+		return "", fmt.Errorf("tailnet: funnel path %q must start with /", path)
 	}
 	if localPort <= 0 || localPort > 65535 {
-		return fmt.Errorf("tailnet: funnel local port %d out of range", localPort)
+		return "", fmt.Errorf("tailnet: funnel local port %d out of range", localPort)
 	}
 	fqdn, err := n.fqdn(ctx)
 	if err != nil {
-		return fmt.Errorf("tailnet: funnel resolve fqdn: %w", err)
+		return "", fmt.Errorf("tailnet: funnel resolve fqdn: %w", err)
 	}
 	sc := buildFunnelServeConfig(fqdn, FunnelHTTPSPort, path, localPort)
 	lc, err := n.srv.LocalClient()
 	if err != nil {
-		return fmt.Errorf("tailnet: funnel local client: %w", err)
+		return "", fmt.Errorf("tailnet: funnel local client: %w", err)
 	}
 	if err := lc.SetServeConfig(ctx, sc); err != nil {
 		if isFunnelDeniedErr(err) {
-			return fmt.Errorf("funnel via tsnet: enable Funnel on node %q in the tailnet admin UI (https://login.tailscale.com/admin/acls), then bounce daemon: %w", fqdn, err)
+			return "", fmt.Errorf("funnel via tsnet: enable Funnel on node %q in the tailnet admin UI (https://login.tailscale.com/admin/acls), then bounce daemon: %w", fqdn, err)
 		}
-		return fmt.Errorf("tailnet: SetServeConfig: %w", err)
+		return "", fmt.Errorf("tailnet: SetServeConfig: %w", err)
 	}
-	return nil
+	return fqdn, nil
 }
 
 // DisableFunnel clears the tsnet node's serve config. Safe to call on a

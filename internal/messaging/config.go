@@ -67,6 +67,13 @@ const DefaultDedupWindow = 10 * time.Minute
 // is not set.
 const DefaultBotTokenEnv = "TEEM_TELEGRAM_TOKEN"
 
+// WebhookPath is the HTTP path the daemon serves Telegram webhook
+// callbacks on. Single source of truth shared by the daemon router,
+// the dedicated webhook handler, the auto-register goroutine, the
+// tsnet Funnel mount, and the `teem messaging telegram register-webhook`
+// CLI — so all five stay in lockstep if the path ever changes.
+const WebhookPath = "/messaging/telegram/webhook"
+
 // MessagingYAMLPath is the canonical config path inside the teem home.
 func MessagingYAMLPath(home string) string {
 	return filepath.Join(home, "messaging.yaml")
