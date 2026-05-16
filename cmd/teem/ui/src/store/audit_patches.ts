@@ -190,7 +190,31 @@ function handleLeaderStatusChanged(snap: StateSnapshot, ev: AuditEvent): StateSn
     text,
     updated_ago: '0s ago',
   };
-  return { ...snap, leader_status: nextLeader, status_headline: text };
+  return {
+    ...snap,
+    leader_status: nextLeader,
+    status_headline: truncateForTile(text, STATUS_HEADLINE_MAX_BYTES),
+  };
+}
+
+// truncateForTile mirrors cmd/teem/ui.go truncateForTile: byte-based
+// clamp with rune-safe trim. Without this, a long leader-status text
+// would render in full until the next /state refetch, then visibly
+// snap to the server-clamped form.
+const STATUS_HEADLINE_MAX_BYTES = 200;
+
+function truncateForTile(s: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(s).length <= maxBytes) return s;
+  let used = 0;
+  let out = '';
+  for (const ch of s) {
+    const n = encoder.encode(ch).length;
+    if (used + n > maxBytes) break;
+    used += n;
+    out += ch;
+  }
+  return out + '…';
 }
 
 function handleUsageEvent(snap: StateSnapshot, ev: AuditEvent): StateSnapshot | null {
