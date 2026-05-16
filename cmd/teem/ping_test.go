@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/frasergraham/teem/internal/audit"
+	"github.com/frasergraham/teem/internal/channelbus"
 	"github.com/frasergraham/teem/internal/pulse"
 )
 
@@ -322,41 +323,68 @@ func TestTeamPage_FlashStaysPingedUntilOutcome(t *testing.T) {
 	}
 }
 
-// TestPing_RefusedWhenChannelsLive verifies that the manual-ping
-// handler returns 409 with the prescribed message when an operator
-// chat session is active. Two writers on the leader's session file
-// would race; the chat is already driving the leader anyway.
-func TestPing_RefusedWhenChannelsLive(t *testing.T) {
+// TestPing_NudgesChannelWhenChannelsLive verifies the t-d753f950 ping
+// branch: with an operator chat session active, the manual ping is
+// delivered as a channel block (one channelbus.Event) and an
+// operator-attributed pulse_tick audit event records the redirect.
+// 200 + ping_nudged flash is the user-visible outcome.
+func TestPing_NudgesChannelWhenChannelsLive(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
 	rt := newPingTeam(t, "alpha")
+	rt.channelBus = channelbus.New(4)
+	_, busCh, cancel := rt.channelBus.Subscribe()
+	defer cancel()
 	d.teams["alpha"] = rt
 	rt.channelsLive = true
 
 	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/ping", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("code=%d want %d body=%s", w.Code, http.StatusConflict, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d want %d body=%s", w.Code, http.StatusOK, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "operator chat session is active") {
-		t.Errorf("body=%q want operator-chat-active message", w.Body.String())
+	if !strings.Contains(w.Body.String(), "channel nudge") {
+		t.Errorf("body=%q want channel-nudge message", w.Body.String())
 	}
-	// No pulse_tick / operator audit should have been written.
-	events, _ := rt.auditSink.Query("", time.Now().Add(-time.Minute), 16)
-	for _, e := range events {
-		if e.Kind == audit.Kind("pulse_tick") && e.AgentID == "operator" {
-			t.Errorf("refused ping should not write a manual pulse_tick audit event; got %+v", e)
+
+	select {
+	case ev := <-busCh:
+		if ev.Meta["kind"] != "pulse_tick" || ev.Meta["source"] != "teem" {
+			t.Errorf("channel event meta = %+v, want kind=pulse_tick source=teem", ev.Meta)
 		}
+		if !strings.Contains(ev.Content, "Pulse tick") {
+			t.Errorf("channel event content = %q, want pulse_tick body", ev.Content)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected one channelbus.Event published")
+	}
+
+	events, _ := rt.auditSink.Query("", time.Now().Add(-time.Minute), 16)
+	var operatorTick *audit.Event
+	for i := range events {
+		e := events[i]
+		if e.Kind == audit.Kind("pulse_tick") && e.AgentID == "operator" {
+			operatorTick = &e
+			break
+		}
+	}
+	if operatorTick == nil {
+		t.Fatalf("expected operator pulse_tick audit; events=%+v", events)
+	}
+	if route, _ := operatorTick.Meta["route"].(string); route != "channel" {
+		t.Errorf("audit meta.route=%v want \"channel\"", operatorTick.Meta["route"])
 	}
 }
 
-// TestPing_HTMLRefusedWhenChannelsLive verifies the form-POST variant:
-// Accept: text/html clients get a 303 redirect with the
-// ping_skipped_chat_active flash tag, so the team page can render a
-// friendly banner instead of dumping a JSON body in the browser.
-func TestPing_HTMLRefusedWhenChannelsLive(t *testing.T) {
+// TestPing_HTMLNudgesChannelWhenChannelsLive verifies the form-POST
+// variant: Accept: text/html clients get a 303 redirect with the
+// ping_nudged flash tag so the team page renders a friendly banner.
+func TestPing_HTMLNudgesChannelWhenChannelsLive(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
 	rt := newPingTeam(t, "alpha")
+	rt.channelBus = channelbus.New(4)
+	_, _, cancel := rt.channelBus.Subscribe()
+	defer cancel()
 	d.teams["alpha"] = rt
 	rt.channelsLive = true
 
@@ -368,8 +396,8 @@ func TestPing_HTMLRefusedWhenChannelsLive(t *testing.T) {
 		t.Fatalf("code=%d want 303 body=%s", w.Code, w.Body.String())
 	}
 	got := w.Header().Get("Location")
-	if !strings.Contains(got, "flash=ping_skipped_chat_active") {
-		t.Errorf("Location=%q want flash=ping_skipped_chat_active", got)
+	if !strings.Contains(got, "flash=ping_nudged") {
+		t.Errorf("Location=%q want flash=ping_nudged", got)
 	}
 }
 
@@ -393,21 +421,21 @@ func TestPing_ResumesWhenChannelsCleared(t *testing.T) {
 	}
 }
 
-// TestTeamPage_RendersPingSkippedChatActiveFlash verifies the dashboard
-// renders the friendly banner when redirected with the new flash tag.
-func TestTeamPage_RendersPingSkippedChatActiveFlash(t *testing.T) {
+// TestTeamPage_RendersPingNudgedFlash verifies the dashboard renders
+// the friendly banner when redirected after a channel-nudge ping.
+func TestTeamPage_RendersPingNudgedFlash(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
 	rt := newPingTeam(t, "alpha")
 	d.teams["alpha"] = rt
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha?flash=ping_skipped_chat_active", nil)
+	req := httptest.NewRequest(http.MethodGet, "/teams/alpha?flash=ping_nudged", nil)
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "leader is already awake via your chat session") {
-		t.Errorf("expected chat-active banner; body excerpt:\n%s", flashExcerpt(w.Body.String()))
+	if !strings.Contains(w.Body.String(), "delivered as a channel nudge") {
+		t.Errorf("expected ping_nudged banner; body excerpt:\n%s", flashExcerpt(w.Body.String()))
 	}
 }
 

@@ -85,6 +85,13 @@ type Config struct {
 	// contribute to the daily budget (HTTP audit hooks don't fire for
 	// pulse — it writes the sink directly).
 	OnUsage func(usage.UsageSummary)
+	// OnChannelNudge, when non-nil, is invoked in place of starting a
+	// fresh claude subprocess on ticks that fire while channels-live is
+	// true. The daemon wires it to a channelbus.Publish of a pulse_tick
+	// channel block so the operator's running chat session takes the
+	// turn instead. nil = no channel route — pulse falls back to the
+	// pre-t-d753f950 behavior of skipping when channels are live.
+	OnChannelNudge func(ctx context.Context)
 }
 
 // Pulse runs the autonomous leader loop for a single team.
@@ -412,15 +419,8 @@ func (p *Pulse) Resume() error {
 
 func (p *Pulse) run(ctx context.Context) {
 	// Fire one tick immediately so a freshly-started Pulse doesn't
-	// wait Interval before doing anything — unless an operator chat
-	// session is already live, in which case the operator is the
-	// wake mechanism and a startup tick would race the chat's own
-	// session writer.
-	if !p.channelsLive.Load() {
-		if err := p.Tick(ctx, "timer"); err != nil && !errors.Is(err, context.Canceled) {
-			p.logErr(err)
-		}
-	}
+	// wait Interval before doing anything.
+	p.fireTick(ctx, "timer")
 	for {
 		// effective interval honors idle backoff: after a streak of
 		// no-tool-call ticks, slow down until the next interesting
@@ -431,17 +431,29 @@ func (p *Pulse) run(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
-		// Skip the work (but don't disable the timer) when channels
-		// are live: two writers on the same Claude session file is a
-		// concurrent-write hazard, and the operator's chat is itself
-		// driving the leader. On chat disconnect channelsLive flips
-		// back and the next interval resumes the timer path.
-		if p.channelsLive.Load() {
-			continue
+		p.fireTick(ctx, "timer")
+	}
+}
+
+// fireTick is the timer-loop / debouncer entry that picks the right
+// wake path for a tick. When channels are live and OnChannelNudge is
+// wired, the tick is routed as a channel block into the operator's
+// running chat session (no new claude subprocess). When channels are
+// live but no callback is configured, we fall back to the original
+// skip-when-live behavior so two writers can't race on the leader
+// session file. Otherwise the normal session-spawning Tick runs.
+func (p *Pulse) fireTick(ctx context.Context, trigger string) {
+	if p.channelsLive.Load() {
+		if p.cfg.OnChannelNudge == nil {
+			return
 		}
-		if err := p.Tick(ctx, "timer"); err != nil && !errors.Is(err, context.Canceled) {
+		if err := p.tickViaChannel(ctx, trigger); err != nil && !errors.Is(err, context.Canceled) {
 			p.logErr(err)
 		}
+		return
+	}
+	if err := p.Tick(ctx, trigger); err != nil && !errors.Is(err, context.Canceled) {
+		p.logErr(err)
 	}
 }
 
@@ -496,16 +508,12 @@ func (p *Pulse) runDebouncer(ctx context.Context) {
 			r := reason
 			reason = ""
 			timer = nil
-			// Re-check the channels-live gate at fire time, not just at
-			// nudge time: a chat may have connected during the debounce
-			// window, in which case the leader will already have woken
-			// from the channel block.
-			if p.channelsLive.Load() {
-				continue
-			}
-			if err := p.Tick(ctx, "event:"+r); err != nil && !errors.Is(err, context.Canceled) {
-				p.logErr(err)
-			}
+			// Re-check the channels-live gate at fire time, not just
+			// at nudge time: a chat may have connected during the
+			// debounce window, in which case fireTick routes via the
+			// channel callback (or, when no callback is configured,
+			// falls back to the original skip-when-live behavior).
+			p.fireTick(ctx, "event:"+r)
 		}
 	}
 }
@@ -687,6 +695,50 @@ func (p *Pulse) Tick(ctx context.Context, trigger string) error {
 
 	if err != nil {
 		return fmt.Errorf("pulse tick (%s): %w", trigger, err)
+	}
+	return nil
+}
+
+// tickViaChannel records a pulse_tick audit event and fires the
+// OnChannelNudge callback to deliver the tick as a channel block in
+// the operator's running chat session, instead of starting a fresh
+// claude subprocess. Used when channels-live is set and a nudge
+// callback is wired (see fireTick). Honors pause / budget / tickN
+// bookkeeping the same way Tick does so the audit + messaging path
+// (t-9a89f05e) sees the same single pulse_tick event per tick.
+func (p *Pulse) tickViaChannel(ctx context.Context, trigger string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tickN.Add(1)
+	now := time.Now().UTC()
+	p.lastTick.Store(now)
+
+	if p.Paused() {
+		return nil
+	}
+	if !p.consumeBudget(now) {
+		_ = p.cfg.Audit.Write(audit.Event{
+			Timestamp: now,
+			AgentID:   "leader",
+			Kind:      audit.Kind("pulse_budget_exceeded"),
+			Message:   fmt.Sprintf("over %d ticks/hour", p.cfg.MaxPerHour),
+			Meta:      map[string]any{"trigger": trigger, "route": "channel"},
+		})
+		return nil
+	}
+
+	_ = p.cfg.Audit.Write(audit.Event{
+		Timestamp: now,
+		AgentID:   "leader",
+		Kind:      audit.Kind("pulse_tick"),
+		Message:   "routed as channel nudge",
+		Meta: map[string]any{
+			"trigger": trigger,
+			"route":   "channel",
+		},
+	})
+	if p.cfg.OnChannelNudge != nil {
+		p.cfg.OnChannelNudge(ctx)
 	}
 	return nil
 }

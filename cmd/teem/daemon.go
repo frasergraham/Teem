@@ -1536,16 +1536,27 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pulse not configured", http.StatusInternalServerError)
 		return
 	}
-	// channels-live = operator chat is active and already driving the
-	// leader. Two writers on the same session file is a concurrent-
-	// write hazard, and the ping is redundant. Read under detectionMu
-	// so we serialize against the SSE handler's flag flips.
+	// channels-live = operator chat is active. Route the ping as a
+	// channel nudge into the running chat session instead of starting
+	// a fresh claude subprocess — same wake signal, no session race.
+	// Read under detectionMu so we serialize against the SSE handler's
+	// flag flips.
 	rt.detectionMu.Lock()
 	live := rt.channelsLive
 	rt.detectionMu.Unlock()
 	if live {
-		d.pingRespond(w, r, id, http.StatusConflict, "ping_skipped_chat_active",
-			"operator chat session is active — leader is already awake via channels; ping is unnecessary", 0)
+		publishPulseChannelNudge(rt.channelBus)
+		if rt.auditSink != nil {
+			_ = rt.auditSink.Write(audit.Event{
+				Timestamp: time.Now().UTC(),
+				AgentID:   "operator",
+				Kind:      audit.Kind("pulse_tick"),
+				Message:   "manual ping routed as channel nudge",
+				Meta:      map[string]any{"trigger": "manual", "route": "channel"},
+			})
+		}
+		d.pingRespond(w, r, id, http.StatusOK, "ping_nudged",
+			"operator chat session is active — ping delivered as a channel nudge", 0)
 		return
 	}
 	if rt.pulse.Paused() {
@@ -1968,6 +1979,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		// Usage rollups land on the wrapped audit sink (KindUsageEvent),
 		// which the usage hook records into the aggregator. Wiring
 		// OnUsage here as well would double-count every pulse tick.
+		OnChannelNudge: func(context.Context) { publishPulseChannelNudge(chBus) },
 	})
 
 	// Wake hook: publish on the in-process leader.wake bus topic
@@ -2418,6 +2430,25 @@ func isWakeKind(k audit.Kind) bool {
 		return true
 	}
 	return false
+}
+
+// publishPulseChannelNudge fans a pulse_tick channel block out to the
+// team's channelbus. Used both by Pulse.OnChannelNudge (timer-driven)
+// and handlePingTeam (operator-driven) when an operator chat session
+// is active: the running chat picks up the channel block and the
+// leader takes a turn without paying for a fresh claude subprocess.
+// Safe to call with a nil bus.
+func publishPulseChannelNudge(bus *channelbus.Bus) {
+	if bus == nil {
+		return
+	}
+	bus.Publish(channelbus.Event{
+		Content: "Pulse tick. Take a turn — leader status update needed.",
+		Meta: map[string]string{
+			"kind":   "pulse_tick",
+			"source": "teem",
+		},
+	})
 }
 
 // channelPushFn is the narrow surface makeChannelHook calls into. The

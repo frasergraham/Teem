@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -793,15 +794,19 @@ func TestPulse_NudgeSuppressedWhenChannelsLive(t *testing.T) {
 
 // TestPulse_DebouncerReChecksChannelsLive: if channels-live flips
 // during the debounce window (chat reconnected just after the nudge),
-// the deferred Tick must not fire. Guards the doc's "suppresses while
-// channels are live" claim against the race where the nudge precedes
-// the live transition by milliseconds.
+// the deferred tick must be routed via the OnChannelNudge callback
+// rather than spawning a fresh claude subprocess. Guards the
+// t-d753f950 contract that pulse-driven nudges keep coming while the
+// operator is chatting — they just travel as channel blocks instead
+// of session ticks.
 func TestPulse_DebouncerReChecksChannelsLive(t *testing.T) {
 	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
 	p.SetInterval(10 * time.Second)
 	// Long debounce window so the test has time to flip the gate
 	// before the timer fires.
 	p.cfg.DebounceWindow = 200 * time.Millisecond
+	var channelNudges atomic.Int32
+	p.cfg.OnChannelNudge = func(context.Context) { channelNudges.Add(1) }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -810,6 +815,8 @@ func TestPulse_DebouncerReChecksChannelsLive(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 	before, _ := sink.Query("leader", time.Time{}, 0)
+	beforePulse := countKind(before, "pulse_tick")
+	beforeUsage := countKind(before, audit.KindUsageEvent)
 
 	// Nudge while NOT live, then flip live before the debounce fires.
 	p.NudgeFromAudit([]audit.Event{
@@ -818,8 +825,14 @@ func TestPulse_DebouncerReChecksChannelsLive(t *testing.T) {
 	p.SetChannelsLive(true)
 	time.Sleep(500 * time.Millisecond)
 	after, _ := sink.Query("leader", time.Time{}, 0)
-	if len(after) != len(before) {
-		t.Errorf("debouncer should re-check channels-live at fire time; ticks before=%d after=%d", len(before), len(after))
+	if got := channelNudges.Load(); got != 1 {
+		t.Errorf("OnChannelNudge invocations = %d, want 1 once channels-live flipped mid-debounce", got)
+	}
+	if got := countKind(after, "pulse_tick") - beforePulse; got != 1 {
+		t.Errorf("post-flip pulse_tick events = %d, want 1 (channel-route)", got)
+	}
+	if got := countKind(after, audit.KindUsageEvent) - beforeUsage; got != 0 {
+		t.Errorf("channel-route tick must not emit usage_event; got %d new", got)
 	}
 }
 
@@ -861,6 +874,74 @@ func TestPulse_TimerSkippedWhenChannelsLive(t *testing.T) {
 	}
 	if len(events) == 0 {
 		t.Errorf("timer should resume once channels-live clears; got 0 ticks within 1s")
+	}
+}
+
+// TestPulse_ChannelNudgeWhenChatLive verifies the t-d753f950 timer
+// branch: with channels-live set and OnChannelNudge wired, the timer
+// loop must route ticks through the callback instead of spawning a
+// fresh claude subprocess. The callback fires (≥1) and the per-tick
+// usage_event audit (Tick's signature side-effect) does NOT.
+func TestPulse_ChannelNudgeWhenChatLive(t *testing.T) {
+	p, sink := newTestPulse(t, writeFakeClaude(t, "should not run"), true)
+	p.SetInterval(50 * time.Millisecond)
+	var nudges atomic.Int32
+	p.cfg.OnChannelNudge = func(context.Context) { nudges.Add(1) }
+	p.SetChannelsLive(true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+	defer p.Stop()
+
+	time.Sleep(250 * time.Millisecond)
+	if got := nudges.Load(); got < 1 {
+		t.Errorf("OnChannelNudge invocations = %d, want ≥1 once timer fired under channels-live", got)
+	}
+	events, _ := sink.Query("leader", time.Time{}, 0)
+	if got := countKind(events, audit.KindUsageEvent); got != 0 {
+		t.Errorf("channel-route ticks must not emit usage_event (no claude subprocess); got %d", got)
+	}
+	if got := countKind(events, "pulse_tick"); got < 1 {
+		t.Errorf("expected ≥1 pulse_tick audit event for channel-route ticks; got %d", got)
+	}
+	for _, e := range events {
+		if e.Kind != "pulse_tick" {
+			continue
+		}
+		if route, _ := e.Meta["route"].(string); route != "channel" {
+			t.Errorf("pulse_tick.meta.route = %v, want \"channel\"", e.Meta["route"])
+		}
+	}
+}
+
+// TestPulse_SessionTickWhenChatNotLive verifies the inverse: with
+// channels-live false, even when OnChannelNudge is wired, the timer
+// loop runs the normal session-spawning Tick path. The callback is
+// not invoked and the usage_event audit is emitted (proof the fake
+// claude subprocess actually ran).
+func TestPulse_SessionTickWhenChatNotLive(t *testing.T) {
+	p, sink := newTestPulse(t, writeFakeClaude(t, "ack"), true)
+	p.SetInterval(50 * time.Millisecond)
+	var nudges atomic.Int32
+	p.cfg.OnChannelNudge = func(context.Context) { nudges.Add(1) }
+	// channels-live stays false (default).
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+	defer p.Stop()
+
+	time.Sleep(250 * time.Millisecond)
+	if got := nudges.Load(); got != 0 {
+		t.Errorf("OnChannelNudge invocations = %d, want 0 while channels-live is false", got)
+	}
+	events, _ := sink.Query("leader", time.Time{}, 0)
+	if got := countKind(events, "pulse_tick"); got < 1 {
+		t.Errorf("expected ≥1 pulse_tick from session-route ticks; got %d", got)
+	}
+	if got := countKind(events, audit.KindUsageEvent); got < 1 {
+		t.Errorf("expected ≥1 usage_event from session-route ticks (proof claude ran); got %d", got)
 	}
 }
 
