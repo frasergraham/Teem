@@ -133,9 +133,19 @@ func (s *Server) handleAssignJob(ctx context.Context, req mcpgo.CallToolRequest)
 	// jobID so a restart that replays plan-from-disk reconstructs
 	// the index exactly.
 	if _, err := s.plan.LinkJob(taskID, jobID); err != nil {
+		// Race: delete_task fired between the task-exists check
+		// at line 122 and LinkJob's evidence append. The worker
+		// is already running with a job that has no task
+		// evidence — best-effort cancel so the spawner doesn't
+		// leak a "pending" row and so the worker's incoming bus
+		// message is at least dropped on the floor when we beat
+		// the subscriber. The race window is narrow but the
+		// failure mode (orphan worker, no attribution) is worse
+		// than an over-eager cancel.
+		s.spawner.CancelJob(jobID)
 		return mcpgo.NewToolResultErrorFromErr("assign_job: link evidence", err), nil
 	}
-	s.jobTaskIdx.Set(jobID, taskID)
+	s.jobTaskIdx.Set(jobID, taskID, agentID)
 	out, _ := json.Marshal(map[string]string{"job_id": jobID, "task_id": taskID})
 	return mcpgo.NewToolResultText(string(out)), nil
 }

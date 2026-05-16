@@ -19,8 +19,11 @@ import (
 // stubSpawner is a fakeSpawner-style stub specialised for the
 // assign_job tests: AssignJob returns a fixed job_id so the test can
 // assert that the daemon linked the right id into evidence + index.
+// cancelCalls records every CancelJob arg so the LinkJob-error race
+// test can assert the rollback ran.
 type stubSpawner struct {
-	jobID string
+	jobID       string
+	cancelCalls []string
 }
 
 func (s *stubSpawner) Spawn(_ context.Context, _, _ string) (string, error) {
@@ -28,6 +31,9 @@ func (s *stubSpawner) Spawn(_ context.Context, _, _ string) (string, error) {
 }
 func (s *stubSpawner) AssignJob(_ context.Context, _, _, _ string) (string, error) {
 	return s.jobID, nil
+}
+func (s *stubSpawner) CancelJob(jobID string) {
+	s.cancelCalls = append(s.cancelCalls, jobID)
 }
 func (s *stubSpawner) JobStatus(_ string) (string, string, bool) { return "", "", false }
 func (s *stubSpawner) StopAgent(_ context.Context, _ string) error {

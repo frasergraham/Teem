@@ -1991,7 +1991,11 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// jobs once the next worker tick lands.
 	for _, task := range planStore.List(plan.Filter{}) {
 		for _, jid := range task.Evidence {
-			jobTaskIdx.Set(jid, task.ID)
+			// agent_id is unknown at rehydration time — the
+			// originating spawner state did not survive the
+			// bounce. The entry still clears on per-job
+			// terminal kinds; only ClearByAgent skips it.
+			jobTaskIdx.Set(jid, task.ID, "")
 		}
 	}
 

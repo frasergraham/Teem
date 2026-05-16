@@ -34,6 +34,12 @@ import (
 type Spawner interface {
 	Spawn(ctx context.Context, role, name string) (string, error)
 	AssignJob(ctx context.Context, agentID, prompt, contextNote string) (string, error)
+	// CancelJob drops jobID from the spawner's in-memory job
+	// table. Best-effort — the bus message may have already been
+	// delivered to the worker. Used by assign_job to undo
+	// bookkeeping when evidence-linking fails after the bus
+	// publish (delete_task race window).
+	CancelJob(jobID string)
 	JobStatus(jobID string) (status string, output string, found bool)
 	StopAgent(ctx context.Context, agentID string) error
 	IsRunning(agentID string) bool

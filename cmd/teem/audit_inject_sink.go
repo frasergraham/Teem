@@ -8,9 +8,10 @@ import (
 
 // injectingSink wraps an audit.Sink and stamps Meta["task_id"] onto
 // every Event whose JobID is registered in a JobTaskIndex. Terminal
-// kinds (job_complete / job_error / job_interrupted) clear the
-// index entry after the underlying Write succeeds so a long-running
-// daemon does not leak entries.
+// kinds (job_complete / job_error / job_interrupted / worker_stopped)
+// clear the index entry after the underlying Write succeeds so a
+// long-running daemon does not leak entries — worker_stopped catches
+// the SIGKILL / crash / OOM path where no job_complete fires.
 //
 // The decorator sits OUTSIDE the hookedSink so injection happens
 // before the inner Write and the hook fan-out — every consumer
@@ -42,10 +43,19 @@ func (s *injectingSink) Write(e audit.Event) error {
 	if err := s.inner.Write(e); err != nil {
 		return err
 	}
-	if s.idx != nil && e.JobID != "" {
+	if s.idx != nil {
 		switch e.Kind {
 		case audit.KindJobComplete, audit.KindJobError, audit.KindJobInterrupted:
-			s.idx.Clear(e.JobID)
+			if e.JobID != "" {
+				s.idx.Clear(e.JobID)
+			}
+		case audit.KindWorkerStopped:
+			// worker_stopped carries agent_id but no job_id —
+			// sweep every entry assigned to that agent so a
+			// SIGKILL'd worker doesn't leak in-flight rows.
+			if e.AgentID != "" {
+				s.idx.ClearByAgent(e.AgentID)
+			}
 		}
 	}
 	return nil

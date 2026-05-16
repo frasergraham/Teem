@@ -832,6 +832,20 @@ func (s *Spawner) AssignJob(ctx context.Context, agentID, prompt, contextNote st
 	return jobID, nil
 }
 
+// CancelJob implements mcp.Spawner. Drops jobID from the in-memory
+// jobs table — best-effort cleanup for the assign_job-failed-after-
+// publish path. The bus message may have already been delivered to
+// the worker, in which case it will run and emit a result for an
+// untracked jobID; subscribeResults handles the s.jobs miss silently.
+func (s *Spawner) CancelJob(jobID string) {
+	if jobID == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.jobs, jobID)
+	s.mu.Unlock()
+}
+
 // JobStatus implements mcp.Spawner. Reads the in-memory jobs table
 // first; on a miss falls back to the audit log so jobs from earlier
 // daemon sessions are still recallable.

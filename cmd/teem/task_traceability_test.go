@@ -28,7 +28,7 @@ func TestAssignJob_PropagatesTaskIDToAudit(t *testing.T) {
 	// pair before any audit event for that job lands. From this
 	// point on, anything tagged with JobID = "job-1" picks up the
 	// task_id automatically.
-	idx.Set("job-1", "t-12345678")
+	idx.Set("job-1", "t-12345678", "worker-ada")
 
 	if err := inj.Write(audit.Event{
 		Timestamp: time.Now().UTC(),
@@ -64,6 +64,44 @@ func TestAssignJob_PropagatesTaskIDToAudit(t *testing.T) {
 	}
 	if idx.Size() != 0 {
 		t.Errorf("index must clear on job_complete; got size=%d", idx.Size())
+	}
+}
+
+// TestInjectingSink_WorkerStoppedClearsByAgent asserts that a
+// worker_stopped event — which carries agent_id but no job_id —
+// sweeps every in-flight index entry for that agent. Catches the
+// SIGKILL/crash/OOM leak where no per-job terminal event fires.
+// A second agent's entries must survive.
+func TestInjectingSink_WorkerStoppedClearsByAgent(t *testing.T) {
+	rt := newFullTestTeam(t, "alpha")
+	idx := audit.NewJobTaskIndex()
+	inj := newInjectingSink(rt.auditSink, idx)
+
+	// Two in-flight jobs on worker-ada, one on worker-ben.
+	idx.Set("job-a1", "t-aaaaaaaa", "worker-ada")
+	idx.Set("job-a2", "t-bbbbbbbb", "worker-ada")
+	idx.Set("job-b1", "t-cccccccc", "worker-ben")
+	if idx.Size() != 3 {
+		t.Fatalf("setup: size=%d", idx.Size())
+	}
+
+	// worker-ada dies (no per-job terminal kind, no job_id on the
+	// event — the index must still sweep ada's two rows).
+	if err := inj.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   "worker-ada",
+		Kind:      audit.KindWorkerStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := idx.Get("job-a1"); ok {
+		t.Errorf("job-a1 must clear on worker-ada stop")
+	}
+	if _, ok := idx.Get("job-a2"); ok {
+		t.Errorf("job-a2 must clear on worker-ada stop")
+	}
+	if v, ok := idx.Get("job-b1"); !ok || v != "t-cccccccc" {
+		t.Errorf("worker-ben entry must survive: got (%q, %v)", v, ok)
 	}
 }
 
