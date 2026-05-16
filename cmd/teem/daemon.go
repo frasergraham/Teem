@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -795,10 +796,11 @@ func (d *daemon) handler() http.Handler {
 		case strings.HasPrefix(path, "/teams/"):
 			d.handleTeamRoute(w, r)
 		case path == "/" || path == "/ui" || path == "/ui/":
-			// Dashboard. Unauth on purpose: tailnet is the security
-			// boundary (same model as the MCP endpoint). Read-only
-			// for now — no actions exposed.
-			d.renderDashboard(w, r)
+			// Tiny static team index. The SPA lives under
+			// /teams/<id>/; this page exists so the operator's bookmark
+			// at the daemon root still has something to click. Unauth
+			// on purpose: tailnet is the security boundary.
+			d.renderTeamIndex(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -817,6 +819,31 @@ func isDashboardPulseAction(path string) bool {
 		}
 	}
 	return false
+}
+
+// renderTeamIndex writes a minimal HTML page listing every registered
+// team with a link to its SPA. Phase 4 replacement for the SSR
+// dashboard — just enough to land an operator's bookmark on something
+// clickable; the SPA owns the real UI under /teams/<id>/.
+func (d *daemon) renderTeamIndex(w http.ResponseWriter, _ *http.Request) {
+	views := d.snapshotTeams()
+	sort.Slice(views, func(i, j int) bool { return views[i].Name < views[j].Name })
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.WriteString(w, "<!doctype html><meta charset=\"utf-8\"><title>teem</title>"+
+		"<style>body{font:14px system-ui,sans-serif;margin:2rem;max-width:48rem}"+
+		"li{margin:.25rem 0}</style><h1>teem</h1>")
+	if len(views) == 0 {
+		_, _ = io.WriteString(w, "<p>No teams registered.</p>")
+		return
+	}
+	_, _ = io.WriteString(w, "<ul>")
+	for _, v := range views {
+		fmt.Fprintf(w, "<li><a href=\"/teams/%s/\">%s</a></li>",
+			html.EscapeString(v.rt.team.ID), html.EscapeString(v.Name))
+	}
+	_, _ = io.WriteString(w, "</ul>")
 }
 
 func (d *daemon) requireAuth(w http.ResponseWriter, r *http.Request, h func(http.ResponseWriter, *http.Request)) {
@@ -1443,12 +1470,8 @@ func (d *daemon) handlePulseControl(w http.ResponseWriter, r *http.Request, rt *
 			http.Error(w, "unknown action: "+action, http.StatusBadRequest)
 			return
 		}
-		// Dashboard form posts come with Accept: text/html — redirect
-		// back to the team page so the operator stays in context.
-		if strings.Contains(r.Header.Get("Accept"), "text/html") {
-			http.Redirect(w, r, "/teams/"+rt.team.ID+"/legacy", http.StatusSeeOther)
-			return
-		}
+		// Pulse controls are now driven by the SPA via fetch+JSON; the
+		// form-post HTML branch is dead. Always return JSON.
 		writeJSON(w, http.StatusOK, currentPulseStatus(rt))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1588,20 +1611,10 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 	d.pingRespond(w, r, id, http.StatusOK, "pinged", "ping queued", pingedAt)
 }
 
-// pingRespond emits the right shape based on the request's Accept
-// header: a redirect with ?flash=<tag> for form posts (so the dashboard
-// surfaces a flash), or a plain text body for curl / fetch callers.
-// pingTS (if non-zero) is appended as &ping_ts=<unix> so the team page
-// can correlate the redirect with the leader's pulse_tick audit event.
-func (d *daemon) pingRespond(w http.ResponseWriter, r *http.Request, teamID string, code int, flash, body string, pingTS int64) {
-	if strings.Contains(r.Header.Get("Accept"), "text/html") {
-		loc := "/teams/" + teamID + "/legacy?flash=" + flash
-		if pingTS > 0 {
-			loc += "&ping_ts=" + strconv.FormatInt(pingTS, 10)
-		}
-		http.Redirect(w, r, loc, http.StatusSeeOther)
-		return
-	}
+// pingRespond writes the plain-text ping outcome. The SPA reads this
+// via fetch; there is no SSR HTML branch since the dashboard form-post
+// path was removed.
+func (d *daemon) pingRespond(w http.ResponseWriter, _ *http.Request, _ string, code int, _, body string, _ int64) {
 	w.WriteHeader(code)
 	_, _ = io.WriteString(w, body)
 }
@@ -2831,37 +2844,12 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		d.handleTranscripts(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
 	case suffix == "/channel-events" || strings.HasPrefix(suffix, "/channel-events?"):
 		d.handleChannelEvents(w, r, rt)
-	case suffix == "/legacy" || suffix == "/legacy/" || strings.HasPrefix(suffix, "/legacy?"):
-		// SSR dashboard — moved here from bare /teams/<id> in Phase 3.
-		// Phase 4 will remove this handler entirely.
-		d.renderTeamPage(w, r, id)
 	case suffix == "/v2" || suffix == "/v2/" || strings.HasPrefix(suffix, "/v2/"):
 		// Transitional alias for any bookmarks captured during Phase 1/2;
 		// both /v2[/...] and bare /teams/<id> now serve the same bundle.
 		rest := strings.TrimPrefix(suffix, "/v2")
 		serveSPA(w, r, rest)
 	default:
-		// SSR jobs pages — unauth like the dashboard (tailnet boundary).
-		if agentID, ok := resolveAgentJobsRoute(suffix); ok {
-			d.renderAgentJobs(w, r, rt, agentID)
-			return
-		}
-		if taskID, action, ok := resolveTaskActionRoute(suffix); ok {
-			d.handleTaskActionForm(w, r, rt, taskID, action)
-			return
-		}
-		if taskID, action, ok := resolveDecisionActionRoute(suffix); ok {
-			d.handleDecisionActionForm(w, r, rt, taskID, action)
-			return
-		}
-		if taskID, ok := resolveTaskFlowRoute(suffix); ok {
-			d.renderTaskFlow(w, r, rt, taskID)
-			return
-		}
-		if jobID, ok := resolveJobDetailRoute(suffix); ok {
-			d.renderJobDetail(w, r, rt, jobID)
-			return
-		}
 		http.NotFound(w, r)
 	}
 }

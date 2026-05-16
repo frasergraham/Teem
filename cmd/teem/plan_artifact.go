@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"html/template"
 	"os/exec"
 	"strings"
 	"time"
@@ -32,11 +31,11 @@ const planFileSizeCap = 50 * 1024
 // expanded <details> persists independently across the dashboard's
 // 10s auto-refresh.
 type planFile struct {
-	Path       string        `json:"path"`
-	IsMarkdown bool          `json:"is_markdown"`
-	PathSlug   string        `json:"path_slug"` // "docs/foo.md" → "docs-foo-md"; used as a <details> id only
-	Rendered   template.HTML `json:"rendered"`  // pre-rendered (sanitized) markdown body, blank if read/render failed
-	Truncated  bool          `json:"truncated"` // true if source was clipped at planFileSizeCap
+	Path       string `json:"path"`
+	IsMarkdown bool   `json:"is_markdown"`
+	PathSlug   string `json:"path_slug"` // "docs/foo.md" → "docs-foo-md"; used as a <details> id only
+	Rendered   string `json:"rendered"`  // pre-rendered (sanitized) markdown body, blank if read/render failed
+	Truncated  bool   `json:"truncated"` // true if source was clipped at planFileSizeCap
 }
 
 // awaitingApprovalEvidence is the per-evidence-job view rendered
@@ -88,13 +87,11 @@ func resolveEvidenceRows(events []audit.Event, jobIDs []string, repoRoot, teamID
 	out := make([]awaitingApprovalEvidence, 0, len(jobIDs))
 	for _, jobID := range jobIDs {
 		ev := awaitingApprovalEvidence{
-			JobID:  jobID,
-			JobURL: fmt.Sprintf("/teams/%s/jobs/%s", teamID, jobID),
+			JobID: jobID,
 		}
 		if a, ok := agentForJob[jobID]; ok && isSafeID(a) {
 			ev.AgentID = a
 			ev.BranchRef = "teem/" + a
-			ev.BranchURL = fmt.Sprintf("/teams/%s/agents/%s/jobs", teamID, a)
 			if repoRoot != "" {
 				if files, ok := changedFilesOnBranch(repoRoot, ev.BranchRef); ok {
 					for i := range files {
@@ -169,7 +166,7 @@ func isPlanShaped(files []planFile) bool {
 // trailing "[truncated — N more bytes…]" note so the rendered HTML
 // still closes its tags cleanly. Returns ok=false on read or render
 // failure so the caller can skip the file without breaking the card.
-func renderBranchMarkdown(repoRoot, branchRef, path string) (template.HTML, bool, bool) {
+func renderBranchMarkdown(repoRoot, branchRef, path string) (string, bool, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx,
@@ -196,7 +193,7 @@ func renderBranchMarkdown(repoRoot, branchRef, path string) (template.HTML, bool
 	if err := md.Convert(raw, &buf); err != nil {
 		return "", false, false
 	}
-	return template.HTML(buf.String()), truncated, true
+	return buf.String(), truncated, true
 }
 
 // pathToSlug converts a file path into a DOM-safe id fragment: lower-

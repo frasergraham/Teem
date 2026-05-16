@@ -1,11 +1,8 @@
 package main
 
 import (
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -57,11 +54,21 @@ func writeUsageEvent(t *testing.T, sink audit.Sink, agentID, jobID, model string
 	}
 }
 
-// TestDashboardTask_RendersCostColumn locks in the wiring: with
-// pricing.yaml present and a KindUsageEvent linked to a task's
-// evidence, the rendered HTML shows the Cost header, the formatted
-// dollar amount, and the drill-in <details> structure.
-func TestDashboardTask_RendersCostColumn(t *testing.T) {
+// findTaskByID walks a dashboardTask slice for the matching ID.
+func findTaskByID(tasks []dashboardTask, id string) (dashboardTask, bool) {
+	for _, t := range tasks {
+		if t.ID == id {
+			return t, true
+		}
+	}
+	return dashboardTask{}, false
+}
+
+// TestTeamSnapshot_PerTaskCost locks in the wiring: with pricing.yaml
+// present and a KindUsageEvent linked to a task's evidence, the
+// per-task cost cell carries the formatted dollar amount and the
+// per-job breakdown the SPA renders inside the drill-in <details>.
+func TestTeamSnapshot_PerTaskCost(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	writePricingFile(t, tmpHome)
@@ -77,31 +84,26 @@ func TestDashboardTask_RendersCostColumn(t *testing.T) {
 	writeUsageEvent(t, rt.auditSink, "worker-uma", "job-42", "claude-opus-4-7",
 		1_000_000, 500_000, 0, 0, time.Now())
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	snap := teamSnapshot(d.snapshotTeam(rt))
+	got, ok := findTaskByID(snap.OpenTasks, task.ID)
+	if !ok {
+		t.Fatalf("task %s missing from OpenTasks", task.ID)
 	}
-	body := w.Body.String()
-	for _, want := range []string{
-		"<th class=\"cost-col\"",
-		"Cost",
-		"$52.50",
-		"details-task-" + task.ID + "-cost",
-		"job-42",
-		"claude-opus-4-7",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("body missing %q\n--- body ---\n%s", want, body)
-		}
+	if !got.Cost.HasCost {
+		t.Errorf("Cost.HasCost = false, want true")
+	}
+	if got.Cost.Display != "$52.50" {
+		t.Errorf("Cost.Display = %q, want $52.50", got.Cost.Display)
+	}
+	if len(got.Cost.Jobs) != 1 || got.Cost.Jobs[0].JobID != "job-42" || got.Cost.Jobs[0].Model != "claude-opus-4-7" {
+		t.Errorf("Cost.Jobs = %+v, want one job-42/claude-opus-4-7 row", got.Cost.Jobs)
 	}
 }
 
-// TestDashboard_HeroSpend_RendersWhenPricingPresent verifies the hero
-// shows "today's spend" with the formatted total when pricing is
+// TestTeamSnapshot_HeroSpend_PresentWithPricing verifies the hero
+// "today's spend" field carries the formatted total when pricing is
 // loaded and at least one usage event is in scope.
-func TestDashboard_HeroSpend_RendersWhenPricingPresent(t *testing.T) {
+func TestTeamSnapshot_HeroSpend_PresentWithPricing(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	writePricingFile(t, tmpHome)
@@ -110,32 +112,23 @@ func TestDashboard_HeroSpend_RendersWhenPricingPresent(t *testing.T) {
 	rt := newFullTestTeam(t, "alpha")
 	d.teams["alpha"] = rt
 
-	// Two distinct jobs so the daily total is unambiguous: each is 1M
-	// input on opus = $15, total $30.
 	now := time.Now()
 	writeUsageEvent(t, rt.auditSink, "w1", "j1", "claude-opus-4-7", 1_000_000, 0, 0, 0, now)
 	writeUsageEvent(t, rt.auditSink, "w2", "j2", "claude-opus-4-7", 1_000_000, 0, 0, 0, now)
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	body := w.Body.String()
-	if !strings.Contains(body, "hero-spend") {
-		t.Errorf("hero-spend element missing; body=%s", body)
+	snap := teamSnapshot(d.snapshotTeam(rt))
+	if !snap.HasPricing {
+		t.Errorf("HasPricing = false, want true")
 	}
-	if !strings.Contains(body, "$30.00") {
-		t.Errorf("hero spend total $30.00 missing; body=%s", body)
-	}
-	if !strings.Contains(body, "today's spend") {
-		t.Errorf("hero spend label missing")
+	if snap.HeroSpendDisplay != "$30.00" {
+		t.Errorf("HeroSpendDisplay = %q, want $30.00", snap.HeroSpendDisplay)
 	}
 }
 
-// TestDashboard_HeroSpend_HiddenWhenPricingAbsent: with no
-// pricing.yaml, the hero spend line MUST NOT render — even though
-// usage events still arrive in the audit. The cost UI is hidden, not
-// zero-rendered.
-func TestDashboard_HeroSpend_HiddenWhenPricingAbsent(t *testing.T) {
+// TestTeamSnapshot_HeroSpend_HiddenWithoutPricing: with no pricing.yaml,
+// HasPricing must be false and HeroSpendDisplay must stay empty even
+// though usage events are arriving in the audit.
+func TestTeamSnapshot_HeroSpend_HiddenWithoutPricing(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	// No writePricingFile — file is absent.
@@ -148,26 +141,22 @@ func TestDashboard_HeroSpend_HiddenWhenPricingAbsent(t *testing.T) {
 	writeUsageEvent(t, rt.auditSink, "w1", "job-42", "claude-opus-4-7",
 		1_000_000, 500_000, 0, 0, time.Now())
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	body := w.Body.String()
-	if strings.Contains(body, "hero-spend") {
-		t.Errorf("hero-spend rendered without pricing.yaml; body=%s", body)
+	snap := teamSnapshot(d.snapshotTeam(rt))
+	if snap.HasPricing {
+		t.Errorf("HasPricing = true without pricing.yaml")
 	}
-	if strings.Contains(body, "today's spend") {
-		t.Errorf("hero spend label rendered without pricing.yaml")
+	if snap.HeroSpendDisplay != "" {
+		t.Errorf("HeroSpendDisplay = %q, want empty", snap.HeroSpendDisplay)
 	}
-	// And the Cost column header must be absent too.
-	if strings.Contains(body, "<th class=\"cost-col\"") {
-		t.Errorf("Cost column rendered without pricing.yaml")
+	if got, _ := findTaskByID(snap.OpenTasks, task.ID); got.Cost.HasCost {
+		t.Errorf("task Cost.HasCost = true without pricing.yaml")
 	}
 }
 
-// TestDashboardTask_TodaysSpend_SeparateFromPerTaskSum guards the
-// design invariant: a job linked to two tasks counts twice in the
-// per-task column but only once in Today's spend.
-func TestDashboardTask_TodaysSpend_SeparateFromPerTaskSum(t *testing.T) {
+// TestTeamSnapshot_TodaysSpend_SeparateFromPerTaskSum guards the
+// design invariant: a job linked to two tasks counts twice in each
+// task's per-task cost cell but only once in HeroSpendDisplay.
+func TestTeamSnapshot_TodaysSpend_SeparateFromPerTaskSum(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	writePricingFile(t, tmpHome)
@@ -184,19 +173,14 @@ func TestDashboardTask_TodaysSpend_SeparateFromPerTaskSum(t *testing.T) {
 	// shared job: $15. Both tasks list it in evidence.
 	writeUsageEvent(t, rt.auditSink, "w1", "shared", "claude-opus-4-7", 1_000_000, 0, 0, 0, time.Now())
 
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	body := w.Body.String()
-	// Per-task cells over-attribute — both rows show $15.
-	if strings.Count(body, "$15.00") < 2 {
-		t.Errorf("expected $15.00 to appear at least twice (once per task); body=%s", body)
+	snap := teamSnapshot(d.snapshotTeam(rt))
+	a, _ := findTaskByID(snap.OpenTasks, taskA.ID)
+	b, _ := findTaskByID(snap.OpenTasks, taskB.ID)
+	if a.Cost.Display != "$15.00" || b.Cost.Display != "$15.00" {
+		t.Errorf("per-task displays = %q/%q, want both $15.00", a.Cost.Display, b.Cost.Display)
 	}
 	// Hero spend uses raw stream — total stays $15, NOT $30.
-	if !strings.Contains(body, "$15.00") {
-		t.Errorf("hero spend missing; body=%s", body)
-	}
-	if strings.Contains(body, "$30.00") {
-		t.Errorf("hero spend leaked over-attribution into the daily total")
+	if snap.HeroSpendDisplay != "$15.00" {
+		t.Errorf("HeroSpendDisplay = %q, want $15.00 (raw stream — not over-attributed)", snap.HeroSpendDisplay)
 	}
 }

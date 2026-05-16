@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -162,167 +161,6 @@ func TestPing_WrongMethodReturns405(t *testing.T) {
 	}
 }
 
-func TestTeamPage_RendersPingButtonAndFlash(t *testing.T) {
-	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
-	rt := newPingTeam(t, "alpha")
-	d.teams["alpha"] = rt
-
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy?flash=pinged", nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, `action="/control/teams/alpha/ping"`) {
-		t.Errorf("ping form missing from team-detail page")
-	}
-	if !strings.Contains(body, "Ping leader") {
-		t.Errorf("ping button label missing")
-	}
-	if !strings.Contains(body, "Pinged — leader is taking a turn now") {
-		t.Errorf("flash banner missing or stale for flash=pinged; body excerpt:\n%s", flashExcerpt(body))
-	}
-	if strings.Contains(body, "Ping queued") || strings.Contains(body, "next tick") {
-		t.Errorf("flash still uses stale 'queued'/'next tick' wording")
-	}
-
-	// Unknown flash values are dropped (whitelist-only). The page legitimately
-	// embeds a same-origin inline <script> for sessionStorage expand-state
-	// persistence, so probe for the hostile payload itself rather than the
-	// generic tag.
-	req2 := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy?flash=%3Cscript%3Ealert(1)%3C/script%3E", nil)
-	w2 := httptest.NewRecorder()
-	d.handler().ServeHTTP(w2, req2)
-	if strings.Contains(w2.Body.String(), "alert(1)") {
-		t.Errorf("flash whitelist failed to drop hostile value")
-	}
-}
-
-func TestPing_HTMLAcceptRedirectsWithFlash(t *testing.T) {
-	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
-	rt := newPingTeam(t, "alpha")
-	d.teams["alpha"] = rt
-
-	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/ping", nil)
-	req.Header.Set("Accept", "text/html")
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("code=%d want 303 body=%s", w.Code, w.Body.String())
-	}
-	got := w.Header().Get("Location")
-	if !strings.HasPrefix(got, "/teams/alpha/legacy?flash=pinged&ping_ts=") {
-		t.Errorf("Location=%q want prefix /teams/alpha/legacy?flash=pinged&ping_ts=", got)
-	}
-	// ping_ts must be a recent unix-seconds value the team page can parse.
-	const prefix = "/teams/alpha/legacy?flash=pinged&ping_ts="
-	tsStr := strings.TrimPrefix(got, prefix)
-	n, err := strconv.ParseInt(tsStr, 10, 64)
-	if err != nil {
-		t.Fatalf("ping_ts=%q not parseable: %v", tsStr, err)
-	}
-	if delta := time.Since(time.Unix(n, 0)); delta < 0 || delta > 5*time.Second {
-		t.Errorf("ping_ts %d is %v away from now; want recent", n, delta)
-	}
-}
-
-// TestTeamPage_FlashUpgradesToTickOK verifies the "pinged" banner upgrades
-// to "Leader turn done (Xs)" once a successful leader pulse_tick has
-// been written to the audit log since the redirect's ping_ts.
-func TestTeamPage_FlashUpgradesToTickOK(t *testing.T) {
-	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
-	rt := newPingTeam(t, "alpha")
-	d.teams["alpha"] = rt
-
-	pingTS := time.Now().Add(-2 * time.Second)
-	if err := rt.auditSink.Write(audit.Event{
-		Timestamp: pingTS.Add(time.Second),
-		AgentID:   "leader",
-		Kind:      audit.Kind("pulse_tick"),
-		Message:   "ok",
-		Meta:      map[string]any{"trigger": "manual", "duration_ms": 1234, "tool_calls": 0},
-	}); err != nil {
-		t.Fatalf("write audit: %v", err)
-	}
-
-	url := "/teams/alpha/legacy?flash=pinged&ping_ts=" + strconv.FormatInt(pingTS.Unix(), 10)
-	req := httptest.NewRequest(http.MethodGet, url, nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, "Leader turn done") || !strings.Contains(body, "1.2s") {
-		t.Errorf("expected tick_ok flash with duration; body excerpt:\n%s", flashExcerpt(body))
-	}
-	if strings.Contains(body, "leader is taking a turn now") {
-		t.Errorf("flash should have upgraded out of 'pinged' once the tick landed")
-	}
-}
-
-// TestTeamPage_FlashUpgradesToTickFailed verifies the banner becomes
-// "Leader turn FAILED: <msg>" when the leader pulse_tick carries
-// error=true.
-func TestTeamPage_FlashUpgradesToTickFailed(t *testing.T) {
-	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
-	rt := newPingTeam(t, "alpha")
-	d.teams["alpha"] = rt
-
-	pingTS := time.Now().Add(-2 * time.Second)
-	if err := rt.auditSink.Write(audit.Event{
-		Timestamp: pingTS.Add(time.Second),
-		AgentID:   "leader",
-		Kind:      audit.Kind("pulse_tick"),
-		Message:   "claude exec: context deadline exceeded",
-		Meta:      map[string]any{"trigger": "manual", "duration_ms": 500, "error": true},
-	}); err != nil {
-		t.Fatalf("write audit: %v", err)
-	}
-
-	url := "/teams/alpha/legacy?flash=pinged&ping_ts=" + strconv.FormatInt(pingTS.Unix(), 10)
-	req := httptest.NewRequest(http.MethodGet, url, nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, "Leader turn FAILED") {
-		t.Errorf("expected tick_failed flash; body excerpt:\n%s", flashExcerpt(body))
-	}
-	if !strings.Contains(body, "context deadline exceeded") {
-		t.Errorf("expected leader error message in flash; body excerpt:\n%s", flashExcerpt(body))
-	}
-}
-
-// TestTeamPage_FlashStaysPingedUntilOutcome covers the pre-resolution
-// window: ping_ts has been redirected with, but no leader pulse_tick has
-// landed yet. Banner must remain the "taking a turn" wording so the 10s
-// meta-refresh keeps the operator in the loop.
-func TestTeamPage_FlashStaysPingedUntilOutcome(t *testing.T) {
-	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
-	rt := newPingTeam(t, "alpha")
-	d.teams["alpha"] = rt
-
-	pingTS := time.Now().Add(-1 * time.Second).Unix()
-	url := "/teams/alpha/legacy?flash=pinged&ping_ts=" + strconv.FormatInt(pingTS, 10)
-	req := httptest.NewRequest(http.MethodGet, url, nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, "Pinged — leader is taking a turn now") {
-		t.Errorf("expected unresolved 'pinged' flash; body excerpt:\n%s", flashExcerpt(body))
-	}
-	if strings.Contains(body, "Leader turn done") || strings.Contains(body, "FAILED") {
-		t.Errorf("flash upgraded without any matching audit event")
-	}
-}
-
 // TestPing_NudgesChannelWhenChannelsLive verifies the t-d753f950 ping
 // branch: with an operator chat session active, the manual ping is
 // delivered as a channel block (one channelbus.Event) and an
@@ -376,31 +214,6 @@ func TestPing_NudgesChannelWhenChannelsLive(t *testing.T) {
 	}
 }
 
-// TestPing_HTMLNudgesChannelWhenChannelsLive verifies the form-POST
-// variant: Accept: text/html clients get a 303 redirect with the
-// ping_nudged flash tag so the team page renders a friendly banner.
-func TestPing_HTMLNudgesChannelWhenChannelsLive(t *testing.T) {
-	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
-	rt := newPingTeam(t, "alpha")
-	rt.channelBus = channelbus.New(4)
-	_, _, cancel := rt.channelBus.Subscribe()
-	defer cancel()
-	d.teams["alpha"] = rt
-	rt.channelsLive = true
-
-	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/ping", nil)
-	req.Header.Set("Accept", "text/html")
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("code=%d want 303 body=%s", w.Code, w.Body.String())
-	}
-	got := w.Header().Get("Location")
-	if !strings.Contains(got, "flash=ping_nudged") {
-		t.Errorf("Location=%q want flash=ping_nudged", got)
-	}
-}
-
 // TestPing_ResumesWhenChannelsCleared verifies the path returns to
 // normal (200 / ping queued) once the operator's chat disconnects and
 // the channels-live flag is cleared.
@@ -419,36 +232,4 @@ func TestPing_ResumesWhenChannelsCleared(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "ping queued") {
 		t.Errorf("body=%q want 'ping queued'", w.Body.String())
 	}
-}
-
-// TestTeamPage_RendersPingNudgedFlash verifies the dashboard renders
-// the friendly banner when redirected after a channel-nudge ping.
-func TestTeamPage_RendersPingNudgedFlash(t *testing.T) {
-	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
-	rt := newPingTeam(t, "alpha")
-	d.teams["alpha"] = rt
-
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy?flash=ping_nudged", nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "delivered as a channel nudge") {
-		t.Errorf("expected ping_nudged banner; body excerpt:\n%s", flashExcerpt(w.Body.String()))
-	}
-}
-
-// flashExcerpt slices out the area around the dashboard's flash div so
-// test failure output stays small and readable.
-func flashExcerpt(body string) string {
-	i := strings.Index(body, `class="flash`)
-	if i < 0 {
-		return "(no flash div rendered)"
-	}
-	end := i + 200
-	if end > len(body) {
-		end = len(body)
-	}
-	return body[i:end]
 }

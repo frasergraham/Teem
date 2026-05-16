@@ -225,51 +225,6 @@ func (d *daemon) handleControlTaskAction(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, task)
 }
 
-// handleTaskActionForm is the dashboard's form-POST counterpart of
-// handleControlTaskAction. Reads form-encoded values, performs the
-// same decision, and redirects back to the team page with a flash
-// query param so the operator gets a visual confirmation.
-//
-// Unauth on purpose: same tailnet boundary the rest of the dashboard
-// trusts. URL path: /teams/<id>/tasks/<task_id>/(approve|reject|comment).
-func (d *daemon) handleTaskActionForm(w http.ResponseWriter, r *http.Request, rt *registeredTeam, taskID, action string) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !isSafeID(taskID) {
-		http.Error(w, "bad task id", http.StatusBadRequest)
-		return
-	}
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	req := taskActionRequest{
-		Comment: r.PostForm.Get("comment"),
-		Reason:  r.PostForm.Get("reason"),
-	}
-	dec, text, err := resolveActionInput(action, req)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	_, err = decideTask(rt, taskID, dec, text)
-	switch {
-	case errors.Is(err, plan.ErrTaskNotFound):
-		http.NotFound(w, r)
-		return
-	case errors.Is(err, errNotAwaitingApproval), errors.Is(err, errStageRaced):
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	case err != nil:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	flash := flashFor(dec)
-	http.Redirect(w, r, fmt.Sprintf("/teams/%s/legacy?flash=%s", rt.team.ID, flash), http.StatusSeeOther)
-}
-
 // resolveActionInput maps the path action verb + body to a (decision,
 // text) pair, enforcing the per-action body requirements:
 //   - approve: comment optional
@@ -308,18 +263,6 @@ func resolveActionInput(action string, req taskActionRequest) (decision, string,
 	return "", "", fmt.Errorf("unknown action: %q (want approve|reject|comment)", action)
 }
 
-func flashFor(d decision) string {
-	switch d {
-	case decisionApprove:
-		return "task_approved"
-	case decisionReject:
-		return "task_rejected"
-	case decisionComment:
-		return "task_commented"
-	}
-	return "ok"
-}
-
 // splitTaskActionPath parses "<task_id>/<action>" out of the control
 // subpath. Returns ok=false on shape mismatch.
 func splitTaskActionPath(s string) (taskID, action string, ok bool) {
@@ -332,28 +275,4 @@ func splitTaskActionPath(s string) (taskID, action string, ok bool) {
 		return "", "", false
 	}
 	return taskID, action, true
-}
-
-// resolveTaskActionRoute parses /tasks/<task_id>/(approve|reject|comment).
-// Returns (taskID, action, true) on match; ("","",false) otherwise.
-// Caller is expected to have already stripped the /teams/<id> prefix.
-func resolveTaskActionRoute(suffix string) (taskID, action string, ok bool) {
-	const prefix = "/tasks/"
-	if !strings.HasPrefix(suffix, prefix) {
-		return "", "", false
-	}
-	rest := suffix[len(prefix):]
-	slash := strings.IndexByte(rest, '/')
-	if slash < 0 {
-		return "", "", false
-	}
-	taskID, action = rest[:slash], rest[slash+1:]
-	if taskID == "" || strings.Contains(action, "/") {
-		return "", "", false
-	}
-	switch action {
-	case "approve", "reject", "comment":
-		return taskID, action, true
-	}
-	return "", "", false
 }

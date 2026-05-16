@@ -163,7 +163,11 @@ function ApprovalRow({ task, teamID }: { task: AwaitingApprovalTask; teamID: str
                 ) : (
                   ev.branch_ref && <>branch: {ev.branch_ref} · </>
                 )}
-                job: <a href={ev.job_url}>{ev.job_id}</a>
+                {ev.job_url ? (
+                  <>job: <a href={ev.job_url}>{ev.job_id}</a></>
+                ) : (
+                  ev.job_id && <>job: {ev.job_id}</>
+                )}
               </div>
             </div>
           ))}

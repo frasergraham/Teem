@@ -152,7 +152,7 @@ func TestPulseEndpoint_Config_UpdatesIntervalAndPrompt(t *testing.T) {
 // TestPulseEndpoint_Config_FormPost mirrors the dashboard form post
 // shape (interval_value + interval_unit + wake_prompt as form fields,
 // Accept: text/html). Verifies the daemon stitches the unit/value back
-// together and 303-redirects to the team page.
+// together and returns the JSON status response.
 func TestPulseEndpoint_Config_FormPost(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
 	rt, _ := newPulsePanelTeam(t, "alpha")
@@ -167,14 +167,10 @@ func TestPulseEndpoint_Config_FormPost(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/pulse/config", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "text/html")
 	w := httptest.NewRecorder()
 	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusSeeOther {
-		t.Fatalf("code=%d want 303 body=%s", w.Code, w.Body.String())
-	}
-	if loc := w.Header().Get("Location"); loc != "/teams/alpha/legacy" {
-		t.Errorf("Location=%q want /teams/alpha/legacy", loc)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d want 200 body=%s", w.Code, w.Body.String())
 	}
 	if got := rt.pulse.Interval(); got != 2*time.Minute {
 		t.Errorf("Interval after form-post = %s, want 2m", got)
@@ -210,59 +206,5 @@ func TestPulseEndpoint_GetIncludesWakePrompt(t *testing.T) {
 	}
 	if !got.UseDefaultWakePrompt {
 		t.Errorf("UseDefaultWakePrompt should be true on a fresh team with no override")
-	}
-}
-
-// TestTeamPage_PulsePanel_RendersCurrentState verifies the dashboard
-// template renders the pulse-management panel with the current
-// running/interval/prompt state, and toggles the start vs stop URL on
-// the lamp form based on whether pulse is running.
-func TestTeamPage_PulsePanel_RendersCurrentState(t *testing.T) {
-	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
-	rt, _ := newPulsePanelTeam(t, "alpha")
-	d.teams["alpha"] = rt
-
-	// Off state.
-	req := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
-	}
-	body := w.Body.String()
-	for _, want := range []string{
-		`class="pulse-panel"`,
-		`name="interval_value"`,
-		`name="interval_unit"`,
-		`name="wake_prompt"`,
-		`action="/control/teams/alpha/pulse/start"`,
-		`action="/control/teams/alpha/pulse/config"`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("rendered page missing %q", want)
-		}
-	}
-	if strings.Contains(body, `action="/control/teams/alpha/pulse/stop"`) {
-		t.Errorf("stop URL should not appear when pulse is off")
-	}
-
-	// On + custom override flips the toggle URL to /stop and renders
-	// the override in the textarea body.
-	rt.pulse.Start(context.Background())
-	defer rt.pulse.Stop()
-	override := "Operator-supplied wake message."
-	if err := rt.pulse.SetWakePrompt(override); err != nil {
-		t.Fatal(err)
-	}
-
-	req2 := httptest.NewRequest(http.MethodGet, "/teams/alpha/legacy", nil)
-	w2 := httptest.NewRecorder()
-	d.handler().ServeHTTP(w2, req2)
-	body = w2.Body.String()
-	if !strings.Contains(body, `action="/control/teams/alpha/pulse/stop"`) {
-		t.Errorf("stop URL missing when pulse is on")
-	}
-	if !strings.Contains(body, override) {
-		t.Errorf("custom wake-prompt override not rendered in textarea")
 	}
 }
