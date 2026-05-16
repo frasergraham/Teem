@@ -36,7 +36,7 @@ func writePricingFile(t *testing.T, tmpHome string) {
 
 // writeUsageEvent appends one KindUsageEvent to the team's audit sink so
 // the dashboard's per-render projection picks it up.
-func writeUsageEvent(t *testing.T, sink *audit.FileSink, agentID, jobID, model string, in, out, cw, cr int64, when time.Time) {
+func writeUsageEvent(t *testing.T, sink audit.Sink, agentID, jobID, model string, in, out, cw, cr int64, when time.Time) {
 	t.Helper()
 	if err := sink.Write(audit.Event{
 		Timestamp: when,

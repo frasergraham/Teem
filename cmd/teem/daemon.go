@@ -358,7 +358,7 @@ type registeredTeam struct {
 	team          *team.Team
 	mcp           *mcpsrv.Server
 	spawner       *agent.Spawner
-	auditSink     *audit.FileSink
+	auditSink     audit.Sink
 	auditH        http.Handler
 	plan          *plan.Plan
 	notes         *notes.Inbox
@@ -1722,10 +1722,18 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	gitCfg := readGitConfig()
 
 	auditPath := defaultAuditPath(t.ID)
-	auditSink, err := audit.OpenFile(auditPath)
+	auditFile, err := audit.OpenFile(auditPath)
 	if err != nil {
 		return nil, fmt.Errorf("audit: %w", err)
 	}
+	// All audit Writes flow through this decorator so the hook chain
+	// (messaging, channels, archmem, pulse-nudge, usage, …) fires
+	// uniformly regardless of caller — MCP record_decision /
+	// record_blocker, chat-handler usage events, dashboard form posts,
+	// pulse-tick rollups, and the HTTP audit handler all hit the same
+	// path. The hook itself is wired in below, after the per-team
+	// components it depends on have been constructed.
+	auditSink := newHookedSink(auditFile)
 
 	planPath := defaultPlanPath(t.ID)
 	planStore, err := plan.Open(planPath)
@@ -1903,7 +1911,9 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		Plan:           planStore,
 		Audit:          auditSink,
 		Registry:       reg,
-		OnUsage:        d.usageRecorder(),
+		// Usage rollups land on the wrapped audit sink (KindUsageEvent),
+		// which the usage hook records into the aggregator. Wiring
+		// OnUsage here as well would double-count every pulse tick.
 	})
 	// Auto-resume Pulse if it was running before the daemon
 	// restarted. Operator opt-out is `teem pulse stop` (which clears
@@ -2024,6 +2034,13 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		pulseInst.NudgeFromAudit(events)
 	}
 
+	// With every component wired, install the hook chain on the
+	// decorator. Subsequent Writes — from MCP tools, pulse, chat,
+	// dashboard form posts, the HTTP audit handler — fan out through
+	// this chain. The HTTP middleware no longer fires hooks itself;
+	// the wrapped sink is the only source.
+	auditSink.SetHook(combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, d.makeUsageHook()))
+
 	// Summarizer goroutine: rolling digest + retention pruning per
 	// role. Best-effort — failures log to stderr and the next tick
 	// retries. Uses the operator's Claude Code auth via `claude -p`
@@ -2069,14 +2086,13 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		mcp:       srv,
 		spawner:   spawner,
 		auditSink: auditSink,
-		// Audit handler fans every POST out to: write to disk, bump
-		// the agent's LastSeen, publish on bus topic "leader.wake" for
-		// terminal worker events, reconcile worker_stopped, append to
-		// archetype memory, push channel notifications to any connected
-		// leader chat, and nudge pulse's debounced audit-nudge tick
-		// (suppressed by pulse when channels are live; active when
-		// chat is disconnected — see docs/wake-strategy.md §3 L2).
-		auditH:         newAuditHandlerWithHooks(audit.Handler(auditSink, d.token), reg, combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, d.makeUsageHook())),
+		// Audit handler fans every POST out to: write to disk via the
+		// hooked sink (which runs the hook chain — wake, stop,
+		// archmem, channels, messaging, pulse-nudge, usage) and bump
+		// the agent's LastSeen on the registry. The hook chain itself
+		// is wired on auditSink above so any caller — HTTP, MCP,
+		// pulse, chat — fans out identically.
+		auditH:         newAuditHandlerWithRegistry(audit.Handler(auditSink, d.token), reg),
 		plan:           planStore,
 		notes:          notesInbox,
 		pulse:          pulseInst,
@@ -2408,20 +2424,6 @@ func formatChannelBody(e audit.Event) string {
 	return fmt.Sprintf("%s: %s", e.Kind, shortSummary(e.Message))
 }
 
-// usageRecorder returns a pulse.OnUsage callback that forwards every
-// pulse-tick usage rollup into the daemon-global Aggregator. Returns
-// nil when usage isn't wired so pulse's nil-check disables the path.
-func (d *daemon) usageRecorder() func(usage.UsageSummary) {
-	if d.usageAgg == nil {
-		return nil
-	}
-	return func(s usage.UsageSummary) {
-		if err := d.usageAgg.Record(s); err != nil {
-			fmt.Fprintf(os.Stderr, "[teemd] usage: record pulse: %v\n", err)
-		}
-	}
-}
-
 // spawnerQuota returns the daemon's Aggregator as an agent.QuotaChecker
 // — or a nil interface when usage is unwired, so the spawner's
 // `cfg.UsageQuota != nil` check disables the gate cleanly. Returning
@@ -2562,11 +2564,12 @@ func combineHooks(hooks ...auditHook) auditHook {
 // ticks. nil is fine — the handler just skips the call.
 type auditHook func(events []audit.Event)
 
-// newAuditHandlerWithHooks wraps an audit handler so each accepted
+// newAuditHandlerWithRegistry wraps an audit handler so each accepted
 // POST body is parsed once and its events get fanned out to the
-// registry (LastSeen update) and any extra hook. The inner audit
-// Handler is the actual responder.
-func newAuditHandlerWithHooks(inner http.Handler, reg *mcpsrv.Registry, hook auditHook) http.Handler {
+// registry (LastSeen update). The hook chain fires from the hooked
+// sink the inner handler writes through, so this middleware no longer
+// re-fires it.
+func newAuditHandlerWithRegistry(inner http.Handler, reg *mcpsrv.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			body, err := io.ReadAll(r.Body)
@@ -2581,9 +2584,6 @@ func newAuditHandlerWithHooks(inner http.Handler, reg *mcpsrv.Registry, hook aud
 							ts = now
 						}
 						reg.SetLastSeen(e.AgentID, ts)
-					}
-					if hook != nil {
-						hook(events)
 					}
 				}
 				r.Body = newBytesReadCloser(body)

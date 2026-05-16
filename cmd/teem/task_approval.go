@@ -107,20 +107,9 @@ func decideTask(rt *registeredTeam, taskID string, d decision, comment string) (
 		})
 	}
 
-	// Channel: push a task_approval event so a connected leader
-	// session sees the operator's action without polling. PushChannel
-	// is a no-op when no session is subscribed.
-	if rt.mcp != nil {
-		rt.mcp.PushChannel(
-			fmt.Sprintf("task %s: %s%s", taskID, string(d), commentPreview(comment)),
-			map[string]string{
-				"kind":     "task_approval",
-				"task_id":  taskID,
-				"decision": string(d),
-				"comment":  comment,
-			},
-		)
-	}
+	// The hooked audit sink runs channelHook on every Write, so the
+	// decision_note above already fans out to any connected leader
+	// session — no explicit PushChannel is needed here.
 
 	return updated, nil
 }
@@ -165,20 +154,6 @@ func formatDecisionMessage(d decision, comment string) string {
 		return verb
 	}
 	return verb + ": " + comment
-}
-
-// commentPreview returns ": <first 80 chars>" for non-empty comments
-// to attach to channel event content. Empty input yields "".
-func commentPreview(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
-	}
-	const cap = 80
-	if len(s) > cap {
-		s = s[:cap] + "…"
-	}
-	return ": " + s
 }
 
 // taskActionRequest is the JSON body accepted by the /control/

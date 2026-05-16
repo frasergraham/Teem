@@ -113,17 +113,9 @@ func (d *daemon) handleDecisionActionForm(w http.ResponseWriter, r *http.Request
 			},
 		})
 	}
-	if rt.mcp != nil {
-		rt.mcp.PushChannel(
-			fmt.Sprintf("task %s: operator %s%s", taskID, action, commentPreview(comment)),
-			map[string]string{
-				"kind":    "decision_action",
-				"task_id": taskID,
-				"action":  action,
-				"comment": comment,
-			},
-		)
-	}
+	// The hooked audit sink runs channelHook on every Write, so the
+	// decision_note above already fans out to any connected leader
+	// session — no explicit PushChannel is needed here.
 	http.Redirect(w, r, fmt.Sprintf("/teams/%s?flash=task_commented", rt.team.ID), http.StatusSeeOther)
 }
 
