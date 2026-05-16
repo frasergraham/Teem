@@ -85,51 +85,47 @@ func (d *daemon) runPeerAware(interval time.Duration) {
 // wrapped in a recover so one bad team can't kill the loop or leak into
 // another's digest.
 func (d *daemon) peerAwareSweep(window time.Duration) {
-	d.mu.Lock()
-	teams := make([]*registeredTeam, 0, len(d.teams))
-	for _, rt := range d.teams {
-		teams = append(teams, rt)
-	}
-	d.mu.Unlock()
-	if len(teams) < 2 {
+	views := d.snapshotTeams()
+	if len(views) < 2 {
 		// One (or zero) teams registered — nothing to be aware of.
 		return
 	}
 	now := time.Now().UTC()
 	cutoff := now.Add(-window)
 
-	snaps := make([]peeraware.Snapshot, 0, len(teams))
-	for _, rt := range teams {
-		snap, ok := collectSnapshotSafe(rt, cutoff)
+	snaps := make([]peeraware.Snapshot, 0, len(views))
+	for _, v := range views {
+		snap, ok := collectSnapshotSafe(v, cutoff)
 		if !ok {
 			continue
 		}
 		snaps = append(snaps, snap)
 	}
 
-	for _, rt := range teams {
-		writeDigestSafe(rt, snaps, now)
+	for _, v := range views {
+		writeDigestSafe(v, snaps, now)
 	}
 }
 
-func collectSnapshotSafe(rt *registeredTeam, cutoff time.Time) (snap peeraware.Snapshot, ok bool) {
+func collectSnapshotSafe(v teamView, cutoff time.Time) (snap peeraware.Snapshot, ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "[peeraware] %s: snapshot panic: %v\n", rt.team.Name, r)
+			fmt.Fprintf(os.Stderr, "[peeraware] %s: snapshot panic: %v\n", v.Name, r)
 			snap = peeraware.Snapshot{}
 			ok = false
 		}
 	}()
-	return collectSnapshot(rt, cutoff), true
+	return collectSnapshot(v, cutoff), true
 }
 
-func writeDigestSafe(rt *registeredTeam, snaps []peeraware.Snapshot, now time.Time) {
+func writeDigestSafe(v teamView, snaps []peeraware.Snapshot, now time.Time) {
+	rt := v.rt
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "[peeraware] %s: write panic: %v\n", rt.team.Name, r)
+			fmt.Fprintf(os.Stderr, "[peeraware] %s: write panic: %v\n", v.Name, r)
 		}
 	}()
-	body := peeraware.Digest(rt.team.Name, snaps, now)
+	body := peeraware.Digest(v.Name, snaps, now)
 	if strings.TrimSpace(body) == "" {
 		return
 	}
@@ -137,15 +133,16 @@ func writeDigestSafe(rt *registeredTeam, snaps []peeraware.Snapshot, now time.Ti
 		return
 	}
 	if err := rt.archMem.AppendBlock(archmem.LeaderRole, peerAwareBlockName, body); err != nil {
-		fmt.Fprintf(os.Stderr, "[peeraware] %s: write leader memory block: %v\n", rt.team.Name, err)
+		fmt.Fprintf(os.Stderr, "[peeraware] %s: write leader memory block: %v\n", v.Name, err)
 	}
 }
 
 // collectSnapshot reads the bits of in-memory team state the digester
 // needs. Fast paths only: registry list, plan list, leader-status get,
 // and an audit query bounded to past-window events.
-func collectSnapshot(rt *registeredTeam, cutoff time.Time) peeraware.Snapshot {
-	snap := peeraware.Snapshot{Team: rt.team.Name}
+func collectSnapshot(v teamView, cutoff time.Time) peeraware.Snapshot {
+	rt := v.rt
+	snap := peeraware.Snapshot{Team: v.Name}
 
 	if rt.leaderStatus != nil {
 		if e, ok := rt.leaderStatus.Get("leader"); ok {

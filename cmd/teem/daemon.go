@@ -393,6 +393,49 @@ type registeredTeam struct {
 	channelsLive bool
 }
 
+// teamView pairs a stable *registeredTeam pointer with a snapshot of
+// the team.Team fields that can mutate at runtime under d.mu (currently
+// Name and Leader.SystemPrompt, refreshed by handleRegister on
+// re-register). Every other registeredTeam field is fixed once
+// buildTeamServices returns, so the rt pointer itself can be read
+// outside the lock — only the inner display fields need copying.
+//
+// Build with snapshotTeams / snapshotTeam inside a single d.mu critical
+// section, then operate on the snapshot. This lets sort-by-name, log
+// lines, and page titles run outside the lock without racing handleRegister.
+type teamView struct {
+	rt                 *registeredTeam
+	Name               string
+	LeaderSystemPrompt string
+}
+
+// snapshotTeams returns a teamView for every registered team, captured
+// in a single d.mu critical section.
+func (d *daemon) snapshotTeams() []teamView {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]teamView, 0, len(d.teams))
+	for _, rt := range d.teams {
+		out = append(out, teamView{
+			rt:                 rt,
+			Name:               rt.team.Name,
+			LeaderSystemPrompt: rt.team.Leader.SystemPrompt,
+		})
+	}
+	return out
+}
+
+// snapshotTeam captures the mutable display fields for one rt.
+func (d *daemon) snapshotTeam(rt *registeredTeam) teamView {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return teamView{
+		rt:                 rt,
+		Name:               rt.team.Name,
+		LeaderSystemPrompt: rt.team.Leader.SystemPrompt,
+	}
+}
+
 // serveDaemon runs the multi-tenant orchestrator until ctx is cancelled.
 // Teams are registered lazily via POST /control/teams.
 func serveDaemon(ctx context.Context, df *daemonFlags) error {

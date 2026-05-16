@@ -67,24 +67,19 @@ func (d *daemon) runPruneSweep(interval time.Duration) {
 // registered team's repo. Teams without a repoRoot are skipped
 // silently (Fargate-only / repo-less teams have no branches to prune).
 func (d *daemon) pruneSweep() {
-	d.mu.Lock()
-	teams := make([]*registeredTeam, 0, len(d.teams))
-	for _, rt := range d.teams {
-		teams = append(teams, rt)
-	}
-	d.mu.Unlock()
-
-	for _, rt := range teams {
-		if rt.repoRoot == "" {
+	views := d.snapshotTeams()
+	for _, v := range views {
+		if v.rt.repoRoot == "" {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(d.baseCtx, 60*time.Second)
-		d.pruneOneTeam(ctx, rt)
+		d.pruneOneTeam(ctx, v)
 		cancel()
 	}
 }
 
-func (d *daemon) pruneOneTeam(ctx context.Context, rt *registeredTeam) {
+func (d *daemon) pruneOneTeam(ctx context.Context, v teamView) {
+	rt := v.rt
 	live := liveAgentIDs(rt.registry)
 	rosterEntries := rt.spawner.RosterSnapshot("")
 	rosterView := make([]pruner.RosterView, 0, len(rosterEntries))
@@ -102,7 +97,7 @@ func (d *daemon) pruneOneTeam(ctx context.Context, rt *registeredTeam) {
 
 	branches, err := pruner.LoadCandidates(ctx, rt.repoRoot, "main")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[teem] prune %s: load candidates: %v\n", rt.team.Name, err)
+		fmt.Fprintf(os.Stderr, "[teem] prune %s: load candidates: %v\n", v.Name, err)
 		return
 	}
 	cls := pruner.Classify(pruner.Inputs{
@@ -146,10 +141,10 @@ func (d *daemon) pruneOneTeam(ctx context.Context, rt *registeredTeam) {
 		},
 	})
 	if len(res.Deleted) > 0 {
-		fmt.Fprintf(os.Stderr, "[teem] prune %s: deleted %d branch(es)\n", rt.team.Name, len(res.Deleted))
+		fmt.Fprintf(os.Stderr, "[teem] prune %s: deleted %d branch(es)\n", v.Name, len(res.Deleted))
 	}
 	for name, err := range res.Errors {
-		fmt.Fprintf(os.Stderr, "[teem] prune %s: %s: %v\n", rt.team.Name, name, err)
+		fmt.Fprintf(os.Stderr, "[teem] prune %s: %s: %v\n", v.Name, name, err)
 	}
 }
 

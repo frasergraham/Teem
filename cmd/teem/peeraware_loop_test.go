@@ -91,7 +91,7 @@ func TestCollectSnapshot_SkipsStaleLeaderStatus(t *testing.T) {
 		leaderStatus: ls,
 	}
 	cutoff := time.Now().UTC().Add(-time.Hour) // 1h window
-	snap := collectSnapshot(rt, cutoff)
+	snap := collectSnapshot(teamView{rt: rt, Name: rt.team.Name}, cutoff)
 	if snap.LeaderStatus != "" {
 		t.Errorf("LeaderStatus = %q, want empty (stale)", snap.LeaderStatus)
 	}
@@ -121,7 +121,7 @@ func TestCollectSnapshot_SkipsStaleLeaderStatus(t *testing.T) {
 		t.Fatalf("open fresh leaderstatus: %v", err)
 	}
 	rt.leaderStatus = freshLS
-	snap = collectSnapshot(rt, cutoff)
+	snap = collectSnapshot(teamView{rt: rt, Name: rt.team.Name}, cutoff)
 	if snap.LeaderStatus != "working on T7" {
 		t.Errorf("LeaderStatus = %q, want %q", snap.LeaderStatus, "working on T7")
 	}
