@@ -113,6 +113,9 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 			"Sent at: %s\n",
 		time.Now().UTC().Format(time.RFC3339),
 	)
+	if burst := loadChatBurst(rt.auditSink, "leader-chat", 0, defaultBurstParams); burst != "" {
+		contextBody += "\n" + burst
+	}
 
 	// Per-request 5-minute deadline matches pulse's TickTimeout — a
 	// stuck subprocess is SIGKILLed via context cancel rather than
@@ -127,14 +130,21 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 	startedAt := time.Now().UTC()
 	stdout, wait, err := runner(ctx, mcpConfig, rt.repoRoot, contextBody, msg)
 	if err != nil {
+		// Record the operator's message even though no assistant text
+		// was produced — keeps the next turn's burst aware of what was
+		// just asked. assistant_text="" matches the success path's
+		// shape when the subprocess produces no prose.
+		d.recordChatTurn(rt, "leader-chat", 0, msg, "")
 		writeSSE(w, flusher, "error", err.Error())
 		return
 	}
 
 	cap := usage.NewCapture(startedAt)
-	parseErr := streamChatResponse(stdout, w, flusher, cap)
+	var assistantBuf strings.Builder
+	parseErr := streamChatResponse(stdout, w, flusher, cap, &assistantBuf)
 	waitErr := wait()
 	d.recordChatUsage(rt, cap.Summary(), "leader-chat")
+	d.recordChatTurn(rt, "leader-chat", 0, msg, assistantBuf.String())
 	if waitErr != nil && parseErr == nil {
 		writeSSE(w, flusher, "error", waitErr.Error())
 		return
@@ -144,6 +154,34 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeSSE(w, flusher, "done", "")
+}
+
+// recordChatTurn emits a KindLeaderChatTurn audit event capturing the
+// operator's user message and the leader's full assistant text. Scope
+// fields go into Meta: team_id is always set; chat_id is set only for
+// Telegram surfaces (pass 0 for dashboard). Used by chat_history's
+// burst helper so subsequent turns on the same surface can be replayed
+// into the next subprocess's context body. Errors are swallowed — a
+// failed audit write should not abort the chat.
+func (d *daemon) recordChatTurn(rt *registeredTeam, agentID string, chatID int64, userMessage, assistantText string) {
+	if rt == nil || rt.auditSink == nil || agentID == "" {
+		return
+	}
+	meta := map[string]any{
+		"agent_id":       agentID,
+		"team_id":        rt.team.ID,
+		"user_message":   userMessage,
+		"assistant_text": assistantText,
+	}
+	if chatID != 0 {
+		meta["chat_id"] = chatID
+	}
+	_ = rt.auditSink.Write(audit.Event{
+		Timestamp: time.Now().UTC(),
+		AgentID:   agentID,
+		Kind:      audit.KindLeaderChatTurn,
+		Meta:      meta,
+	})
 }
 
 // recordChatUsage emits a KindUsageEvent for an operator chat turn.
@@ -172,7 +210,7 @@ func (d *daemon) recordChatUsage(rt *registeredTeam, s usage.UsageSummary, agent
 // also fed through the supplied usage.Capture so the shared usage
 // extractor remains the single source of truth (see
 // docs/usage-capture.md). cap may be nil for tests that don't care.
-func streamChatResponse(r io.Reader, w http.ResponseWriter, f http.Flusher, cap *usage.Capture) error {
+func streamChatResponse(r io.Reader, w http.ResponseWriter, f http.Flusher, cap *usage.Capture, full *strings.Builder) error {
 	type contentBlock struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -203,6 +241,9 @@ func streamChatResponse(r io.Reader, w http.ResponseWriter, f http.Flusher, cap 
 			for _, c := range e.Message.Content {
 				if c.Type == "text" && c.Text != "" {
 					writeSSE(w, f, "", c.Text)
+					if full != nil {
+						full.WriteString(c.Text)
+					}
 					emittedAssistant = true
 				}
 			}
@@ -219,6 +260,9 @@ func streamChatResponse(r io.Reader, w http.ResponseWriter, f http.Flusher, cap 
 	// through (older claude builds, or a tool-only turn).
 	if !emittedAssistant && resultText != "" {
 		writeSSE(w, f, "", resultText)
+		if full != nil {
+			full.WriteString(resultText)
+		}
 	}
 	return nil
 }

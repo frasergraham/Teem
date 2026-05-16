@@ -373,11 +373,19 @@ func (d *daemon) runTelegramLeaderTurn(turnCtx context.Context, cancel context.C
 			"Sent at: %s\n",
 		time.Now().UTC().Format(time.RFC3339),
 	)
+	if burst := loadChatBurst(rt.auditSink, "leader-telegram", chatID, defaultBurstParams); burst != "" {
+		contextBody += "\n" + burst
+	}
 
 	startedAt := time.Now().UTC()
 	stdout, wait, err := runner(turnCtx, mcpConfig, rt.repoRoot, contextBody, userMessage)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[messaging-webhook] leader chat start: %v\n", err)
+		// Record the operator's message even though no assistant text
+		// was produced — keeps the next turn's burst aware of what was
+		// just asked. assistant_text="" matches the success path's
+		// shape when the subprocess produces no prose.
+		d.recordChatTurn(rt, "leader-telegram", chatID, userMessage, "")
 		if rep != nil && chatID != 0 {
 			_ = rep.SendText(d.baseCtx, chatID, "Leader subprocess failed to start: "+err.Error())
 		}
@@ -388,6 +396,7 @@ func (d *daemon) runTelegramLeaderTurn(turnCtx context.Context, cancel context.C
 	text, parseErr := collectChatTurn(stdout, cap)
 	waitErr := wait()
 	d.recordChatUsage(rt, cap.Summary(), "leader-telegram")
+	d.recordChatTurn(rt, "leader-telegram", chatID, userMessage, text)
 
 	if errors.Is(turnCtx.Err(), context.DeadlineExceeded) {
 		if rep != nil && chatID != 0 {

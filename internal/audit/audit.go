@@ -106,6 +106,13 @@ const (
 	// carries trigger, duration_ms, tool_calls, chat_session_id, and
 	// either assistant_bytes or error=true.
 	KindPulseTick Kind = "pulse_tick"
+	// KindLeaderChatTurn is emitted after a leader-chat subprocess
+	// finishes (dashboard /control/teams/<id>/chat or Telegram
+	// bare-text). One event per turn. Meta carries user_message,
+	// assistant_text, team_id and — for Telegram — chat_id so the
+	// recent-burst helper can scope past turns. AgentID matches the
+	// surface ("leader-chat" or "leader-telegram").
+	KindLeaderChatTurn Kind = "leader_chat_turn"
 )
 
 // PMOutcomeXxx are the values the project-manager loop writes into
