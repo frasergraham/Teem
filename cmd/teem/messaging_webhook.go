@@ -87,20 +87,37 @@ func (s *telegramChatSessions) cancel(token string) bool {
 
 // telegramUpdate is the slice of the Telegram bot update payload we
 // care about. message.text carries the operator's body; message.chat.id
-// is where we post the leader's reply back to.
+// is where we post the leader's reply back to. ReplyToMessage is set
+// when the operator used Telegram's native long-press → Reply gesture
+// against one of the bot's prior outbound messages — its message_id
+// lets us resolve the correct reply token without the operator typing
+// /reply.
 type telegramUpdate struct {
-	Message *struct {
-		Chat struct {
-			ID int64 `json:"id"`
-		} `json:"chat"`
-		Text string `json:"text"`
-	} `json:"message"`
+	Message *telegramMessage `json:"message"`
+}
+
+type telegramMessage struct {
+	MessageID      int64            `json:"message_id"`
+	Chat           telegramChat     `json:"chat"`
+	Text           string           `json:"text"`
+	ReplyToMessage *telegramMessage `json:"reply_to_message"`
+}
+
+type telegramChat struct {
+	ID int64 `json:"id"`
 }
 
 // telegramReplier abstracts the chat-id-aware sendMessage call so tests
 // can record outbound posts without a real Telegram server.
 type telegramReplier interface {
 	SendText(ctx context.Context, chatID int64, text string) error
+}
+
+// messageIDLookuper resolves an outbound Telegram message_id back to
+// the reply token + context the bot stamped on it. Implemented by
+// *messaging.TelegramNotifier; tests inject a fake.
+type messageIDLookuper interface {
+	LookupByMessageID(int64) (string, messaging.ReplyContext, bool)
 }
 
 // effectiveWebhookPort decides which TCP port the dedicated Telegram
@@ -200,6 +217,25 @@ func (d *daemon) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 	text := strings.TrimSpace(upd.Message.Text)
 	chatID := upd.Message.Chat.ID
 
+	// Native reply gesture: the operator long-pressed one of the bot's
+	// outbound messages and tapped Reply. The webhook update carries
+	// reply_to_message.message_id; we resolve it back to the same
+	// token+context the operator would otherwise have typed. Checked
+	// BEFORE prefix dispatch so a native reply whose body happens to
+	// start with /reply or /done is still treated as a chat turn.
+	if upd.Message.ReplyToMessage != nil && upd.Message.ReplyToMessage.MessageID != 0 {
+		token, _, ok := d.lookupMessageID(upd.Message.ReplyToMessage.MessageID)
+		if !ok {
+			if rep := d.telegramReplier(); rep != nil && chatID != 0 {
+				_ = rep.SendText(r.Context(), chatID, "This thread expired — tap a recent notification to start a new one.")
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		d.dispatchTelegramReply(w, r.Context(), chatID, token, text)
+		return
+	}
+
 	switch {
 	case strings.HasPrefix(text, "/done"):
 		d.handleTelegramDone(w, r.Context(), chatID, strings.TrimSpace(strings.TrimPrefix(text, "/done")))
@@ -256,21 +292,28 @@ func (d *daemon) handleTelegramDone(w http.ResponseWriter, ctx context.Context, 
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleTelegramReply parses `<token> <message>`, looks the token up in
-// the store, and spawns a one-shot leader chat subprocess scoped to the
-// task that originally fired the outbound ping. The subprocess output
-// is collected and posted back as a single Telegram sendMessage.
+// handleTelegramReply parses `<token> <message>` from a /reply command
+// and hands the resolved (token, body) to dispatchTelegramReply.
 func (d *daemon) handleTelegramReply(w http.ResponseWriter, ctx context.Context, chatID int64, arg string) {
-	rep := d.telegramReplier()
-
 	token, body := splitFirstWord(arg)
 	if token == "" {
-		if rep != nil && chatID != 0 {
+		if rep := d.telegramReplier(); rep != nil && chatID != 0 {
 			_ = rep.SendText(ctx, chatID, "Usage: `/reply <token> <message>`")
 		}
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	d.dispatchTelegramReply(w, ctx, chatID, token, body)
+}
+
+// dispatchTelegramReply takes an already-resolved reply token plus the
+// operator's body, looks the token up in the store, and spawns a
+// one-shot leader chat subprocess scoped to the task that originally
+// fired the outbound ping. Shared by both the /reply text path and the
+// native long-press → Reply gesture path.
+func (d *daemon) dispatchTelegramReply(w http.ResponseWriter, ctx context.Context, chatID int64, token, body string) {
+	rep := d.telegramReplier()
+
 	if d.messagingReplyTokens == nil {
 		http.Error(w, "messaging disabled", http.StatusNotFound)
 		return
@@ -304,6 +347,20 @@ func (d *daemon) handleTelegramReply(w http.ResponseWriter, ctx context.Context,
 	// background and posts its result via sendMessage when ready.
 	w.WriteHeader(http.StatusOK)
 	go d.runTelegramTurn(token, body, chatID, rctx, rt)
+}
+
+// lookupMessageID resolves a Telegram outbound message_id to its
+// stored reply token + context. Tests inject via
+// d.messagingMessageIDLookup so they can assert the native-reply path
+// without a real notifier.
+func (d *daemon) lookupMessageID(id int64) (string, messaging.ReplyContext, bool) {
+	if d.messagingMessageIDLookup != nil {
+		return d.messagingMessageIDLookup(id)
+	}
+	if d.messagingTelegram != nil {
+		return d.messagingTelegram.LookupByMessageID(id)
+	}
+	return "", messaging.ReplyContext{}, false
 }
 
 // runTelegramTurn is the long-running half of handleTelegramReply: it

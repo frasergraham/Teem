@@ -302,6 +302,11 @@ type daemon struct {
 	// replaces the production Telegram path so unit tests can record
 	// outbound posts without a real Telegram server.
 	messagingReplierOverride telegramReplier
+	// messagingMessageIDLookup is the test seam for the native-reply
+	// gesture path: when non-nil it replaces the production
+	// d.messagingTelegram.LookupByMessageID call. Tests inject a fake
+	// mapping without standing up a real notifier.
+	messagingMessageIDLookup func(int64) (string, messaging.ReplyContext, bool)
 	// messagingReplyTokens correlates outbound Telegram pings with inbound
 	// /reply <token> messages. Issued at outbound emit, consumed by the
 	// inbound webhook handler. Nil when messaging is disabled.

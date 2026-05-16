@@ -361,6 +361,81 @@ func TestWebhook_EmitsUsageEvent(t *testing.T) {
 	}
 }
 
+func TestHandleTelegramWebhook_NativeReplyResolvesToken(t *testing.T) {
+	d, _ := newWebhookTestDaemon(t)
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	tok, err := d.messagingReplyTokens.Issue(messaging.ReplyContext{
+		TeamID: "alpha", TaskID: "t-3a2f", AgentID: "worker-una",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.messagingMessageIDLookup = func(id int64) (string, messaging.ReplyContext, bool) {
+		if id == 42 {
+			return tok, messaging.ReplyContext{TeamID: "alpha", TaskID: "t-3a2f", AgentID: "worker-una"}, true
+		}
+		return "", messaging.ReplyContext{}, false
+	}
+
+	gotPrompt := make(chan string, 1)
+	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+		gotPrompt <- userMessage
+		stream := strings.Join([]string{
+			`{"type":"assistant","message":{"content":[{"type":"text","text":"ack"}]}}`,
+			`{"type":"result","result":"ack"}`,
+		}, "\n") + "\n"
+		return io.NopCloser(strings.NewReader(stream)), func() error { return nil }, nil
+	}
+
+	body := strings.NewReader(`{"message":{"chat":{"id":42},"text":"how is it going","reply_to_message":{"message_id":42}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", body)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+
+	select {
+	case prompt := <-gotPrompt:
+		// Native reply: full text becomes the body verbatim — no /reply
+		// stripping, no token in the body.
+		if prompt != "how is it going" {
+			t.Errorf("user prompt=%q want %q", prompt, "how is it going")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("chat runner never invoked from native-reply path")
+	}
+}
+
+func TestHandleTelegramWebhook_NativeReplyUnknownMessageID(t *testing.T) {
+	d, rep := newWebhookTestDaemon(t)
+	d.messagingMessageIDLookup = func(id int64) (string, messaging.ReplyContext, bool) {
+		return "", messaging.ReplyContext{}, false
+	}
+
+	body := strings.NewReader(`{"message":{"chat":{"id":42},"text":"hello again","reply_to_message":{"message_id":99}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/messaging/telegram/webhook?token=webhooksecret", body)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+
+	calls := rep.snapshot()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 outbound reply, got %d (%+v)", len(calls), calls)
+	}
+	got := calls[0].Text
+	if !strings.Contains(strings.ToLower(got), "expired") {
+		t.Errorf("reply should hint that the thread expired; got %q", got)
+	}
+	if strings.Contains(got, "/reply") || strings.Contains(got, "<token>") {
+		t.Errorf("native-reply expiry hint should not include the /reply <token> usage string; got %q", got)
+	}
+}
+
 func TestWebhook_IssueTokenStampsOutboundMessage(t *testing.T) {
 	// The hook stamps msg.ReplyToken when tokens != nil — verify via a
 	// recording Notifier rather than running the whole hook stack.
