@@ -97,6 +97,25 @@ export function commentTask(
   );
 }
 
+// ---- Ping leader ---------------------------------------------------
+
+export interface PingResult {
+  status?: string;
+  ping_ts?: number;
+}
+
+// pingLeader fires a one-shot manual pulse-tick (trigger=manual). The
+// daemon synchronously records the audit row before returning so the
+// SPA's event stream picks up the leader's wake within a round-trip.
+// 200 + JSON on success; 202 if a tick is already mid-flight; 409 if
+// the pulse loop is paused.
+export function pingLeader(teamID: string, signal?: AbortSignal): Promise<PingResult> {
+  return postJSON<PingResult>(
+    `/control/teams/${encodeURIComponent(teamID)}/ping`,
+    { signal },
+  );
+}
+
 // ---- Pulse controls -----------------------------------------------
 
 // PulseStatus mirrors cmd/teem/daemon.go pulseStatus (the JSON-shaped

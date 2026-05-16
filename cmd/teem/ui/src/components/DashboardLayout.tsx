@@ -1,6 +1,8 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ConnState, useTeamStore } from '../store/team';
 import { useSettingsStore } from '../store/settings';
+import { pingLeader } from '../api/control';
+import { APIError } from '../api/client';
 import { HeroPanel } from './HeroPanel';
 import { WorkersPanel } from './WorkersPanel';
 import { TasksTable } from './TasksTable';
@@ -76,8 +78,48 @@ function Header() {
         <span className={`dot ${conn.kind}`} aria-hidden="true" />
         <span>{describeConn(conn, lastSeq)}</span>
       </span>
+      <PingLeaderButton />
       <SettingsGear />
     </header>
+  );
+}
+
+// PingLeaderButton fires a one-shot manual pulse-tick via
+// POST /control/teams/<id>/ping. Visual feedback: a short "pinged" state
+// after success, "..." while in flight, otherwise the default label.
+// On error, the title= surfaces the message for hover-debug.
+function PingLeaderButton() {
+  const teamID = useTeamStore((s) => s.teamID);
+  const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  if (!teamID) return null;
+  async function onClick() {
+    if (state === 'sending') return;
+    setState('sending');
+    setError(null);
+    try {
+      await pingLeader(teamID!);
+      setState('sent');
+      setTimeout(() => setState((s) => (s === 'sent' ? 'idle' : s)), 2000);
+    } catch (e) {
+      setError(e instanceof APIError ? e.message : String(e));
+      setState('error');
+      setTimeout(() => setState((s) => (s === 'error' ? 'idle' : s)), 3500);
+    }
+  }
+  const label =
+    state === 'sending' ? 'pinging…' : state === 'sent' ? 'pinged ✓' : state === 'error' ? 'failed' : 'Ping leader';
+  return (
+    <button
+      type="button"
+      className={`ping-btn ${state}`}
+      onClick={onClick}
+      disabled={state === 'sending'}
+      title={error ?? 'Fire a one-shot pulse tick — the leader wakes and takes a turn now.'}
+      aria-label="ping the leader"
+    >
+      {label}
+    </button>
   );
 }
 

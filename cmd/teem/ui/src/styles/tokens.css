@@ -849,6 +849,42 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
   .pulse-grid { grid-template-columns: 1fr; }
 }
 
+/* --- Ping-leader button in header ------------------------------- */
+
+.ping-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--c-border, var(--border));
+  color: var(--c-text-muted, var(--muted));
+  font-family: inherit;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-left: 8px;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.ping-btn:hover:not(:disabled) {
+  background: var(--c-tile-hover, var(--pill-bg));
+  color: var(--c-text, var(--fg));
+  border-color: var(--c-signal, var(--accent));
+}
+.ping-btn:focus-visible {
+  outline: 2px solid var(--c-signal, var(--accent));
+  outline-offset: 1px;
+}
+.ping-btn:disabled { cursor: not-allowed; opacity: 0.6; }
+.ping-btn.sent {
+  color: var(--c-signal-text, var(--accent));
+  border-color: var(--c-signal, var(--accent));
+}
+.ping-btn.error {
+  color: var(--c-error-text, var(--error));
+  border-color: var(--c-error, var(--error));
+}
+
 /* --- Settings menu (per-team section toggles) ------------------- */
 
 .settings-gear {
