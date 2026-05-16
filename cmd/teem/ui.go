@@ -1213,7 +1213,6 @@ func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool, j
 		AssigneeActive:  assigneeActive,
 		AssigneeDerived: derived,
 		Stale:           stale,
-		URL:             fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID),
 		Cost:            buildTaskCostCell(t.Evidence, pricing, costEvents),
 	}
 }
@@ -1314,7 +1313,7 @@ func taskToAwaitingApprovalTask(team string, t plan.Task, events []audit.Event, 
 	if !t.StageEnteredAt.IsZero() {
 		stageAgo = agoShort(t.StageEnteredAt)
 	}
-	base := fmt.Sprintf("/teams/%s/tasks/%s", team, t.ID)
+	base := fmt.Sprintf("/control/teams/%s/tasks/%s", team, t.ID)
 	rows := resolveEvidenceRows(events, t.Evidence, repoRoot, team)
 	hasPlan := false
 	for _, r := range rows {
@@ -1330,7 +1329,6 @@ func taskToAwaitingApprovalTask(team string, t plan.Task, events []audit.Event, 
 		EvidenceRows:    rows,
 		HasPlanArtifact: hasPlan,
 		StageAgo:        stageAgo,
-		URL:             base,
 		ApproveURL:      base + "/approve",
 		RejectURL:       base + "/reject",
 		CommentURL:      base + "/comment",
