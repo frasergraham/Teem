@@ -503,13 +503,8 @@ type dashboardEvent struct {
 // team, each linking to /teams/<slug> for the deep view. Designed to
 // read at-a-glance across the room: counters in big bold numerals.
 func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
-	d.mu.Lock()
-	teams := make([]*registeredTeam, 0, len(d.teams))
-	for _, rt := range d.teams {
-		teams = append(teams, rt)
-	}
-	d.mu.Unlock()
-	sort.Slice(teams, func(i, j int) bool { return teams[i].team.Name < teams[j].team.Name })
+	views := d.snapshotTeams()
+	sort.Slice(views, func(i, j int) bool { return views[i].Name < views[j].Name })
 
 	state := readDaemonStateFileSafe()
 
@@ -517,11 +512,11 @@ func (d *daemon) renderDashboard(w http.ResponseWriter, _ *http.Request) {
 		Endpoint:     d.endpoint,
 		StartedAt:    state.StartedAt,
 		UptimeAgo:    agoShort(state.StartedAt),
-		Tiles:        make([]summaryTile, 0, len(teams)),
+		Tiles:        make([]summaryTile, 0, len(views)),
 		NowFormatted: time.Now().Local().Format("Mon Jan 2 15:04:05"),
 	}
-	for _, rt := range teams {
-		snap.Tiles = append(snap.Tiles, teamTileSnapshot(rt))
+	for _, v := range views {
+		snap.Tiles = append(snap.Tiles, teamTileSnapshot(v))
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -545,9 +540,10 @@ func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID s
 		http.NotFound(w, r)
 		return
 	}
+	view := d.snapshotTeam(found)
 
 	state := readDaemonStateFileSafe()
-	team := teamSnapshot(found)
+	team := teamSnapshot(view)
 	team.Usage = buildUsageSnapshot(d.usageAgg, time.Now())
 	// flash is set by the form-POST redirect (?flash=task_approved etc).
 	// Whitelisted to a known set so a malicious link can't inject
@@ -595,10 +591,11 @@ func (d *daemon) renderTeamPage(w http.ResponseWriter, r *http.Request, teamID s
 // tile. Reuses teamSnapshot for the counters that are already cheap to
 // compute and layers on completed-today (which the deep view doesn't
 // surface separately) and the leader-status one-liner.
-func teamTileSnapshot(rt *registeredTeam) summaryTile {
-	ts := teamSnapshot(rt)
+func teamTileSnapshot(v teamView) summaryTile {
+	rt := v.rt
+	ts := teamSnapshot(v)
 	tile := summaryTile{
-		Name:                  rt.team.Name,
+		Name:                  v.Name,
 		Slug:                  rt.team.ID,
 		RegisteredAgo:         ts.RegisteredAgo,
 		OpenTaskCount:         ts.OpenTaskCount,
@@ -767,8 +764,9 @@ func readDaemonStateFileSafe() daemonStateFile {
 // teamSnapshot derives a per-team dashboard view. Reads from the
 // registry, plan, audit (last ~20 events), pulse, and notes inbox.
 // All read-only and cheap enough to do every page load.
-func teamSnapshot(rt *registeredTeam) dashboardTeam {
-	out := dashboardTeam{ID: rt.team.ID, Name: rt.team.Name}
+func teamSnapshot(v teamView) dashboardTeam {
+	rt := v.rt
+	out := dashboardTeam{ID: rt.team.ID, Name: v.Name}
 	out.RegisteredAgo = agoShort(rt.registered)
 
 	// Pricing: loaded once per render. A missing file flips HasPricing

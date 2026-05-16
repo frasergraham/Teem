@@ -71,8 +71,9 @@ func (d *daemon) renderAgentJobs(w http.ResponseWriter, _ *http.Request, rt *reg
 		http.Error(w, "bad agent id", http.StatusBadRequest)
 		return
 	}
+	tv := d.snapshotTeam(rt)
 	view := agentJobsView{
-		Team:         rt.team.Name,
+		Team:         tv.Name,
 		AgentID:      agentID,
 		NowFormatted: time.Now().Local().Format("Mon Jan 2 15:04:05"),
 	}
@@ -141,8 +142,9 @@ func (d *daemon) renderJobDetail(w http.ResponseWriter, _ *http.Request, rt *reg
 		return
 	}
 
+	tv := d.snapshotTeam(rt)
 	view := jobDetailView{
-		Team:         rt.team.Name,
+		Team:         tv.Name,
 		Job:          job,
 		NowFormatted: time.Now().Local().Format("Mon Jan 2 15:04:05"),
 		Duration:     durShort(job.Duration()),
