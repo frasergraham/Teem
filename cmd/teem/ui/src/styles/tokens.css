@@ -275,14 +275,29 @@ body.team-detail-page {
   min-width: 40px;
   padding: 0 8px;
   display: flex; align-items: center; justify-content: center; gap: 6px;
-  color: #0c0a09;
+  color: var(--c-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   border-right: 1px solid rgba(255,255,255,0.5);
+  background: var(--c-panel-alt);
 }
 .stage-bar .segment:last-child { border-right: none; }
 .stage-bar .segment .count { font-variant-numeric: tabular-nums; font-weight: 700; }
+
+/* Pipeline-bar per-stage colours track the pill rules above so the
+   hero bar and the task-table pills share one palette. */
+.stage-bar .segment.stage-proposed          { background: var(--c-panel-alt); color: var(--c-text-muted); }
+.stage-bar .segment.stage-ready             { background: var(--c-signal-accent); color: var(--c-on-signal); }
+.stage-bar .segment.stage-specced           { background: var(--c-panel-alt); color: var(--c-azure); }
+.stage-bar .segment.stage-awaiting_approval { background: var(--c-azure); color: var(--c-on-signal); }
+.stage-bar .segment.stage-planning          { background: var(--c-panel-alt); color: var(--c-signal-text); }
+.stage-bar .segment.stage-coding            { background: var(--c-signal); color: var(--c-on-signal); }
+.stage-bar .segment.stage-reviewing         { background: var(--c-panel-alt); color: var(--c-role-reviewer); }
+.stage-bar .segment.stage-integrating       { background: var(--c-role-integrator); color: var(--c-on-signal); }
+.stage-bar .segment.stage-verified          { background: var(--c-panel-alt); color: var(--c-role-integrator); }
+.stage-bar .segment.stage-blocked           { background: var(--c-plum); color: var(--c-on-signal); }
+.stage-bar .segment.stage-shelved           { background: var(--c-panel-alt); color: var(--c-text-muted); }
 .stage-bar-empty {
   color: var(--c-text-muted); font-style: italic; font-size: 13px;
   padding: 6px 0;
@@ -435,6 +450,7 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
 .stage.integrating       { background: var(--c-role-integrator); color: var(--c-on-signal); }
 .stage.blocked           { background: var(--c-plum); color: var(--c-on-signal); }
 .stage.done              { background: var(--c-panel-alt); color: var(--c-role-integrator); }
+.stage.verified          { background: var(--c-panel-alt); color: var(--c-role-integrator); }
 .stage.shelved           { background: var(--c-panel-alt); color: var(--c-text-muted); }
 .stage.cancelled         { background: var(--c-panel-alt); color: var(--c-text-dim); }
 

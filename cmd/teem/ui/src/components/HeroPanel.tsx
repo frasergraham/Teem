@@ -71,8 +71,8 @@ export function HeroPanel() {
           {hero.stage_bar.map((seg) => (
             <div
               key={seg.stage}
-              className="segment"
-              style={{ width: `${seg.width_pct.toFixed(2)}%`, background: seg.color_hex }}
+              className={`segment stage-${seg.stage}`}
+              style={{ width: `${seg.width_pct.toFixed(2)}%` }}
               title={`${seg.stage} (${seg.count}): ${seg.task_id_list ?? ''}`}
             >
               <span className="count">{seg.count}</span>
