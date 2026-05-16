@@ -11,15 +11,17 @@ import (
 
 // handleAPITeamRoute dispatches /api/teams/<id>/... routes.
 //
-//	GET /api/teams/<id>/state   → full snapshot JSON payload (see
-//	                              apiTeamStatePayload below). Phase 2b
-//	                              ports dashboardTeam to a JSON
-//	                              projection; the SPA reads this on
-//	                              page load.
-//	GET /api/teams/<id>/events  → WebSocket delta stream.
+//	GET /api/teams/<id>/state              → full snapshot JSON payload
+//	                                         (see apiTeamStatePayload).
+//	GET /api/teams/<id>/events             → WebSocket delta stream.
+//	GET /api/teams/<id>/tasks/<task-id>    → per-task detail (audit
+//	                                         timeline + agent rollup +
+//	                                         evidence jobs with
+//	                                         transcript URLs).
+//	GET /api/teams/<id>/transcripts/<a>/<j>→ raw NDJSON transcript.
 //
 // Auth model matches the dashboard's tailnet boundary: no bearer
-// required.
+// required. All endpoints are read-only.
 func (d *daemon) handleAPITeamRoute(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/teams/")
 	slash := strings.IndexByte(rest, '/')
@@ -33,11 +35,20 @@ func (d *daemon) handleAPITeamRoute(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	switch suffix {
-	case "/state":
+	switch {
+	case suffix == "/state":
 		d.handleAPITeamState(w, r, rt)
-	case "/events":
+	case suffix == "/events":
 		d.handleAPITeamEvents(w, r, rt)
+	case strings.HasPrefix(suffix, "/tasks/"):
+		taskID := strings.TrimPrefix(suffix, "/tasks/")
+		if taskID == "" || strings.Contains(taskID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		d.handleAPITeamTaskDetail(w, r, rt, taskID)
+	case strings.HasPrefix(suffix, "/transcripts/"):
+		d.handleAPITeamTranscriptGet(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
 	default:
 		http.NotFound(w, r)
 	}
