@@ -841,29 +841,172 @@ func isDashboardTaskReadyAction(path string) bool {
 	return len(parts) == 4 && parts[1] == "tasks" && parts[3] == "ready"
 }
 
-// renderTeamIndex writes a minimal HTML page listing every registered
-// team with a link to its SPA. Phase 4 replacement for the SSR
-// dashboard — just enough to land an operator's bookmark on something
-// clickable; the SPA owns the real UI under /teams/<id>/.
+// renderTeamIndex writes a multi-team overview page: one card per
+// registered team showing leader status, task counts, in-flight
+// workers, and today's spend. Pure inline HTML + inline <style> by
+// design — Phase 4 deleted html/template (binary -28%), so this page
+// stays template-free. Every dynamic value is run through
+// html.EscapeString; the page is unauth on purpose (tailnet is the
+// security boundary).
 func (d *daemon) renderTeamIndex(w http.ResponseWriter, _ *http.Request) {
 	views := d.snapshotTeams()
 	sort.Slice(views, func(i, j int) bool { return views[i].Name < views[j].Name })
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = io.WriteString(w, "<!doctype html><meta charset=\"utf-8\"><title>teem</title>"+
-		"<style>body{font:14px system-ui,sans-serif;margin:2rem;max-width:48rem}"+
-		"li{margin:.25rem 0}</style><h1>teem</h1>")
+
+	_, _ = io.WriteString(w, teamIndexHead)
+
 	if len(views) == 0 {
-		_, _ = io.WriteString(w, "<p>No teams registered.</p>")
+		_, _ = io.WriteString(w, `<main><h1>teem</h1><p class="empty">No teams registered.</p></main>`)
 		return
 	}
-	_, _ = io.WriteString(w, "<ul>")
+
+	_, _ = io.WriteString(w, `<main><h1>teem</h1><div class="grid">`)
 	for _, v := range views {
-		fmt.Fprintf(w, "<li><a href=\"/teams/%s/\">%s</a></li>",
-			html.EscapeString(v.rt.team.ID), html.EscapeString(v.Name))
+		writeTeamIndexCard(w, d.snapshotTeamCard(v))
 	}
-	_, _ = io.WriteString(w, "</ul>")
+	_, _ = io.WriteString(w, `</div></main>`)
+}
+
+// teamIndexCard is the per-card data the index page renders. Derived
+// from a full teamSnapshot — picking just the fields the card surface
+// shows — so it tracks dashboardTeam without re-implementing counters.
+type teamIndexCard struct {
+	ID               string
+	Name             string
+	RegisteredAgo    string
+	OpenTaskCount    int
+	AwaitingApproval int
+	RecentDoneCount  int
+	InFlight         int64
+	LeaderText       string
+	LeaderAgo        string
+	HasLeaderStatus  bool
+	HasPricing       bool
+	HeroSpendDisplay string
+	PricingStale     bool
+}
+
+// snapshotTeamCard builds the card payload for one team by walking the
+// full teamSnapshot. Reusing teamSnapshot keeps the index in lockstep
+// with the per-team page (same counters, same spend formula).
+func (d *daemon) snapshotTeamCard(v teamView) teamIndexCard {
+	team := teamSnapshot(v)
+	card := teamIndexCard{
+		ID:               team.ID,
+		Name:             team.Name,
+		RegisteredAgo:    team.RegisteredAgo,
+		OpenTaskCount:    team.OpenTaskCount,
+		AwaitingApproval: len(team.AwaitingApproval),
+		RecentDoneCount:  len(team.RecentDone),
+		InFlight:         team.InFlight,
+		HasPricing:       team.HasPricing,
+		HeroSpendDisplay: team.HeroSpendDisplay,
+		PricingStale:     team.PricingStale,
+	}
+	if team.LeaderStatus != nil {
+		card.HasLeaderStatus = true
+		card.LeaderText = team.LeaderStatus.Text
+		card.LeaderAgo = team.LeaderStatus.UpdatedAgo
+	}
+	return card
+}
+
+const teamIndexHead = `<!doctype html><html lang="en"><head>` +
+	`<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+	`<title>teem</title>` +
+	`<style>` +
+	`:root{--bg:#fafafa;--fg:#1f2937;--muted:#6b7280;--card:#ffffff;--border:#e5e7eb;` +
+	`--accent:#2563eb;--ok:#16a34a;--warn:#d97706;--stale:#9ca3af}` +
+	`@media (prefers-color-scheme:dark){:root{--bg:#0b0f17;--fg:#e5e7eb;--muted:#9ca3af;` +
+	`--card:#111827;--border:#1f2937;--accent:#60a5fa;--ok:#34d399;--warn:#fbbf24;--stale:#6b7280}}` +
+	`*{box-sizing:border-box}` +
+	`body{margin:0;background:var(--bg);color:var(--fg);` +
+	`font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}` +
+	`main{max-width:72rem;margin:0 auto;padding:2rem 1.25rem}` +
+	`h1{font-size:1.5rem;margin:0 0 1.25rem;letter-spacing:-.01em}` +
+	`.empty{color:var(--muted)}` +
+	`.grid{display:grid;gap:1rem;grid-template-columns:repeat(auto-fill,minmax(20rem,1fr))}` +
+	`.card{background:var(--card);border:1px solid var(--border);border-radius:.5rem;` +
+	`padding:1rem 1.1rem;text-decoration:none;color:inherit;display:block;` +
+	`transition:border-color .12s ease,transform .12s ease}` +
+	`.card:hover{border-color:var(--accent);transform:translateY(-1px)}` +
+	`.card-head{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem}` +
+	`.card-name{font-weight:600;font-size:1.05rem;letter-spacing:-.01em}` +
+	`.card-meta{color:var(--muted);font-size:.78rem}` +
+	`.counters{display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin:.6rem 0 .75rem}` +
+	`.counter{display:flex;flex-direction:column;align-items:flex-start;gap:.1rem}` +
+	`.counter .n{font-size:1.25rem;font-weight:600;font-variant-numeric:tabular-nums;line-height:1}` +
+	`.counter .l{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}` +
+	`.counter.accent .n{color:var(--accent)}` +
+	`.counter.warn .n{color:var(--warn)}` +
+	`.leader{margin-top:.55rem;padding-top:.55rem;border-top:1px dashed var(--border);` +
+	`color:var(--muted);font-size:.85rem;display:flex;justify-content:space-between;gap:.5rem;align-items:baseline}` +
+	`.leader-text{color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}` +
+	`.leader-ago{color:var(--muted);font-size:.75rem;flex-shrink:0}` +
+	`.leader.empty-leader{color:var(--stale);font-style:italic}` +
+	`.spend{margin-top:.5rem;display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;font-size:.85rem}` +
+	`.spend .label{color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-size:.7rem}` +
+	`.spend .val{font-variant-numeric:tabular-nums;font-weight:500}` +
+	`.spend .stale{color:var(--stale);font-size:.7rem;margin-left:.25rem}` +
+	`</style></head><body>`
+
+func writeTeamIndexCard(w io.Writer, c teamIndexCard) {
+	id := html.EscapeString(c.ID)
+	name := html.EscapeString(c.Name)
+	registered := html.EscapeString(c.RegisteredAgo)
+
+	fmt.Fprintf(w, `<a class="card" href="/teams/%s/">`, id)
+	fmt.Fprintf(w, `<div class="card-head"><span class="card-name">%s</span>`, name)
+	if registered != "" {
+		fmt.Fprintf(w, `<span class="card-meta">registered %s</span>`, registered)
+	}
+	_, _ = io.WriteString(w, `</div>`)
+
+	_, _ = io.WriteString(w, `<div class="counters">`)
+	openClass := "counter"
+	if c.OpenTaskCount > 0 {
+		openClass = "counter accent"
+	}
+	fmt.Fprintf(w, `<div class="%s"><span class="n">%d</span><span class="l">Open</span></div>`,
+		openClass, c.OpenTaskCount)
+	awaitingClass := "counter"
+	if c.AwaitingApproval > 0 {
+		awaitingClass = "counter warn"
+	}
+	fmt.Fprintf(w, `<div class="%s"><span class="n">%d</span><span class="l">Awaiting</span></div>`,
+		awaitingClass, c.AwaitingApproval)
+	inflightClass := "counter"
+	if c.InFlight > 0 {
+		inflightClass = "counter accent"
+	}
+	fmt.Fprintf(w, `<div class="%s"><span class="n">%d</span><span class="l">In-flight</span></div>`,
+		inflightClass, c.InFlight)
+	fmt.Fprintf(w, `<div class="counter"><span class="n">%d</span><span class="l">Done</span></div>`,
+		c.RecentDoneCount)
+	_, _ = io.WriteString(w, `</div>`)
+
+	if c.HasLeaderStatus && strings.TrimSpace(c.LeaderText) != "" {
+		text := html.EscapeString(truncateForTile(c.LeaderText, 120))
+		ago := html.EscapeString(c.LeaderAgo)
+		fmt.Fprintf(w, `<div class="leader"><span class="leader-text">%s</span>`+
+			`<span class="leader-ago">%s</span></div>`, text, ago)
+	} else {
+		_, _ = io.WriteString(w, `<div class="leader empty-leader"><span class="leader-text">No leader status yet.</span></div>`)
+	}
+
+	if c.HasPricing && c.HeroSpendDisplay != "" {
+		stale := ""
+		if c.PricingStale {
+			stale = `<span class="stale">(stale)</span>`
+		}
+		fmt.Fprintf(w, `<div class="spend"><span class="label">Today's spend</span>`+
+			`<span class="val">%s%s</span></div>`,
+			html.EscapeString(c.HeroSpendDisplay), stale)
+	}
+
+	_, _ = io.WriteString(w, `</a>`)
 }
 
 func (d *daemon) requireAuth(w http.ResponseWriter, r *http.Request, h func(http.ResponseWriter, *http.Request)) {
