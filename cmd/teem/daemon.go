@@ -43,6 +43,7 @@ import (
 	"github.com/frasergraham/teem/internal/tailnet"
 	"github.com/frasergraham/teem/internal/team"
 	"github.com/frasergraham/teem/internal/usage"
+	"github.com/frasergraham/teem/internal/wsbus"
 )
 
 // leaderAwareRoles returns a RolesFunc whose result is the team's
@@ -382,6 +383,13 @@ type registeredTeam struct {
 	// teem-channel SSE subscriber. One bus per team; survives daemon
 	// lifetime, no persistence.
 	channelBus *channelbus.Bus
+
+	// wsbus fans audit + snapshot-invalidate envelopes out to SPA
+	// WebSocket clients connected to /api/teams/<id>/events. Holds a
+	// ring buffer of recent envelopes for since_seq backfill on
+	// reconnect. In-memory only; restarting the daemon resets the seq
+	// counter (clients fall back to snapshot_invalidate).
+	wsbus *wsbus.Bus
 
 	// detectionMu guards channelsLive and serializes the per-team
 	// channels-live ↔ fallback state machine. Held around BOTH the
@@ -1837,6 +1845,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	bs := bus.NewMemBus()
 	reg := mcpsrv.NewRegistry()
 	chBus := channelbus.New(0)
+	wsB := wsbus.New(2000)
 
 	// Archetype memory store: per-team directory of per-role markdown
 	// files the leader injects as baseline context for every freshly
@@ -2071,12 +2080,28 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		pulseInst.NudgeFromAudit(events)
 	}
 
+	// SPA WebSocket hook: publish every audit event onto the per-team
+	// wsbus so /api/teams/<id>/events clients can react in real time.
+	// Fire-and-forget; the bus drops events for slow subscribers
+	// individually (see internal/wsbus).
+	wsbusHook := func(events []audit.Event) {
+		for i := range events {
+			ev := events[i]
+			wsB.Publish(wsbus.Envelope{
+				Kind:  "audit",
+				Seq:   wsB.NextSeq(),
+				TS:    time.Now().UTC(),
+				Event: &ev,
+			})
+		}
+	}
+
 	// With every component wired, install the hook chain on the
 	// decorator. Subsequent Writes — from MCP tools, pulse, chat,
 	// dashboard form posts, the HTTP audit handler — fan out through
 	// this chain. The HTTP middleware no longer fires hooks itself;
 	// the wrapped sink is the only source.
-	auditSink.SetHook(combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, d.makeUsageHook()))
+	auditSink.SetHook(combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, wsbusHook, d.makeUsageHook()))
 
 	// Auto-resume Pulse if it was running before the daemon restarted.
 	// Started AFTER SetHook so the first tick's KindUsageEvent reaches
@@ -2136,9 +2161,9 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		auditSink: auditSink,
 		// Audit handler fans every POST out to: write to disk via the
 		// hooked sink (which runs the hook chain — wake, stop,
-		// archmem, channels, messaging, pulse-nudge, usage) and bump
-		// the agent's LastSeen on the registry. The hook chain itself
-		// is wired on auditSink above so any caller — HTTP, MCP,
+		// archmem, channels, messaging, pulse-nudge, wsbus, usage) and
+		// bump the agent's LastSeen on the registry. The hook chain
+		// itself is wired on auditSink above so any caller — HTTP, MCP,
 		// pulse, chat — fans out identically.
 		auditH:         newAuditHandlerWithRegistry(audit.Handler(auditSink, d.token), reg),
 		plan:           planStore,
@@ -2154,6 +2179,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		transcriptsDir: transcriptsDir,
 		repoRoot:       repoRoot,
 		channelBus:     chBus,
+		wsbus:          wsB,
 	}, nil
 }
 
