@@ -484,8 +484,8 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 				webhookListener, err = d.tnetNode.Listen("tcp", addr)
 			}
 			if err != nil {
-				if defaulted {
-					return fmt.Errorf("messaging: webhook listener default port %d in use; set messaging.telegram.webhook_port explicitly in ~/.teem/messaging.yaml", port)
+				if defaulted && errors.Is(err, syscall.EADDRINUSE) {
+					return fmt.Errorf("messaging: webhook listener default port %d in use; set messaging.telegram.webhook_port explicitly in ~/.teem/messaging.yaml: %w", port, err)
 				}
 				return fmt.Errorf("messaging webhook listen on %s: %w", addr, err)
 			}
@@ -499,7 +499,9 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 			if bindLoopback {
 				where = "127.0.0.1"
 			}
-			fmt.Fprintf(os.Stderr, "[teemd] messaging: webhook listener on %s%s (%s, bound %s)\n", where, addr, origin, where)
+			fmt.Fprintf(os.Stderr, "[teemd] messaging: webhook listener on %s%s (%s)\n", where, addr, origin)
+		} else {
+			fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram enabled but couldn't derive webhook port from --listen=%q; set messaging.telegram.webhook_port explicitly\n", df.listenAddr)
 		}
 	}
 

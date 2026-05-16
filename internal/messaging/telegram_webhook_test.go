@@ -148,11 +148,11 @@ func TestAutoRegister_SkipsWhenURLMatches(t *testing.T) {
 	}
 }
 
-// TestAutoRegister_LogsButDoesNotFailOnAPIErrors confirms that a
-// failing GetWebhookInfo surfaces as an error from EnsureWebhook (which
-// the daemon's goroutine wrapper catches and logs without aborting
-// startup).
-func TestAutoRegister_LogsButDoesNotFailOnAPIErrors(t *testing.T) {
+// TestEnsureWebhook_PropagatesAPIError confirms that a failing
+// GetWebhookInfo surfaces as an error from EnsureWebhook. (The daemon's
+// goroutine wrapper catches that error and logs without aborting
+// startup; that behaviour is covered separately in the daemon layer.)
+func TestEnsureWebhook_PropagatesAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"ok":false,"description":"telegram is sad"}`))
