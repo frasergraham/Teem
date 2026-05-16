@@ -464,6 +464,33 @@ func TestControlTaskReady_TerminalConflictJSONShape(t *testing.T) {
 	}
 }
 
+// TestControlTaskReady_WriteReadyConflictOmitsCurrentStageWhenTaskGone
+// covers the "task gone between failed write and re-read" branch in
+// writeReadyConflict: when plan.Get returns ok=false, the JSON body
+// must omit current_stage entirely (not emit "current_stage": "").
+// Flagged by reviewer Quinn on t-b252d388 (t-96afcf94).
+func TestControlTaskReady_WriteReadyConflictOmitsCurrentStageWhenTaskGone(t *testing.T) {
+	rt := newFullTestTeam(t, "alpha")
+	w := httptest.NewRecorder()
+	writeReadyConflict(w, rt, "t-does-not-exist", errStageRaced)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("code=%d want 409; body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q want application/json", ct)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v / %s", err, w.Body.String())
+	}
+	if _, ok := body["error"]; !ok {
+		t.Errorf("body missing error field: %s", w.Body.String())
+	}
+	if _, ok := body["current_stage"]; ok {
+		t.Fatalf("body must omit current_stage when task is gone; got %s", w.Body.String())
+	}
+}
+
 // TestControlTaskReady_UnauthOK locks in the tailnet-boundary auth
 // model: the endpoint must accept a POST with no Authorization header.
 // The dashboard's SPA fetch can't carry the bearer token, so this gate
