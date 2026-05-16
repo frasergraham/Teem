@@ -97,6 +97,84 @@ func TestUpdateLeaderStatus_RespectsExplicitAgentID(t *testing.T) {
 	}
 }
 
+func TestLeaderStatusUpdate_EmitsAuditEvent(t *testing.T) {
+	srv, _, _, a := newTestServerFull(t)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Name = "update_leader_status"
+	req.Params.Arguments = map[string]any{
+		"text":             "Reviewing T1+T6 diff",
+		"agent_id":         "leader",
+		"current_task_ids": "t-aa,t-bb",
+	}
+	res, err := srv.handleUpdateLeaderStatus(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("update_leader_status: %v / %s", err, textOf(t, res))
+	}
+
+	events, _ := a.Query("", parseZero(), 100)
+	var found *audit.Event
+	for i := range events {
+		if events[i].Kind == audit.KindLeaderStatusChanged {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("leader_status_changed not written to audit")
+	}
+	if found.AgentID != "leader" {
+		t.Errorf("agent_id: %q", found.AgentID)
+	}
+	if found.Message != "Reviewing T1+T6 diff" {
+		t.Errorf("message: %q", found.Message)
+	}
+	if got, _ := found.Meta["agent_id"].(string); got != "leader" {
+		t.Errorf("meta.agent_id: %v", found.Meta["agent_id"])
+	}
+	if got, _ := found.Meta["text"].(string); got != "Reviewing T1+T6 diff" {
+		t.Errorf("meta.text: %v", found.Meta["text"])
+	}
+	if got, _ := found.Meta["updated_at"].(string); got == "" {
+		t.Errorf("meta.updated_at empty")
+	} else if _, err := time.Parse(time.RFC3339, got); err != nil {
+		t.Errorf("meta.updated_at not RFC3339: %q (%v)", got, err)
+	}
+	ids, _ := found.Meta["current_task_ids"].([]any)
+	if len(ids) != 2 {
+		// JSON-roundtripped slices come back as []any; the inline write
+		// here keeps it as []string. Accept either shape.
+		ss, _ := found.Meta["current_task_ids"].([]string)
+		if len(ss) != 2 {
+			t.Errorf("meta.current_task_ids: %v", found.Meta["current_task_ids"])
+		}
+	}
+}
+
+func TestLeaderStatusUpdate_OmitsTaskIDsWhenEmpty(t *testing.T) {
+	srv, _, _, a := newTestServerFull(t)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Name = "update_leader_status"
+	req.Params.Arguments = map[string]any{"text": "idle"}
+	res, err := srv.handleUpdateLeaderStatus(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("update_leader_status: %v / %s", err, textOf(t, res))
+	}
+	events, _ := a.Query("", parseZero(), 100)
+	var found *audit.Event
+	for i := range events {
+		if events[i].Kind == audit.KindLeaderStatusChanged {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("leader_status_changed not written to audit")
+	}
+	if _, ok := found.Meta["current_task_ids"]; ok {
+		t.Errorf("current_task_ids should be omitted when empty, got %v", found.Meta["current_task_ids"])
+	}
+}
+
 func TestGetLeaderStatus_ReturnsMap(t *testing.T) {
 	srv, _, ls, _ := newTestServerFull(t)
 	_ = ls.Set("leader", "A", nil)
