@@ -484,8 +484,8 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 				webhookListener, err = d.tnetNode.Listen("tcp", addr)
 			}
 			if err != nil {
-				if defaulted {
-					return fmt.Errorf("messaging: webhook listener default port %d in use; set messaging.telegram.webhook_port explicitly in ~/.teem/messaging.yaml", port)
+				if defaulted && errors.Is(err, syscall.EADDRINUSE) {
+					return fmt.Errorf("messaging: webhook listener default port %d in use; set messaging.telegram.webhook_port explicitly in ~/.teem/messaging.yaml: %w", port, err)
 				}
 				return fmt.Errorf("messaging webhook listen on %s: %w", addr, err)
 			}
@@ -499,7 +499,9 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 			if bindLoopback {
 				where = "127.0.0.1"
 			}
-			fmt.Fprintf(os.Stderr, "[teemd] messaging: webhook listener on %s%s (%s, bound %s)\n", where, addr, origin, where)
+			fmt.Fprintf(os.Stderr, "[teemd] messaging: webhook listener on %s%s (%s)\n", where, addr, origin)
+		} else {
+			fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram enabled but couldn't derive webhook port from --listen=%q; set messaging.telegram.webhook_port explicitly\n", df.listenAddr)
 		}
 	}
 
@@ -729,7 +731,7 @@ func (d *daemon) handler() http.Handler {
 			// /ping; spawns a one-shot leader `claude -p` and streams
 			// the response as SSE.
 			d.handleChatTeam(w, r)
-		case path == "/messaging/telegram/webhook":
+		case path == messaging.WebhookPath:
 			// Inbound Telegram bot updates. Auth is the daemon-issued
 			// ?token=<random> URL parameter (weak); the tailnet
 			// boundary is the load-bearing layer. Token rotates on
@@ -2172,7 +2174,7 @@ func (d *daemon) autoRegisterTelegramWebhook(ctx context.Context) {
 		return
 	}
 	base := strings.TrimRight(d.messagingCfg.PublicURL, "/")
-	hookURL := base + "/messaging/telegram/webhook?token=" + url.QueryEscape(d.messagingWebhookToken)
+	hookURL := base + messaging.WebhookPath + "?token=" + url.QueryEscape(d.messagingWebhookToken)
 	changed, err := d.messagingTelegram.EnsureWebhook(ctx, hookURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[teemd] messaging: telegram auto-register failed: %v\n", err)
@@ -2191,24 +2193,49 @@ func (d *daemon) autoRegisterTelegramWebhook(ctx context.Context) {
 // logged and the daemon continues — the operator can fall back to the
 // host-side `tailscale funnel` command, and unrelated daemon
 // functionality (dashboard, MCP, control) is unaffected.
+//
+// Retried with a 2s backoff because EnableFunnel resolves the node's
+// FQDN via tsnet's LocalClient.Status, and Self.DNSName comes back
+// empty until tsnet completes first-auth — without retries the goroutine
+// can fire just before that and error out with no recovery.
 func (d *daemon) enableTelegramFunnel(ctx context.Context) {
 	if d.tnetNode == nil || d.messagingWebhookPort <= 0 {
 		return
 	}
-	const path = "/messaging/telegram/webhook"
-	fqdn, ferr := d.tnetNode.FQDN(ctx)
-	if err := d.tnetNode.EnableFunnel(ctx, path, d.messagingWebhookPort); err != nil {
-		fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel setup failed: %v\n", err)
+	const (
+		attempts = 3
+		backoff  = 2 * time.Second
+	)
+	var (
+		fqdn string
+		err  error
+	)
+	for i := 0; i < attempts; i++ {
+		fqdn, err = d.tnetNode.EnableFunnel(ctx, messaging.WebhookPath, d.messagingWebhookPort)
+		if err == nil {
+			break
+		}
+		if i == attempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel setup failed after %d attempt(s): %v\n", attempts, err)
 		return
 	}
-	if ferr != nil || fqdn == "" {
+	if fqdn == "" {
 		// Funnel succeeded but we couldn't read the FQDN back — log
 		// without it. Shouldn't happen since EnableFunnel just used it,
 		// but the log is for the operator, not the code path.
-		fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel enabled for %s -> :%d\n", path, d.messagingWebhookPort)
+		fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel enabled for %s -> :%d\n", messaging.WebhookPath, d.messagingWebhookPort)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel enabled for %s -> :%d (https://%s%s)\n", path, d.messagingWebhookPort, fqdn, path)
+	fmt.Fprintf(os.Stderr, "[teemd] messaging: tsnet Funnel enabled for %s -> :%d (https://%s%s)\n", messaging.WebhookPath, d.messagingWebhookPort, fqdn, messaging.WebhookPath)
 }
 
 // mintWebhookToken generates 32 hex chars of entropy, writes it to path

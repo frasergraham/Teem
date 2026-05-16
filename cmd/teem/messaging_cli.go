@@ -78,7 +78,7 @@ func runMessagingTelegramRegisterWebhook(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read daemon webhook token (is the daemon running?): %w", err)
 	}
-	hookURL := base + "/messaging/telegram/webhook?token=" + url.QueryEscape(webhookToken)
+	hookURL := base + messaging.WebhookPath + "?token=" + url.QueryEscape(webhookToken)
 
 	tn := messaging.NewTelegramNotifier(botToken, cfg.Telegram.ChatID, nil)
 	if err := tn.SetWebhook(context.Background(), hookURL); err != nil {
