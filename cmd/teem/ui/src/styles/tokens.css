@@ -1188,3 +1188,156 @@ table.tasks tbody tr.task-row:focus-visible {
   font-style: italic;
   font-size: 13px;
 }
+
+/* --- Task-detail modal: audit timeline + per-agent rollup + evidence --- */
+.task-modal-detail {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.task-modal-loading,
+.task-modal-error {
+  font-size: 13px;
+  color: var(--c-text-dim, var(--muted));
+}
+.task-modal-error {
+  color: var(--danger, #b00);
+}
+.task-modal-h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-text-dim, var(--muted));
+}
+.task-modal-h3 .count {
+  display: inline-block;
+  margin-left: 6px;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--c-text-dim, var(--muted));
+}
+
+.task-modal-agent-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.task-modal-agent-table th,
+.task-modal-agent-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--c-border-soft, rgba(0, 0, 0, 0.08));
+}
+.task-modal-agent-table th {
+  font-weight: 500;
+  color: var(--c-text-dim, var(--muted));
+}
+.task-modal-agent-table td.agent-id { font-family: var(--font-mono, monospace); }
+.task-modal-agent-table td.has-error { color: var(--danger, #b00); font-weight: 600; }
+.task-modal-agent-table td.when { color: var(--c-text-dim, var(--muted)); }
+
+.task-modal-job-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.task-modal-job-list .job-row {
+  padding: 8px 10px;
+  border: 1px solid var(--c-border-soft, rgba(0, 0, 0, 0.08));
+  border-radius: 4px;
+  background: var(--c-surface-soft, rgba(0, 0, 0, 0.02));
+}
+.task-modal-job-list .job-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.task-modal-job-list .job-id {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--c-text-dim, var(--muted));
+}
+.task-modal-job-list .job-agent {
+  font-family: var(--font-mono, monospace);
+  font-weight: 500;
+}
+.task-modal-job-list .job-status {
+  font-size: 11px;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--c-chip, rgba(0, 0, 0, 0.06));
+}
+.task-modal-job-list .job-status.status-done { background: var(--c-success-bg, #d1f4dd); color: var(--c-success-fg, #1d6f3d); }
+.task-modal-job-list .job-status.status-error { background: var(--c-danger-bg, #ffd6d6); color: var(--c-danger-fg, #a00); }
+.task-modal-job-list .job-status.status-unknown { background: var(--c-warn-bg, #fff3cd); color: var(--c-warn-fg, #826200); }
+.task-modal-job-list .job-duration { font-size: 12px; color: var(--c-text-dim, var(--muted)); }
+.task-modal-job-list .job-transcript-link {
+  font-size: 12px;
+  color: var(--c-azure, var(--info));
+  text-decoration: none;
+}
+.task-modal-job-list .job-transcript-link:hover { text-decoration: underline; }
+.task-modal-job-list .job-transcript-missing {
+  font-size: 12px;
+  color: var(--c-text-dim, var(--muted));
+  font-style: italic;
+}
+.task-modal-job-list .job-summary {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--c-text, inherit);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.task-modal-timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--c-border-soft, rgba(0, 0, 0, 0.08));
+  border-radius: 4px;
+}
+.task-modal-timeline-list .timeline-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--c-border-soft, rgba(0, 0, 0, 0.06));
+}
+.task-modal-timeline-list .timeline-row:last-child { border-bottom: none; }
+.task-modal-timeline-list .timeline-row.source-task { background: var(--c-info-bg, rgba(0, 60, 200, 0.04)); }
+.task-modal-timeline-list .timeline-time {
+  font-family: var(--font-mono, monospace);
+  color: var(--c-text-dim, var(--muted));
+  flex: 0 0 auto;
+}
+.task-modal-timeline-list .timeline-kind {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: var(--c-chip, rgba(0, 0, 0, 0.06));
+  flex: 0 0 auto;
+}
+.task-modal-timeline-list .timeline-agent {
+  font-family: var(--font-mono, monospace);
+  color: var(--c-text-dim, var(--muted));
+  flex: 0 0 auto;
+}
+.task-modal-timeline-list .timeline-msg {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
