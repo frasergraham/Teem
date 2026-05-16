@@ -1,9 +1,9 @@
-import { StrictMode, useEffect, useState } from 'react';
+import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles/tokens.css';
 
-type Team = { id: string; name: string };
-type StateResponse = { team: Team };
+import { connect } from './api/ws';
+import { ConnState, useTeamStore } from './store/team';
 
 const TEAM_ID_RE = /\/teams\/(t-[a-f0-9]+|[a-z0-9-]+)\/v2/;
 
@@ -12,36 +12,51 @@ function parseTeamID(pathname: string): string | null {
   return m ? m[1] : null;
 }
 
+function describeConn(conn: ConnState, seq: number): string {
+  switch (conn.kind) {
+    case 'idle':
+      return 'idle';
+    case 'loading':
+      return 'loading…';
+    case 'connecting':
+      return `connecting (attempt ${conn.attempt})…`;
+    case 'live':
+      return `connected, seq=${conn.seq}`;
+    case 'reconnecting':
+      return `reconnecting in ${Math.round(conn.nextDelayMs / 1000)}s (attempt ${conn.attempt}), last seq=${seq}`;
+    case 'error':
+      return `error: ${conn.message}`;
+  }
+}
+
 function App() {
-  const [team, setTeam] = useState<Team | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const conn = useTeamStore((s) => s.conn);
+  const snapshot = useTeamStore((s) => s.snapshot);
+  const lastSeq = useTeamStore((s) => s.lastSeq);
+  const eventsCount = useTeamStore((s) => s.events.length);
 
   useEffect(() => {
     const id = parseTeamID(window.location.pathname);
     if (!id) {
-      setError('no team id in URL');
+      useTeamStore.getState().setConn({ kind: 'error', message: 'no team id in URL' });
       return;
     }
-    let cancelled = false;
-    fetch(`/api/teams/${id}/state`)
-      .then(async (r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return (await r.json()) as StateResponse;
-      })
-      .then((s) => {
-        if (!cancelled) setTeam(s.team);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(String(e));
-      });
-    return () => {
-      cancelled = true;
-    };
+    const dispose = connect(id);
+    return dispose;
   }, []);
 
-  if (error) return <div>error: {error}</div>;
-  if (!team) return <div>loading…</div>;
-  return <div>hello, {team.name}</div>;
+  const teamName = snapshot?.team.name ?? '(loading)';
+  return (
+    <div style={{ fontFamily: 'system-ui, sans-serif', padding: '1rem' }}>
+      <header style={{ display: 'flex', gap: '1rem', alignItems: 'baseline' }}>
+        <strong>{teamName}</strong>
+        <span style={{ opacity: 0.7, fontSize: '0.9rem' }}>{describeConn(conn, lastSeq)}</span>
+      </header>
+      <p style={{ opacity: 0.6, fontSize: '0.85rem', marginTop: '0.5rem' }}>
+        events buffered: {eventsCount}
+      </p>
+    </div>
+  );
 }
 
 const rootEl = document.getElementById('root');
