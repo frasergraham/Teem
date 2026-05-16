@@ -136,13 +136,6 @@ type telegramReplier interface {
 	SendText(ctx context.Context, chatID int64, text string) error
 }
 
-// messageIDLookuper resolves an outbound Telegram message_id back to
-// the reply token + context the bot stamped on it. Implemented by
-// *messaging.TelegramNotifier; tests inject a fake.
-type messageIDLookuper interface {
-	LookupByMessageID(int64) (string, messaging.ReplyContext, bool)
-}
-
 // effectiveWebhookPort decides which TCP port the dedicated Telegram
 // webhook listener should bind. It returns:
 //
@@ -247,7 +240,7 @@ func (d *daemon) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 	// BEFORE prefix dispatch so a native reply whose body happens to
 	// start with /reply or /done is still treated as a chat turn.
 	if upd.Message.ReplyToMessage != nil && upd.Message.ReplyToMessage.MessageID != 0 {
-		token, _, ok := d.lookupMessageID(upd.Message.ReplyToMessage.MessageID)
+		token, ok := d.lookupMessageID(upd.Message.ReplyToMessage.MessageID)
 		if !ok {
 			if rep := d.telegramReplier(); rep != nil && chatID != 0 {
 				_ = rep.SendText(r.Context(), chatID, "This thread expired — tap a recent notification to start a new one.")
@@ -535,14 +528,14 @@ func (d *daemon) dispatchTelegramReply(w http.ResponseWriter, ctx context.Contex
 	rctx, ok := d.messagingReplyTokens.Lookup(token)
 	if !ok {
 		if rep != nil && chatID != 0 {
-			_ = rep.SendText(ctx, chatID, "Token unknown or expired. Reply to a fresh ping.")
+			_ = rep.SendText(ctx, chatID, "Token unknown or expired. Tap Reply on a fresh notification, or send `/reply <token> <message>`.")
 		}
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 	if strings.TrimSpace(body) == "" {
 		if rep != nil && chatID != 0 {
-			_ = rep.SendText(ctx, chatID, "Add a message after the token, e.g. `/reply "+token+" can you describe the change?`")
+			_ = rep.SendText(ctx, chatID, "Add a message — tap Reply on the bot's notification and type your question, or send `/reply "+token+" can you describe the change?`")
 		}
 		w.WriteHeader(http.StatusOK)
 		return
@@ -564,17 +557,16 @@ func (d *daemon) dispatchTelegramReply(w http.ResponseWriter, ctx context.Contex
 }
 
 // lookupMessageID resolves a Telegram outbound message_id to its
-// stored reply token + context. Tests inject via
-// d.messagingMessageIDLookup so they can assert the native-reply path
-// without a real notifier.
-func (d *daemon) lookupMessageID(id int64) (string, messaging.ReplyContext, bool) {
+// stored reply token. Tests inject via d.messagingMessageIDLookup so
+// they can assert the native-reply path without a real notifier.
+func (d *daemon) lookupMessageID(id int64) (string, bool) {
 	if d.messagingMessageIDLookup != nil {
 		return d.messagingMessageIDLookup(id)
 	}
 	if d.messagingTelegram != nil {
 		return d.messagingTelegram.LookupByMessageID(id)
 	}
-	return "", messaging.ReplyContext{}, false
+	return "", false
 }
 
 // runTelegramTurn is the long-running half of handleTelegramReply: it

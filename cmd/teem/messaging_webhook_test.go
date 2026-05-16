@@ -370,11 +370,11 @@ func TestHandleTelegramWebhook_NativeReplyResolvesToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.messagingMessageIDLookup = func(id int64) (string, messaging.ReplyContext, bool) {
+	d.messagingMessageIDLookup = func(id int64) (string, bool) {
 		if id == 42 {
-			return tok, messaging.ReplyContext{TeamID: "alpha", TaskID: "t-3a2f", AgentID: "worker-una"}, true
+			return tok, true
 		}
-		return "", messaging.ReplyContext{}, false
+		return "", false
 	}
 
 	gotPrompt := make(chan string, 1)
@@ -409,8 +409,8 @@ func TestHandleTelegramWebhook_NativeReplyResolvesToken(t *testing.T) {
 
 func TestHandleTelegramWebhook_NativeReplyUnknownMessageID(t *testing.T) {
 	d, rep := newWebhookTestDaemon(t)
-	d.messagingMessageIDLookup = func(id int64) (string, messaging.ReplyContext, bool) {
-		return "", messaging.ReplyContext{}, false
+	d.messagingMessageIDLookup = func(id int64) (string, bool) {
+		return "", false
 	}
 
 	body := strings.NewReader(`{"message":{"chat":{"id":42},"text":"hello again","reply_to_message":{"message_id":99}}}`)

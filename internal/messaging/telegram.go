@@ -25,17 +25,18 @@ const telegramAPIBase = "https://api.telegram.org"
 // native reply gesture behaves the same as typing /reply <token>.
 const messageIDTTL = 24 * time.Hour
 
-// messageIDCap caps the in-memory message_id → reply-context map so a
+// messageIDCap caps the in-memory message_id → reply-token map so a
 // long-running daemon can't grow unbounded. LRU eviction keeps the
 // most-recent entries.
 const messageIDCap = 1000
 
-// messageIDEntry pairs an outbound Telegram message_id with the same
-// reply-token + context the operator would otherwise have typed.
+// messageIDEntry pairs an outbound Telegram message_id with the
+// reply-token the operator would otherwise have typed. The reply
+// context is re-resolved from the token at lookup time, so we don't
+// store it here.
 type messageIDEntry struct {
 	MessageID int64
 	Token     string
-	Ctx       ReplyContext
 	At        time.Time
 }
 
@@ -128,32 +129,27 @@ func (n *TelegramNotifier) Notify(ctx context.Context, msg Message) error {
 			} `json:"result"`
 		}
 		if err := json.Unmarshal(buf, &parsed); err == nil && parsed.OK && parsed.Result.MessageID != 0 {
-			n.recordMessageID(parsed.Result.MessageID, msg.ReplyToken, ReplyContext{
-				TeamID:  msg.TeamID,
-				TaskID:  msg.TaskID,
-				AgentID: msg.AgentID,
-			})
+			n.recordMessageID(parsed.Result.MessageID, msg.ReplyToken)
 		}
 	}
 	return nil
 }
 
 // recordMessageID stores (or refreshes) an entry mapping a Telegram
-// outbound message_id to the operator's reply token + context. LRU-
-// evicts the oldest entry once messageIDCap is exceeded.
-func (n *TelegramNotifier) recordMessageID(id int64, token string, ctx ReplyContext) {
+// outbound message_id to the operator's reply token. LRU-evicts the
+// oldest entry once messageIDCap is exceeded.
+func (n *TelegramNotifier) recordMessageID(id int64, token string) {
 	n.messageIDMu.Lock()
 	defer n.messageIDMu.Unlock()
 	if elem, ok := n.messageIDIdx[id]; ok {
 		// Refresh in place — keeps memory bounded and resets TTL.
 		entry := elem.Value.(*messageIDEntry)
 		entry.Token = token
-		entry.Ctx = ctx
 		entry.At = n.nowFn()
 		n.messageIDLst.MoveToFront(elem)
 		return
 	}
-	entry := &messageIDEntry{MessageID: id, Token: token, Ctx: ctx, At: n.nowFn()}
+	entry := &messageIDEntry{MessageID: id, Token: token, At: n.nowFn()}
 	elem := n.messageIDLst.PushFront(entry)
 	n.messageIDIdx[id] = elem
 	for n.messageIDLst.Len() > messageIDCap {
@@ -167,24 +163,25 @@ func (n *TelegramNotifier) recordMessageID(id int64, token string, ctx ReplyCont
 	}
 }
 
-// LookupByMessageID returns the reply token + context recorded for a
+// LookupByMessageID returns the reply token recorded for a
 // previously-sent outbound Telegram message. ok=false when the
 // message_id is unknown or its TTL has elapsed (in which case the
-// entry is also evicted).
-func (n *TelegramNotifier) LookupByMessageID(id int64) (string, ReplyContext, bool) {
+// entry is also evicted). The reply context is re-resolved from the
+// token by the caller via ReplyTokenStore.Lookup.
+func (n *TelegramNotifier) LookupByMessageID(id int64) (string, bool) {
 	n.messageIDMu.Lock()
 	defer n.messageIDMu.Unlock()
 	elem, ok := n.messageIDIdx[id]
 	if !ok {
-		return "", ReplyContext{}, false
+		return "", false
 	}
 	entry := elem.Value.(*messageIDEntry)
 	if n.nowFn().Sub(entry.At) > messageIDTTL {
 		n.messageIDLst.Remove(elem)
 		delete(n.messageIDIdx, id)
-		return "", ReplyContext{}, false
+		return "", false
 	}
-	return entry.Token, entry.Ctx, true
+	return entry.Token, true
 }
 
 // SendText posts a plain-text sendMessage to the supplied chat_id.
