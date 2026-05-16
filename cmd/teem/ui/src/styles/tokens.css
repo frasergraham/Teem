@@ -456,6 +456,21 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
 
 .tasks-empty { color: var(--c-text-dim); font-style: italic; font-size: 13px; padding: 6px 0; }
 
+/* Decisions panel — same shell as tasks-panel so an empty board still
+   reads as a card, not a stray line of text. */
+.decisions-section {
+  background: var(--c-panel);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 20px 22px;
+}
+.decisions-empty {
+  color: var(--c-text-dim);
+  font-style: italic;
+  font-size: 13px;
+  padding: 6px 0;
+}
+
 .tasks-done { margin-top: 12px; }
 .tasks-done > summary {
   cursor: pointer;
