@@ -34,6 +34,12 @@ import (
 type Spawner interface {
 	Spawn(ctx context.Context, role, name string) (string, error)
 	AssignJob(ctx context.Context, agentID, prompt, contextNote string) (string, error)
+	// CancelJob drops jobID from the spawner's in-memory job
+	// table. Best-effort — the bus message may have already been
+	// delivered to the worker. Used by assign_job to undo
+	// bookkeeping when evidence-linking fails after the bus
+	// publish (delete_task race window).
+	CancelJob(jobID string)
 	JobStatus(jobID string) (status string, output string, found bool)
 	StopAgent(ctx context.Context, agentID string) error
 	IsRunning(agentID string) bool
@@ -60,6 +66,10 @@ type Server struct {
 	prompts        *prompts.Builder
 	transcriptsDir string
 	channelSink    func(content string, meta map[string]string)
+	// jobTaskIdx is the in-memory job_id → task_id index populated by
+	// assign_job. Optional; when nil the handler skips registration
+	// (test setups without the daemon-side decorator don't need it).
+	jobTaskIdx *audit.JobTaskIndex
 }
 
 // Config holds the deps the orchestrator server needs.
@@ -95,6 +105,14 @@ type Config struct {
 	// read_prompt / append_prompt tools. When nil those tools
 	// return an error explaining the feature is unconfigured.
 	Prompts *prompts.Builder
+	// JobTaskIndex is the in-memory job_id → task_id registry the
+	// assign_job handler stamps after every successful job
+	// assignment. The daemon shares one index with the injecting
+	// audit-sink decorator so worker events from this job pick up
+	// meta.task_id transparently. Optional — when nil, assign_job
+	// still validates task_id and links plan evidence, but no audit
+	// injection happens (test-only configurations).
+	JobTaskIndex *audit.JobTaskIndex
 	// ChannelSink, when non-nil, receives every PushChannel call in
 	// addition to the in-process MCP notification. The daemon plugs
 	// a channelbus.Bus.Publish here so the teem-channel stdio shim
@@ -136,6 +154,7 @@ func New(cfg Config) (*Server, error) {
 		prompts:        cfg.Prompts,
 		transcriptsDir: cfg.TranscriptsDir,
 		channelSink:    cfg.ChannelSink,
+		jobTaskIdx:     cfg.JobTaskIndex,
 	}
 	s.registerTools()
 	s.handler = mcpsrv.NewStreamableHTTPServer(core)
@@ -221,8 +240,9 @@ func (s *Server) registerTools() {
 	)
 	s.core.AddTool(
 		mcpgo.NewTool("assign_job",
-			mcpgo.WithDescription("Assign a job to an agent. Returns a job id; poll get_results for status."),
+			mcpgo.WithDescription("Assign a job to an agent. Returns a job id; poll get_results for status. Every job is task-scoped — task_id is required and the daemon synchronously appends the new job_id to that task's evidence and tags every subsequent audit event from this job with meta.task_id. No standalone jobs."),
 			mcpgo.WithString("agent_id", mcpgo.Required(), mcpgo.Description("Agent id from list_agents.")),
+			mcpgo.WithString("task_id", mcpgo.Required(), mcpgo.Description("Task id this job is doing the work for (e.g. t-3b9f1a2c). Must already exist in the plan; create with add_task first.")),
 			mcpgo.WithString("prompt", mcpgo.Required(), mcpgo.Description("The prompt for the worker.")),
 			mcpgo.WithString("context", mcpgo.Description("Optional extra context for the job.")),
 		),

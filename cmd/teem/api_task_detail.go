@@ -134,7 +134,7 @@ func (d *daemon) handleAPITeamTaskDetail(w http.ResponseWriter, _ *http.Request,
 		if err == nil {
 			payload.Timeline = buildTaskTimeline(task, events)
 			payload.Jobs = buildTaskJobs(task, events, rt.team.ID)
-			payload.Agents = buildTaskAgentRollups(payload.Jobs)
+			payload.Agents = buildTaskAgentRollups(payload.Jobs, payload.Timeline)
 		}
 	}
 
@@ -253,15 +253,29 @@ func buildTaskJobs(task plan.Task, events []audit.Event, teamID string) []apiTas
 // buildTaskAgentRollups groups jobs by agent and counts status
 // buckets. Sort: most recently active first (descending LastSeenAt),
 // ties broken alphabetically by agent_id so the order is stable.
-func buildTaskAgentRollups(jobs []apiTaskJob) []apiTaskAgentRollup {
-	if len(jobs) == 0 {
-		return []apiTaskAgentRollup{}
-	}
+//
+// Two sources are unioned:
+//
+//  1. Evidence jobs (the primary source). Every materialised job
+//     contributes one JobCount + a Done/Errored/Pending tick and
+//     stretches the agent's first/last seen window.
+//  2. Timeline events tagged with meta.task_id == task.ID
+//     (the belt-and-braces source). Worker events whose JobID never
+//     made it onto task.Evidence — e.g. an audit row that landed
+//     before plan.LinkJob committed, or one whose job_id was
+//     pruned — still surface their agent in the rollup. JobCount is
+//     left alone (we have no way to tell jobs apart from raw events
+//     without re-deriving MaterializedJobs from scratch) but the
+//     time bracket and agent itself are recorded so the operator
+//     sees who participated.
+func buildTaskAgentRollups(jobs []apiTaskJob, timeline []apiTaskTimelineEvent) []apiTaskAgentRollup {
 	byAgent := map[string]*apiTaskAgentRollup{}
+	seenJobs := map[string]bool{}
 	for _, j := range jobs {
 		if j.AgentID == "" {
 			continue
 		}
+		seenJobs[j.JobID] = true
 		r, ok := byAgent[j.AgentID]
 		if !ok {
 			r = &apiTaskAgentRollup{AgentID: j.AgentID}
@@ -290,6 +304,33 @@ func buildTaskAgentRollups(jobs []apiTaskJob) []apiTaskAgentRollup {
 		if !last.IsZero() && last.After(r.LastSeenAt) {
 			r.LastSeenAt = last
 		}
+	}
+	// Union pass: any timeline event tagged with the task that
+	// references an agent we haven't already accounted for via
+	// Evidence stretches the agent's seen window. Skips events whose
+	// job_id was already counted to avoid double-counting on a
+	// fully-linked task.
+	for _, e := range timeline {
+		if e.AgentID == "" {
+			continue
+		}
+		if e.JobID != "" && seenJobs[e.JobID] {
+			continue
+		}
+		r, ok := byAgent[e.AgentID]
+		if !ok {
+			r = &apiTaskAgentRollup{AgentID: e.AgentID}
+			byAgent[e.AgentID] = r
+		}
+		if r.FirstSeenAt.IsZero() || e.Timestamp.Before(r.FirstSeenAt) {
+			r.FirstSeenAt = e.Timestamp
+		}
+		if e.Timestamp.After(r.LastSeenAt) {
+			r.LastSeenAt = e.Timestamp
+		}
+	}
+	if len(byAgent) == 0 {
+		return []apiTaskAgentRollup{}
 	}
 	out := make([]apiTaskAgentRollup, 0, len(byAgent))
 	for _, r := range byAgent {

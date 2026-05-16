@@ -39,6 +39,7 @@ func (f *fakeSpawner) RosterSnapshot(role string) []roster.Entry {
 func (f *fakeSpawner) AssignJob(ctx context.Context, agentID, prompt, contextNote string) (string, error) {
 	return "", nil
 }
+func (f *fakeSpawner) CancelJob(string)                              {}
 func (f *fakeSpawner) JobStatus(jobID string) (string, string, bool) { return "", "", false }
 func (f *fakeSpawner) IsRunning(id string) bool                      { return f.running[id] }
 func (f *fakeSpawner) AnyRunningWithRole(role string) bool {

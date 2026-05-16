@@ -3,7 +3,6 @@ import { marked } from 'marked';
 
 import { DashboardTask, useTeamStore } from '../store/team';
 import {
-  TaskAgentRollup,
   TaskDetailPayload,
   TaskJob,
   TaskTimelineEvent,
@@ -12,16 +11,24 @@ import {
 import { APIError } from '../api/client';
 
 // TaskDetailModal restores click-to-see-details for the per-team task
-// rows. Phase 4 deleted the SSR /teams/<id>/tasks/<id> task-flow page;
-// this modal is the replacement. The plan-side `task` prop renders
-// the header + notes immediately; in parallel we fetch
-// /api/teams/<id>/tasks/<task-id> to layer in the audit timeline,
-// per-agent rollup, and per-evidence transcript links.
+// rows. The body is a chronological participation log built from the
+// audit timeline — one row per significant event (stage transitions,
+// job lifecycle, operator decisions). Rows are oldest-first so the
+// reader can follow the task from the moment it was proposed through
+// every contributor.
 //
-// Markdown render path: reuses the ChatPanel pattern — `marked.parse`
-// with `async: false`, output piped through `dangerouslySetInnerHTML`.
-// `plan.Task.Notes` is operator/leader/PM-authored on the local
-// tailnet boundary, same trust model as leader chat replies.
+// Personas: agent_id `<role>-<name>` is rendered as `<RoleLabel>
+// <CapitalizedName>` so the reader sees "Coder Ada" instead of
+// "worker-ada". The role label is the persona, not the raw role:
+// worker → Coder, reviewer → Reviewer, integrator → Integrator,
+// project_manager → PM. The synthetic ids "leader" and "operator"
+// render unchanged.
+//
+// Verbs are past-tense, kind-keyed: job_complete picks a role-specific
+// verb (coded / reviewed / integrated / consulted) so a glance at
+// the row tells you what kind of work landed. There is no "gone" or
+// "stale" styling — the log is a record of what happened, not a
+// commentary on the agent's current health.
 
 interface Props {
   task: DashboardTask;
@@ -34,9 +41,6 @@ export function TaskDetailModal({ task, onClose }: Props) {
   const [detail, setDetail] = useState<TaskDetailPayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Escape closes the modal. Bound on document so the listener works
-  // even when focus is outside the dialog (e.g. operator clicked
-  // backdrop and lost focus before pressing Escape).
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
@@ -48,15 +52,10 @@ export function TaskDetailModal({ task, onClose }: Props) {
     return () => document.removeEventListener('keydown', onKey);
   }, [onClose]);
 
-  // Focus the close button on mount so the operator can hit Enter or
-  // Space to dismiss without reaching for the mouse.
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
 
-  // Fetch the detail payload when the modal opens (or when the open
-  // task changes — streamed snapshot updates that re-resolve modalTask
-  // to a different id should refetch).
   useEffect(() => {
     if (!teamID) return;
     const ac = new AbortController();
@@ -112,7 +111,7 @@ export function TaskDetailModal({ task, onClose }: Props) {
         <dl className="task-modal-meta">
           <div>
             <dt>Assignee</dt>
-            <dd className={task.assignee_active === false ? 'gone' : undefined}>
+            <dd>
               {task.assigned_to || '—'}
               {task.assignee_derived && <em> (derived)</em>}
             </dd>
@@ -140,18 +139,13 @@ export function TaskDetailModal({ task, onClose }: Props) {
             <div className="task-modal-notes-empty">No notes recorded for this task.</div>
           )}
         </section>
-        <TaskDetailLoaded detail={detail} loadError={loadError} />
+        <TaskDetailLog detail={detail} loadError={loadError} />
       </div>
     </div>
   );
 }
 
-// TaskDetailLoaded renders the three extra sections once the server
-// response arrives: agent rollup, evidence jobs (with transcript
-// links), and the audit timeline. Each section short-circuits to an
-// empty state when its slice is empty — a brand-new task with no
-// audit activity yet should not show three placeholders.
-function TaskDetailLoaded({
+function TaskDetailLog({
   detail,
   loadError,
 }: {
@@ -160,142 +154,282 @@ function TaskDetailLoaded({
 }) {
   if (loadError) {
     return (
-      <section className="task-modal-detail" aria-label="task detail">
+      <section className="task-modal-detail" aria-label="task participation log">
         <div className="task-modal-error">Couldn't load task detail: {loadError}</div>
       </section>
     );
   }
   if (!detail) {
     return (
-      <section className="task-modal-detail" aria-label="task detail">
+      <section className="task-modal-detail" aria-label="task participation log">
         <div className="task-modal-loading">Loading audit history…</div>
       </section>
     );
   }
+  const rows = buildLogRows(detail);
   return (
-    <section className="task-modal-detail" aria-label="task detail">
-      <AgentRollupBlock agents={detail.agents} />
-      <EvidenceBlock jobs={detail.jobs} />
-      <TimelineBlock events={detail.timeline} />
+    <section className="task-modal-detail" aria-label="task participation log">
+      <h3 className="task-modal-h3">
+        Participation log <span className="count">{rows.length}</span>
+      </h3>
+      {rows.length === 0 ? (
+        <div className="task-modal-log-empty">No audit activity yet for this task.</div>
+      ) : (
+        <ol className="task-modal-log">
+          {rows.map((r, i) => (
+            <li key={`${r.ts}-${i}`} className="task-log-row">
+              <span className="log-time" title={r.ts}>
+                [{formatTime(r.ts)}]
+              </span>
+              <span className="log-persona">{r.persona}</span>
+              <span className="log-verb">{r.verb}</span>
+              {r.jobID && (
+                <>
+                  <span className="log-sep">·</span>
+                  <span className="log-job-id">job {shortJobID(r.jobID)}</span>
+                </>
+              )}
+              {r.transcriptURL && (
+                <>
+                  <span className="log-sep">·</span>
+                  <a
+                    className="log-transcript"
+                    href={r.transcriptURL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    transcript{r.transcriptBytes ? ` (${formatBytes(r.transcriptBytes)})` : ''}
+                  </a>
+                </>
+              )}
+              {r.detail && <div className="log-detail">{r.detail}</div>}
+            </li>
+          ))}
+        </ol>
+      )}
     </section>
   );
 }
 
-function AgentRollupBlock({ agents }: { agents: TaskAgentRollup[] }) {
-  if (agents.length === 0) return null;
-  return (
-    <div className="task-modal-agents">
-      <h3 className="task-modal-h3">
-        Agents involved <span className="count">{agents.length}</span>
-      </h3>
-      <table className="task-modal-agent-table">
-        <thead>
-          <tr>
-            <th>Agent</th>
-            <th>Jobs</th>
-            <th>Done</th>
-            <th>Error</th>
-            <th>Pending</th>
-            <th>Last seen</th>
-          </tr>
-        </thead>
-        <tbody>
-          {agents.map((a) => (
-            <tr key={a.agent_id}>
-              <td className="agent-id">{a.agent_id}</td>
-              <td>{a.job_count}</td>
-              <td>{a.done}</td>
-              <td className={a.errored > 0 ? 'has-error' : undefined}>{a.errored}</td>
-              <td>{a.pending}</td>
-              <td className="when" title={a.last_seen_at}>
-                {a.last_seen_ago || '—'}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+// LogRow is one row in the chronological participation log. ts is
+// ISO-8601 from the server; persona is already human-formatted
+// ("Coder Ada", "Operator"); verb is past-tense.
+interface LogRow {
+  ts: string;
+  persona: string;
+  verb: string;
+  jobID?: string;
+  transcriptURL?: string;
+  transcriptBytes?: number;
+  detail?: string;
 }
 
-function EvidenceBlock({ jobs }: { jobs: TaskJob[] }) {
-  if (jobs.length === 0) return null;
-  return (
-    <div className="task-modal-evidence">
-      <h3 className="task-modal-h3">
-        Evidence <span className="count">{jobs.length}</span>
-      </h3>
-      <ul className="task-modal-job-list">
-        {jobs.map((j) => (
-          <li key={j.job_id} className={`job-row status-${j.status}`}>
-            <div className="job-row-head">
-              <span className="job-id" title={j.job_id}>
-                {j.job_id}
-              </span>
-              {j.agent_id && <span className="job-agent">{j.agent_id}</span>}
-              <span className={`job-status status-${j.status}`}>{j.status}</span>
-              {typeof j.duration_ms === 'number' && j.duration_ms > 0 && (
-                <span className="job-duration">{formatDuration(j.duration_ms)}</span>
-              )}
-              {j.transcript_url ? (
-                <a
-                  className="job-transcript-link"
-                  href={j.transcript_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={
-                    typeof j.transcript_bytes === 'number'
-                      ? `${j.transcript_bytes} bytes — opens raw NDJSON in a new tab`
-                      : 'opens raw NDJSON in a new tab'
-                  }
-                >
-                  transcript ↗
-                </a>
-              ) : (
-                <span className="job-transcript-missing" title="no transcript on disk">
-                  no transcript
-                </span>
-              )}
-            </div>
-            {j.summary && <div className="job-summary">{j.summary}</div>}
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
+// buildLogRows folds detail.timeline into a chronological row list.
+// Returns oldest-first. Skips event kinds that don't represent a
+// significant participation moment (heartbeats, channels_state,
+// usage_event — none of which carry task-scoped meaning here).
+export function buildLogRows(detail: TaskDetailPayload): LogRow[] {
+  const jobByID = new Map<string, TaskJob>();
+  for (const j of detail.jobs) {
+    jobByID.set(j.job_id, j);
+  }
+  const rows: LogRow[] = [];
+  for (const e of detail.timeline) {
+    if (!shouldShow(e.kind)) continue;
+    const row = renderEvent(e, jobByID);
+    if (row) rows.push(row);
+  }
+  // detail.timeline is newest-first per buildTaskTimeline; flip to
+  // oldest-first so the participation log reads top-down by time.
+  rows.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  return rows;
 }
 
-function TimelineBlock({ events }: { events: TaskTimelineEvent[] }) {
-  if (events.length === 0) return null;
-  // Default-closed details. Long-running tasks can carry hundreds of
-  // rows and the modal becomes a wall of audit text; collapsing keeps
-  // the rollup + evidence sections visible-first. Same pattern as
-  // <details class="tasks-done"> in TasksTable.tsx.
-  return (
-    <details className="task-timeline-details">
-      <summary>
-        Audit timeline <span className="count">{events.length}</span>
-      </summary>
-      <ul className="task-modal-timeline-list">
-        {events.map((e, i) => {
-          // summary is server-rendered (api_task_detail.go
-          // summarizeTaskEvent). Older snapshots without `summary`
-          // fall back to `message` so a stale page keeps rendering.
-          const line = e.summary || e.message || '';
-          return (
-            <li key={`${e.ts}-${i}`} className={`timeline-row source-${e.source}`}>
-              <span className="timeline-time" title={e.ts}>
-                {formatTime(e.ts)}
-              </span>
-              <span className={`timeline-kind kind-${e.kind}`}>{e.kind}</span>
-              {e.agent_id && <span className="timeline-agent">{e.agent_id}</span>}
-              {line && <span className="timeline-msg">{line}</span>}
-            </li>
-          );
-        })}
-      </ul>
-    </details>
-  );
+function shouldShow(kind: string): boolean {
+  switch (kind) {
+    case 'job_received':
+    case 'job_complete':
+    case 'job_error':
+    case 'job_interrupted':
+    case 'task_stage_changed':
+    case 'decision_note':
+    case 'blocker_note':
+      return true;
+    default:
+      // job_transcript_ready, heartbeat, channels_state, usage_event,
+      // pulse_tick, pm_tick — informative but not participation rows.
+      return false;
+  }
+}
+
+function renderEvent(
+  e: TaskTimelineEvent,
+  jobByID: Map<string, TaskJob>,
+): LogRow | null {
+  const persona = formatPersona(e.agent_id);
+  const role = roleFrom(e.agent_id);
+  const job = e.job_id ? jobByID.get(e.job_id) : undefined;
+
+  switch (e.kind) {
+    case 'job_received':
+      return {
+        ts: e.ts,
+        persona,
+        verb: 'started a job',
+        jobID: e.job_id,
+      };
+    case 'job_complete': {
+      const verb = completeVerb(role);
+      const row: LogRow = { ts: e.ts, persona, verb, jobID: e.job_id };
+      if (job?.transcript_url) {
+        row.transcriptURL = job.transcript_url;
+        row.transcriptBytes = job.transcript_bytes;
+      }
+      return row;
+    }
+    case 'job_error': {
+      const row: LogRow = {
+        ts: e.ts,
+        persona,
+        verb: 'errored on a job',
+        jobID: e.job_id,
+      };
+      if (job?.transcript_url) {
+        row.transcriptURL = job.transcript_url;
+        row.transcriptBytes = job.transcript_bytes;
+      }
+      const msg = stringMeta(e.meta, 'error') || e.message;
+      if (msg) row.detail = msg;
+      return row;
+    }
+    case 'job_interrupted':
+      return {
+        ts: e.ts,
+        persona,
+        verb: 'was interrupted on a job',
+        jobID: e.job_id,
+      };
+    case 'task_stage_changed': {
+      const to = stringMeta(e.meta, 'stage') || stringMeta(e.meta, 'to');
+      const from = stringMeta(e.meta, 'from');
+      let verb = 'moved task';
+      if (to && from) verb = `moved task from ${from} to ${to}`;
+      else if (to) verb = `moved task to ${to}`;
+      return { ts: e.ts, persona, verb };
+    }
+    case 'decision_note': {
+      const decision = stringMeta(e.meta, 'decision');
+      const sev = stringMeta(e.meta, 'severity');
+      let verb = 'recorded a decision';
+      if (decision === 'approve') verb = 'approved';
+      else if (decision === 'reject') verb = 'rejected';
+      else if (decision === 'comment') verb = 'commented';
+      else if (sev === 'question') verb = 'flagged a question';
+      const detail = e.message || stringMeta(e.meta, 'comment');
+      return { ts: e.ts, persona, verb, detail: detail || undefined };
+    }
+    case 'blocker_note':
+      return {
+        ts: e.ts,
+        persona,
+        verb: 'raised a blocker',
+        detail: e.message || undefined,
+      };
+    default:
+      return null;
+  }
+}
+
+// roleFrom returns the role component of an agent_id ("worker-ada"
+// → "worker"). Synthetic ids ("leader", "operator") and bare ids
+// fall through.
+function roleFrom(agentID?: string): string {
+  if (!agentID) return '';
+  const i = agentID.indexOf('-');
+  if (i <= 0) return agentID;
+  return agentID.slice(0, i);
+}
+
+// formatPersona renders agent_id as "<RoleLabel> <CapitalizedName>".
+// Unknown roles render as the raw agent_id so corrupt or future
+// roles stay diagnosable.
+function formatPersona(agentID?: string): string {
+  if (!agentID) return '—';
+  if (agentID === 'leader') return 'Leader';
+  if (agentID === 'operator') return 'Operator';
+  const dash = agentID.indexOf('-');
+  if (dash <= 0) return capitalize(agentID);
+  const role = agentID.slice(0, dash);
+  const name = agentID.slice(dash + 1);
+  const label = roleLabel(role);
+  if (!label) return agentID;
+  return `${label} ${capitalize(name)}`;
+}
+
+function roleLabel(role: string): string {
+  switch (role) {
+    case 'worker':
+      return 'Coder';
+    case 'reviewer':
+      return 'Reviewer';
+    case 'integrator':
+      return 'Integrator';
+    case 'project_manager':
+      return 'PM';
+    default:
+      return capitalize(role);
+  }
+}
+
+function completeVerb(role: string): string {
+  switch (role) {
+    case 'worker':
+      return 'coded';
+    case 'reviewer':
+      return 'reviewed';
+    case 'integrator':
+      return 'integrated';
+    case 'project_manager':
+      return 'consulted';
+    default:
+      return 'completed a job';
+  }
+}
+
+function capitalize(s: string): string {
+  if (!s) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function stringMeta(meta: Record<string, unknown> | undefined, key: string): string {
+  if (!meta) return '';
+  const v = meta[key];
+  return typeof v === 'string' ? v : '';
+}
+
+function shortJobID(id?: string): string {
+  if (!id) return '';
+  return id.length > 8 ? id.slice(0, 8) : id;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatTime(ts: string): string {
+  // The participation log is a record, not a live tail — show the
+  // full UTC date+time on every row so a session pieced together
+  // hours later is unambiguous.
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return ts;
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const hh = String(d.getUTCHours()).padStart(2, '0');
+  const mm = String(d.getUTCMinutes()).padStart(2, '0');
+  return `${y}-${m}-${day} ${hh}:${mm} UTC`;
 }
 
 function renderNotes(text: string | undefined): string {
@@ -309,22 +443,4 @@ function renderNotes(text: string | undefined): string {
 
 function escapeHTML(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const seconds = ms / 1000;
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const minutes = seconds / 60;
-  if (minutes < 60) return `${minutes.toFixed(1)}m`;
-  const hours = minutes / 60;
-  return `${hours.toFixed(1)}h`;
-}
-
-function formatTime(ts: string): string {
-  // Display HH:MM:SS in the operator's local TZ. Falls back to the raw
-  // string if parsing fails so corrupt timestamps stay diagnosable.
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleTimeString();
 }

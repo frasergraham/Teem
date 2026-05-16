@@ -1965,20 +1965,38 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	if err != nil {
 		return nil, fmt.Errorf("audit: %w", err)
 	}
-	// All audit Writes flow through this decorator so the hook chain
-	// (messaging, channels, archmem, pulse-nudge, usage, …) fires
-	// uniformly regardless of caller — MCP record_decision /
-	// record_blocker, chat-handler usage events, dashboard form posts,
-	// pulse-tick rollups, and the HTTP audit handler all hit the same
-	// path. The hook itself is wired in below, after the per-team
-	// components it depends on have been constructed.
-	auditSink := newHookedSink(auditFile)
+	// All audit Writes flow through this decorator chain:
+	//   FileSink ◄ hookedSink ◄ injectingSink
+	// The outer injectingSink stamps Meta["task_id"] on events whose
+	// JobID is registered in jobTaskIdx so the hook chain
+	// (messaging, channels, archmem, pulse-nudge, usage, …) and the
+	// on-disk JSONL see a uniform event shape with task attribution
+	// already in place. The hook itself is wired in below, after the
+	// per-team components it depends on have been constructed.
+	hookedAudit := newHookedSink(auditFile)
+	jobTaskIdx := audit.NewJobTaskIndex()
+	auditSink := newInjectingSink(hookedAudit, jobTaskIdx)
 
 	planPath := defaultPlanPath(t.ID)
 	planStore, err := plan.Open(planPath)
 	if err != nil {
 		_ = auditSink.Close()
 		return nil, fmt.Errorf("plan: %w", err)
+	}
+
+	// Rehydrate the job→task index from plan evidence so audit events
+	// for jobs that survived a daemon restart still pick up task_id.
+	// Terminal-kind events emitted *after* restart will clear the
+	// entry, so the index naturally trims itself back to in-flight
+	// jobs once the next worker tick lands.
+	for _, task := range planStore.List(plan.Filter{}) {
+		for _, jid := range task.Evidence {
+			// agent_id is unknown at rehydration time — the
+			// originating spawner state did not survive the
+			// bounce. The entry still clears on per-job
+			// terminal kinds; only ClearByAgent skips it.
+			jobTaskIdx.Set(jid, task.ID, "")
+		}
 	}
 
 	notesInbox, err := notes.Open(defaultNotesPath(t.ID))
@@ -2111,6 +2129,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		ArchMem:        archMemStore,
 		LeaderStatus:   leaderStatusStore,
 		Prompts:        promptBuilder,
+		JobTaskIndex:   jobTaskIdx,
 		ChannelSink: func(content string, meta map[string]string) {
 			chBus.Publish(channelbus.Event{Content: content, Meta: meta})
 		},
@@ -2295,7 +2314,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// dashboard form posts, the HTTP audit handler — fan out through
 	// this chain. The HTTP middleware no longer fires hooks itself;
 	// the wrapped sink is the only source.
-	auditSink.SetHook(combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, wsbusHook, d.makeUsageHook()))
+	hookedAudit.SetHook(combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, wsbusHook, d.makeUsageHook()))
 
 	// Auto-resume Pulse if it was running before the daemon restarted.
 	// Started AFTER SetHook so the first tick's KindUsageEvent reaches
