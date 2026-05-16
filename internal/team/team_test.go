@@ -803,6 +803,12 @@ func TestMaybePMArchetype(t *testing.T) {
 	if !strings.Contains(pm.Description, "linear") {
 		t.Errorf("Description = %q; want it to mention the tracker type", pm.Description)
 	}
+	// The ready-stage protection clause must surface in the standing
+	// archetype description so PM workers can't silently undo the
+	// operator's pre-flight signal (t-b252d388).
+	if !strings.Contains(pm.Description, "stage=ready") {
+		t.Errorf("Description missing ready-stage protection clause; got %q", pm.Description)
+	}
 
 	// Skill must track Tracker.Type — swap to a different backend
 	// and confirm the helper rederives.

@@ -428,6 +428,42 @@ func TestControlTaskReady_TerminalIs409(t *testing.T) {
 	}
 }
 
+// TestControlTaskReady_TerminalConflictJSONShape asserts the JSON 409
+// body shape on a terminal-stage conflict: {"error": "<msg>",
+// "current_stage": "<stage>"} so the SPA can refresh the row's stage
+// on rejection (t-b252d388).
+func TestControlTaskReady_TerminalConflictJSONShape(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, token: "test-token"}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "abandon me"})
+	if _, err := rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageAbandoned}); err != nil {
+		t.Fatalf("walk to abandoned: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/control/teams/alpha/tasks/"+task.ID+"/ready",
+		bytes.NewReader([]byte(`{}`)))
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("code=%d want 409; body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("Content-Type = %q want application/json", ct)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not JSON: %v / %s", err, w.Body.String())
+	}
+	if got, _ := body["error"].(string); got == "" {
+		t.Errorf("body missing non-empty error field: %v", body)
+	}
+	if got, _ := body["current_stage"].(string); got != string(plan.StageAbandoned) {
+		t.Errorf("current_stage = %q want %q", got, plan.StageAbandoned)
+	}
+}
+
 // TestControlTaskReady_UnauthOK locks in the tailnet-boundary auth
 // model: the endpoint must accept a POST with no Authorization header.
 // The dashboard's SPA fetch can't carry the bearer token, so this gate

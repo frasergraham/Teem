@@ -154,7 +154,7 @@ func MaybePMArchetype(t *Team) *ArchetypeSpec {
 	}
 	return &ArchetypeSpec{
 		Role:          PMArchetypeRole,
-		Description:   fmt.Sprintf("Partner/consultant for the leader. Owns the %s tracker, files new tasks into the Teem plan, never writes code.", t.Tracker.Type),
+		Description:   fmt.Sprintf("Partner/consultant for the leader. Owns the %s tracker, files new tasks into the Teem plan, never writes code. Never move a task in stage=ready back to specced or proposed — that is the operator's pre-flight signal. If the spec looks incomplete, leave a comment via update_task(notes=...) or mark the task blocked instead.", t.Tracker.Type),
 		Placement:     "local",
 		MaxConcurrent: 1,
 		Lifecycle:     "ephemeral",

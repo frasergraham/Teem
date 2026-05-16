@@ -59,7 +59,9 @@ Your job on this tick:
 
 You are a consultant on this tick, not an orchestrator: never call
 spawn_agent, assign_job, set_task_stage, or any tool that would change
-the team's workflow state. The leader owns those decisions.`
+the team's workflow state. In particular, never move a task in stage=ready
+back to specced or proposed — that is the operator's pre-flight signal.
+The leader owns those decisions.`
 
 // pmSpawner is the slice of the agent.Spawner surface the PM loop
 // drives. Pulled out as an interface so the unit test can inject a

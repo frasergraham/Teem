@@ -350,13 +350,28 @@ func (d *daemon) handleControlTaskReady(w http.ResponseWriter, r *http.Request, 
 		http.NotFound(w, r)
 		return
 	case errors.Is(err, errReadyFromTerminal), errors.Is(err, errStageRaced), errors.Is(err, plan.ErrInvalidStage):
-		http.Error(w, err.Error(), http.StatusConflict)
+		writeReadyConflict(w, rt, taskID, err)
 		return
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, task)
+}
+
+// writeReadyConflict emits the JSON 409 body for /tasks/<id>/ready
+// conflicts. The body shape is {"error": "<msg>", "current_stage":
+// "<stage>"} so the SPA can refresh the row's stage on rejection. The
+// current_stage field is best-effort: if the task has been deleted
+// between the failed write and this re-read, it's omitted.
+func writeReadyConflict(w http.ResponseWriter, rt *registeredTeam, taskID string, err error) {
+	body := map[string]any{"error": err.Error()}
+	if rt != nil && rt.plan != nil {
+		if t, ok := rt.plan.Get(taskID); ok {
+			body["current_stage"] = string(t.Stage)
+		}
+	}
+	writeJSON(w, http.StatusConflict, body)
 }
 
 // splitTaskActionPath parses "<task_id>/<action>" out of the control

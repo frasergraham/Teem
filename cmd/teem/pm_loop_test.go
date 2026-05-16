@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -271,6 +272,15 @@ func TestPMLoop_AssignErrorRetiresAgent(t *testing.T) {
 	}
 	if !sawError {
 		t.Errorf("no pm_tick outcome=error event after assign failure")
+	}
+}
+
+// TestPMConsultationBrief_ProtectsReadyStage asserts the standing
+// per-tick PM prompt forbids reverting stage=ready, so the PM worker
+// can't silently undo the operator's pre-flight signal (t-b252d388).
+func TestPMConsultationBrief_ProtectsReadyStage(t *testing.T) {
+	if !strings.Contains(pmConsultationBrief, "stage=ready") {
+		t.Errorf("pmConsultationBrief missing ready-stage protection clause; got %q", pmConsultationBrief)
 	}
 }
 
