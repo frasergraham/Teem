@@ -32,11 +32,11 @@ const planFileSizeCap = 50 * 1024
 // expanded <details> persists independently across the dashboard's
 // 10s auto-refresh.
 type planFile struct {
-	Path       string
-	IsMarkdown bool
-	PathSlug   string        // "docs/foo.md" → "docs-foo-md"; used as a <details> id only
-	Rendered   template.HTML // pre-rendered (sanitized) markdown body, blank if read/render failed
-	Truncated  bool          // true if source was clipped at planFileSizeCap
+	Path       string        `json:"path"`
+	IsMarkdown bool          `json:"is_markdown"`
+	PathSlug   string        `json:"path_slug"`
+	Rendered   template.HTML `json:"rendered"`
+	Truncated  bool          `json:"truncated"`
 }
 
 // awaitingApprovalEvidence is the per-evidence-job view rendered
@@ -46,13 +46,13 @@ type planFile struct {
 // when every changed file is a markdown file under docs/ — i.e. the
 // branch is clearly a design-doc artifact, not a code change.
 type awaitingApprovalEvidence struct {
-	JobID      string
-	AgentID    string
-	BranchRef  string // "teem/worker-una"
-	BranchURL  string // /teams/<id>/agents/<agent>/jobs
-	JobURL     string // /teams/<id>/jobs/<jobid>
-	PlanFiles  []planFile
-	PlanShaped bool
+	JobID      string     `json:"job_id"`
+	AgentID    string     `json:"agent_id"`
+	BranchRef  string     `json:"branch_ref"`
+	BranchURL  string     `json:"branch_url"`
+	JobURL     string     `json:"job_url"`
+	PlanFiles  []planFile `json:"plan_files"`
+	PlanShaped bool       `json:"plan_shaped"`
 }
 
 // resolveEvidenceRows turns a task's []job_id evidence list into the

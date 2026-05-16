@@ -28,13 +28,13 @@ import (
 // left over after a worker stops — the operator typically wants to see
 // orphans precisely so they can clean them up.
 type dashboardBranch struct {
-	Name    string
-	SHA     string
-	AgeAgo  string
-	Subject string
-	AgentID string
-	Live    bool
-	JobsURL string
+	Name    string `json:"name"`
+	SHA     string `json:"sha"`
+	AgeAgo  string `json:"age_ago"`
+	Subject string `json:"subject"`
+	AgentID string `json:"agent_id"`
+	Live    bool   `json:"live"`
+	JobsURL string `json:"jobs_url"`
 }
 
 // listTeemBranches enumerates refs/heads/teem/* in repoRoot and maps

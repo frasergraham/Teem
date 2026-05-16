@@ -154,86 +154,86 @@ type dashboardTeam struct {
 	// ID is the canonical team id used in URLs (e.g. the ping form
 	// posts to /control/teams/<id>/ping). Name is the human-readable
 	// display label.
-	ID            string
-	Name          string
-	RegisteredAgo string
-	Agents        []dashboardAgent
-	OpenTaskCount int
-	OpenTasks     []dashboardTask
+	ID            string           `json:"id"`
+	Name          string           `json:"name"`
+	RegisteredAgo string           `json:"registered_ago"`
+	Agents        []dashboardAgent `json:"agents"`
+	OpenTaskCount int              `json:"open_task_count"`
+	OpenTasks     []dashboardTask  `json:"open_tasks"`
 	// AwaitingApproval lists tasks currently in stage=awaiting_approval.
 	// Rendered as a dedicated, prominent section at the top of the team
 	// page with APPROVE / REJECT / COMMENT controls per row. These tasks
 	// are ALSO included in OpenTaskCount (they're open) but pulled out
 	// of OpenTasks so the main table isn't duplicated.
-	AwaitingApproval []awaitingApprovalTask
+	AwaitingApproval []awaitingApprovalTask `json:"awaiting_approval"`
 	// Flash is a short status banner shown above the awaiting-approval
 	// section after a successful form POST redirect ("task_approved",
 	// "task_rejected", "task_commented", or ping outcomes via
 	// flashFromQuery's whitelist).
-	Flash          string
-	Shelved        []dashboardTask
-	RecentDone     []dashboardTask
-	LeaderStatus   *leaderRow // pinned "leader" entry, if any
-	OtherStatuses  []leaderRow
-	PulseRunning   bool
-	PulsePaused    bool
-	PulseInterval  string
-	PulseLastTick  string // "(never)" or "<duration> ago"
-	PulseTickCount int64
+	Flash          string          `json:"flash,omitempty"`
+	Shelved        []dashboardTask `json:"shelved"`
+	RecentDone     []dashboardTask `json:"recent_done"`
+	LeaderStatus   *leaderRow      `json:"leader_status"`
+	OtherStatuses  []leaderRow     `json:"other_statuses"`
+	PulseRunning   bool            `json:"pulse_running"`
+	PulsePaused    bool            `json:"pulse_paused"`
+	PulseInterval  string          `json:"pulse_interval"`
+	PulseLastTick  string          `json:"pulse_last_tick"`
+	PulseTickCount int64           `json:"pulse_tick_count"`
 	// Pulse is the richer per-team pulse view used by the bridge-console
 	// pulse-management panel: lamp toggle, interval input, wake-prompt
 	// textarea. Mirrors the top-level Pulse* fields above for the
 	// existing header pill / heading line so we don't have to rewrite
 	// callers.
-	Pulse        pulseSnapshot
-	RecentEvents []dashboardEvent
-	UnreadNotes  int
-	InFlight     int64
+	Pulse        pulseSnapshot    `json:"pulse"`
+	RecentEvents []dashboardEvent `json:"recent_events"`
+	UnreadNotes  int              `json:"unread_notes"`
+	InFlight     int64            `json:"in_flight"`
 	// HasRepo reflects whether the team's registration carried a repo
 	// root. False ⇒ render "(no repo)" in place of the branches section.
-	HasRepo  bool
-	Branches teamPageBranches
+	HasRepo  bool             `json:"has_repo"`
+	Branches teamPageBranches `json:"branches"`
 	// Hero is the "page-header" summary: big bold counters, agent
 	// chips per archetype, and today's task pipeline as a stacked bar.
-	Hero teamHero
+	Hero teamHero `json:"hero"`
 	// Workers is the "bridge-console" active-workers manifest rendered
 	// directly under the hero/status panel. One row per non-stopped
 	// agent, ordered as Agents is (alphabetical by id). Activity is
 	// derived from the leader-status board first, falling back to the
 	// agent's assigned open tasks.
-	Workers []workerRow
+	Workers []workerRow `json:"workers"`
 	// StatusHeadline is the short editorial line rendered in the
 	// status-panel hero: today's leader-status text, or a quiet-day
 	// placeholder when the leader hasn't posted one.
-	StatusHeadline string
+	StatusHeadline string `json:"status_headline"`
 	// Decisions is the unified "operator action needed" panel mixing
 	// awaiting-approval tasks, agent questions (record_decision with
 	// severity=question), and open blockers (record_blocker against a
 	// task still at stage=blocked). Sorted newest-first by timestamp.
-	Decisions []decisionRow
+	Decisions []decisionRow `json:"decisions"`
 	// Usage is the daily-token-budget card rendered near the top of the
 	// team-detail page. Nil when the daemon has no Aggregator wired (the
 	// card is suppressed in that case).
-	Usage *usageSnapshot
+	Usage *usageSnapshot `json:"usage"`
 	// HasPricing is true when ~/.teem/pricing.yaml loaded with at least
 	// one priced model. Drives whether the dashboard's Cost column and
 	// hero "Today's spend" line render at all — absent pricing means
 	// the dashboard hides cost UI rather than rendering $0.
-	HasPricing bool
+	HasPricing bool `json:"has_pricing"`
 	// PricingStale is true when the pricing.yaml mtime is older than
 	// usage.StaleAge. The hero shows a small "(stale)" hint next to
 	// Today's spend so the operator knows their numbers may have drifted
 	// from Anthropic's current list prices.
-	PricingStale bool
+	PricingStale bool `json:"pricing_stale"`
 	// HeroSpendUSD is the dollar total of every KindUsageEvent emitted
 	// since local midnight. Computed by usage.TodaysSpend from the raw
 	// audit stream so the daily total stays correct even when per-task
 	// numbers double-count cross-linked jobs.
-	HeroSpendUSD float64
+	HeroSpendUSD float64 `json:"hero_spend_usd"`
 	// HeroSpendDisplay is the pre-formatted "$X.XX" string the template
 	// renders. Kept as a string so the template doesn't need a custom
 	// formatter func; empty when HasPricing is false.
-	HeroSpendDisplay string
+	HeroSpendDisplay string `json:"hero_spend_display"`
 }
 
 // usageSnapshot is the data behind the team-detail "Usage" card. Built
@@ -241,21 +241,21 @@ type dashboardTeam struct {
 // operator hasn't set daily_token_budget; the card shows the
 // configuration hint instead of the bar.
 type usageSnapshot struct {
-	Configured  bool
-	Used        int64
-	Cap         int64
-	PercentUsed float64
-	Throttle    bool
-	NextReset   time.Time
-	LastReset   time.Time
+	Configured  bool      `json:"configured"`
+	Used        int64     `json:"used"`
+	Cap         int64     `json:"cap"`
+	PercentUsed float64   `json:"percent_used"`
+	Throttle    bool      `json:"throttle"`
+	NextReset   time.Time `json:"next_reset"`
+	LastReset   time.Time `json:"last_reset"`
 	// NextResetIn is the formatted "in 4h 23m" countdown. NextResetAbs
 	// is the wall-clock tooltip (local time). Both empty when the
 	// anchor parse fails (defensive — operator sees no countdown).
-	NextResetIn  string
-	NextResetAbs string
-	LastResetAbs string
-	PerModel     []modelUsage
-	BarColour    string // "green" | "amber" | "red"
+	NextResetIn  string       `json:"next_reset_in"`
+	NextResetAbs string       `json:"next_reset_abs"`
+	LastResetAbs string       `json:"last_reset_abs"`
+	PerModel     []modelUsage `json:"per_model"`
+	BarColour    string       `json:"bar_colour"`
 }
 
 // modelUsage is one row in the per-model breakdown. Total is
@@ -263,12 +263,12 @@ type usageSnapshot struct {
 // the throttle); CacheRead is reported separately so the operator can
 // see read-side caching activity without it inflating the cap.
 type modelUsage struct {
-	Model       string
-	Input       int64
-	Output      int64
-	CacheCreate int64
-	CacheRead   int64
-	Total       int64
+	Model       string `json:"model"`
+	Input       int64  `json:"input"`
+	Output      int64  `json:"output"`
+	CacheCreate int64  `json:"cache_create"`
+	CacheRead   int64  `json:"cache_read"`
+	Total       int64  `json:"total"`
 }
 
 // decisionRow is one row in the unified Decisions panel. TypeClass is
@@ -278,17 +278,17 @@ type modelUsage struct {
 // set for Type==APPROVAL — it carries the rich evidence/plan-artifact
 // payload so the approval card preserves its existing rendering.
 type decisionRow struct {
-	Type      string
-	TypeClass string
-	TaskID    string
-	Title     string
-	Summary   string
-	Age       string
-	URL       string
-	Stripe    string
-	Timestamp time.Time
-	Actions   []decisionAction
-	Approval  *awaitingApprovalTask
+	Type      string                `json:"type"`
+	TypeClass string                `json:"type_class"`
+	TaskID    string                `json:"task_id"`
+	Title     string                `json:"title"`
+	Summary   string                `json:"summary"`
+	Age       string                `json:"age"`
+	URL       string                `json:"url"`
+	Stripe    string                `json:"stripe"`
+	Timestamp time.Time             `json:"timestamp"`
+	Actions   []decisionAction      `json:"actions"`
+	Approval  *awaitingApprovalTask `json:"approval,omitempty"`
 }
 
 // decisionAction is one button rendered in a decision row's action bar.
@@ -296,10 +296,10 @@ type decisionRow struct {
 // stripe colour). Method is "POST" or "GET" — GET is used for the
 // "view task" pill which links to the deep page.
 type decisionAction struct {
-	Label   string
-	Method  string
-	URL     string
-	Primary bool
+	Label   string `json:"label"`
+	Method  string `json:"method"`
+	URL     string `json:"url"`
+	Primary bool   `json:"primary"`
 }
 
 // pulseSnapshot is the data behind the bridge-console pulse-management
@@ -308,19 +308,19 @@ type decisionAction struct {
 // + select pair so the form posts back the same shape; FormAction is
 // pre-built so the template doesn't have to know the URL prefix.
 type pulseSnapshot struct {
-	Running              bool
-	Paused               bool
-	Interval             string // formatted Go duration ("5m0s")
-	IntervalValue        int    // for the number input
-	IntervalUnit         string // "s" / "m" / "h"
-	LastTick             string // "(never)" or "<duration> ago"
-	TickCount            int64
-	WakePrompt           string // current value (default or override)
-	UseDefaultWakePrompt bool   // true ⇒ render textarea as placeholder
-	DefaultWakePrompt    string // shown as the placeholder text
-	StartURL             string // /control/teams/<id>/pulse/start
-	StopURL              string // /control/teams/<id>/pulse/stop
-	ConfigURL            string // /control/teams/<id>/pulse/config
+	Running              bool   `json:"running"`
+	Paused               bool   `json:"paused"`
+	Interval             string `json:"interval"`
+	IntervalValue        int    `json:"interval_value"`
+	IntervalUnit         string `json:"interval_unit"`
+	LastTick             string `json:"last_tick"`
+	TickCount            int64  `json:"tick_count"`
+	WakePrompt           string `json:"wake_prompt"`
+	UseDefaultWakePrompt bool   `json:"use_default_wake_prompt"`
+	DefaultWakePrompt    string `json:"default_wake_prompt"`
+	StartURL             string `json:"start_url"`
+	StopURL              string `json:"stop_url"`
+	ConfigURL            string `json:"config_url"`
 }
 
 // workerRow is one entry in the active-workers manifest. Persona is the
@@ -330,13 +330,13 @@ type pulseSnapshot struct {
 // template appends to .role-tag ("coder" / "reviewer" / "integrator" /
 // "planner") so the colour signal stays in CSS, not Go.
 type workerRow struct {
-	AgentID         string
-	Persona         string
-	Role            string
-	RoleTag         string
-	RoleColourClass string
-	Activity        string
-	Age             string
+	AgentID         string `json:"agent_id"`
+	Persona         string `json:"persona"`
+	Role            string `json:"role"`
+	RoleTag         string `json:"role_tag"`
+	RoleColourClass string `json:"role_colour_class"`
+	Activity        string `json:"activity"`
+	Age             string `json:"age"`
 }
 
 // teamHero is the data behind the prominent at-a-glance hero band at
@@ -345,13 +345,13 @@ type workerRow struct {
 // roster (with count, including zero); StageBar enumerates the stages
 // that had ≥ 1 task transition today, with proportional segment widths.
 type teamHero struct {
-	ActiveAgentsTotal int
-	OpenTasksTotal    int
-	AgentChips        []agentChip
-	StageBar          []stageBarSegment
+	ActiveAgentsTotal int               `json:"active_agents_total"`
+	OpenTasksTotal    int               `json:"open_tasks_total"`
+	AgentChips        []agentChip       `json:"agent_chips"`
+	StageBar          []stageBarSegment `json:"stage_bar"`
 	// HasStageActivity is false when no stage had a transition today;
 	// the template renders a "no activity today" placeholder.
-	HasStageActivity bool
+	HasStageActivity bool `json:"has_stage_activity"`
 }
 
 // teamPageBranches wraps the branch list rendered at the bottom of the
@@ -359,17 +359,17 @@ type teamHero struct {
 // teem/b, teem/c +2 more") shown in the collapsed <summary>; Rows is
 // the full table rendered inside the <details> body.
 type teamPageBranches struct {
-	Count    int
-	NamePeek string
-	Rows     []dashboardBranch
+	Count    int               `json:"count"`
+	NamePeek string            `json:"name_peek"`
+	Rows     []dashboardBranch `json:"rows"`
 }
 
 // agentChip is one pill in the per-archetype breakdown above the page
 // fold. Count == 0 still renders, so the operator sees the full team
 // shape at a glance (predictable layout).
 type agentChip struct {
-	Role  string
-	Count int
+	Role  string `json:"role"`
+	Count int    `json:"count"`
 }
 
 // stageBarSegment is one coloured segment in the horizontal stacked
@@ -377,35 +377,35 @@ type agentChip struct {
 // transitions (sums to ≤ 100 across segments). TaskIDs is shown as a
 // hover tooltip so the operator can spot which task is where.
 type stageBarSegment struct {
-	Stage    string
-	Count    int
-	WidthPct float64
-	ColorHex string
-	TaskIDs  []string
+	Stage    string   `json:"stage"`
+	Count    int      `json:"count"`
+	WidthPct float64  `json:"width_pct"`
+	ColorHex string   `json:"color_hex"`
+	TaskIDs  []string `json:"task_ids"`
 	// TaskIDList is the space-joined TaskIDs for the title= tooltip
 	// (templates can't easily call strings.Join).
-	TaskIDList string
+	TaskIDList string `json:"task_id_list"`
 }
 
 type dashboardAgent struct {
-	ID        string
-	Role      string
-	State     string
-	LastSeen  string
-	JobsURL   string
-	Placement string
+	ID        string `json:"id"`
+	Role      string `json:"role"`
+	State     string `json:"state"`
+	LastSeen  string `json:"last_seen"`
+	JobsURL   string `json:"jobs_url"`
+	Placement string `json:"placement"`
 }
 
 type leaderRow struct {
-	AgentID        string
-	Text           string
-	UpdatedAgo     string
-	CurrentTaskIDs []taskLink
+	AgentID        string     `json:"agent_id"`
+	Text           string     `json:"text"`
+	UpdatedAgo     string     `json:"updated_ago"`
+	CurrentTaskIDs []taskLink `json:"current_task_ids"`
 }
 
 type taskLink struct {
-	ID  string
-	URL string
+	ID  string `json:"id"`
+	URL string `json:"url"`
 }
 
 // awaitingApprovalTask is the per-row data the team-detail page renders
@@ -421,47 +421,47 @@ type taskLink struct {
 // de-emphasized <details> so the operator's eye lands on the work
 // product first.
 type awaitingApprovalTask struct {
-	ID              string
-	Title           string
-	Notes           string // full leader brief, rendered inside the de-emphasized <details>
-	EvidenceRows    []awaitingApprovalEvidence
-	HasPlanArtifact bool
-	StageAgo        string
-	URL             string // /teams/<id>/tasks/<id> (deep link)
-	ApproveURL      string
-	RejectURL       string
-	CommentURL      string
+	ID              string                     `json:"id"`
+	Title           string                     `json:"title"`
+	Notes           string                     `json:"notes"`
+	EvidenceRows    []awaitingApprovalEvidence `json:"evidence_rows"`
+	HasPlanArtifact bool                       `json:"has_plan_artifact"`
+	StageAgo        string                     `json:"stage_ago"`
+	URL             string                     `json:"url"`
+	ApproveURL      string                     `json:"approve_url"`
+	RejectURL       string                     `json:"reject_url"`
+	CommentURL      string                     `json:"comment_url"`
 }
 
 type dashboardTask struct {
-	ID         string
-	Title      string
-	Status     string
-	Stage      string
-	StageAgo   string
-	AssignedTo string
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	Stage      string `json:"stage"`
+	StageAgo   string `json:"stage_ago"`
+	AssignedTo string `json:"assigned_to"`
 	// Cost carries the per-task token-cost rollup. HasCost is false
 	// when pricing.yaml is absent (template hides the cell), or when
 	// the task has no priced evidence yet — both render as "—" so the
 	// column stays alignment-stable.
-	Cost taskCostCell
+	Cost taskCostCell `json:"cost"`
 	// AssigneeActive is false when AssignedTo names a worker the
 	// registry no longer treats as active (stopped, unregistered, or
 	// never seen). The template uses this to mute the cell so it's
 	// obvious nobody is currently driving the task.
-	AssigneeActive bool
+	AssigneeActive bool `json:"assignee_active"`
 	// AssigneeDerived is true when AssignedTo was inferred from the
 	// task's latest evidence job (because the task had no explicit
 	// assigned_to). The template renders these italicised so the
 	// operator can tell explicit assignment from inference.
-	AssigneeDerived bool
+	AssigneeDerived bool `json:"assignee_derived"`
 	// Stale is true when an active pipeline stage (planning/coding/
 	// reviewing/integrating) names an inactive assignee — i.e. the task thinks
 	// someone is working it but no one is. The template surfaces this
 	// as a small STALE pill so the leader knows to re-assign or move
 	// the task forward.
-	Stale bool
-	URL   string
+	Stale bool   `json:"stale"`
+	URL   string `json:"url"`
 }
 
 // taskCostCell is the dashboardTask sub-struct holding the rendered
@@ -470,33 +470,33 @@ type dashboardTask struct {
 // <details> drawer. Unknown is true when ≥1 contributing event ran on
 // a model that pricing.yaml didn't price (UI renders a "?").
 type taskCostCell struct {
-	HasCost bool
-	Display string
-	Unknown bool
-	Jobs    []taskCostJob
+	HasCost bool          `json:"has_cost"`
+	Display string        `json:"display"`
+	Unknown bool          `json:"unknown"`
+	Jobs    []taskCostJob `json:"jobs"`
 }
 
 // taskCostJob is one row in the per-task <details> drill-in: which
 // job, which model, how many tokens of each class, and the dollar
 // amount that contributed to the task total.
 type taskCostJob struct {
-	JobID             string
-	Model             string
-	InputTokens       int64
-	OutputTokens      int64
-	CacheCreateTokens int64
-	CacheReadTokens   int64
-	USD               string // "$X.XX"; "—" when Priced is false
-	Priced            bool
+	JobID             string `json:"job_id"`
+	Model             string `json:"model"`
+	InputTokens       int64  `json:"input_tokens"`
+	OutputTokens      int64  `json:"output_tokens"`
+	CacheCreateTokens int64  `json:"cache_create_tokens"`
+	CacheReadTokens   int64  `json:"cache_read_tokens"`
+	USD               string `json:"usd"`
+	Priced            bool   `json:"priced"`
 }
 
 type dashboardEvent struct {
-	Time    string
-	AgentID string
-	Kind    string
-	Message string
-	JobID   string
-	JobURL  string
+	Time    string `json:"time"`
+	AgentID string `json:"agent_id"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+	JobID   string `json:"job_id"`
+	JobURL  string `json:"job_url"`
 }
 
 // renderDashboard composes the summary index — a tile per registered
