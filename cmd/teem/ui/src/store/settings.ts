@@ -21,6 +21,7 @@ export type SectionKey =
   | 'usage'
   | 'pulse'
   | 'chat'
+  | 'events'
   | 'branches';
 
 export const SECTION_KEYS: SectionKey[] = [
@@ -34,6 +35,7 @@ export const SECTION_KEYS: SectionKey[] = [
   'usage',
   'pulse',
   'chat',
+  'events',
   'branches',
 ];
 
@@ -49,6 +51,7 @@ export const MENU_SECTION_KEYS: SectionKey[] = [
   'usage',
   'pulse',
   'chat',
+  'events',
 ];
 
 export const SECTION_LABELS: Record<SectionKey, string> = {
@@ -62,6 +65,7 @@ export const SECTION_LABELS: Record<SectionKey, string> = {
   usage: 'Usage',
   pulse: 'Pulse',
   chat: 'Chat',
+  events: 'Recent events',
   branches: 'Branches',
 };
 

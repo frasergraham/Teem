@@ -359,12 +359,13 @@ type taskCostJob struct {
 }
 
 type dashboardEvent struct {
-	Time    string `json:"time"`
-	AgentID string `json:"agent_id"`
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
-	JobID   string `json:"job_id"`
-	JobURL  string `json:"job_url"`
+	TS      time.Time `json:"ts"`
+	Time    string    `json:"time"`
+	AgentID string    `json:"agent_id"`
+	Kind    string    `json:"kind"`
+	Message string    `json:"message"`
+	JobID   string    `json:"job_id"`
+	JobURL  string    `json:"job_url"`
 }
 
 func startOfLocalDay(now time.Time) time.Time {
@@ -558,10 +559,11 @@ func teamSnapshot(v teamView) dashboardTeam {
 			events[i], events[j] = events[j], events[i]
 		}
 		for _, e := range events {
-			if len(out.RecentEvents) >= 8 {
+			if len(out.RecentEvents) >= 20 {
 				break
 			}
 			de := dashboardEvent{
+				TS:      e.Timestamp,
 				Time:    timeShort(e.Timestamp),
 				AgentID: e.AgentID,
 				Kind:    string(e.Kind),
