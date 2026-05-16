@@ -37,8 +37,9 @@ var errStageRaced = errors.New("task stage changed since check; refresh and retr
 
 // decideTask is the shared core for approve / reject / comment. It
 // validates the task is in awaiting_approval, mutates the plan
-// (stage transition + notes append), writes a decision_note audit
-// event, and pushes a task_approval channel notification.
+// (stage transition + notes append), and writes a decision_note
+// audit event; operator-facing notification (channel push, etc.)
+// is delivered by the hookedSink fan-out on that audit Write.
 //
 // Returns the updated task on success.
 //

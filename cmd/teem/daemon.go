@@ -1960,14 +1960,6 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		// which the usage hook records into the aggregator. Wiring
 		// OnUsage here as well would double-count every pulse tick.
 	})
-	// Auto-resume Pulse if it was running before the daemon
-	// restarted. Operator opt-out is `teem pulse stop` (which clears
-	// the flag) or `teem pulse pause` (which leaves it alone but
-	// skips ticks).
-	if pulseInst.WasRunning() {
-		pulseInst.Start(d.baseCtx)
-		fmt.Fprintf(os.Stderr, "[teemd] auto-resumed Pulse for %q\n", t.Name)
-	}
 
 	// Wake hook: publish on the in-process leader.wake bus topic
 	// whenever a worker emits a job-terminal event. Today no chat
@@ -2085,6 +2077,17 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	// this chain. The HTTP middleware no longer fires hooks itself;
 	// the wrapped sink is the only source.
 	auditSink.SetHook(combineHooks(wakeHook, stopHook, archMemHook, channelHook, messagingHook, pulseNudgeHook, d.makeUsageHook()))
+
+	// Auto-resume Pulse if it was running before the daemon restarted.
+	// Started AFTER SetHook so the first tick's KindUsageEvent reaches
+	// the usage hook (otherwise the bare FileSink Write happens before
+	// the hook chain is installed). Operator opt-out is `teem pulse stop`
+	// (which clears the flag) or `teem pulse pause` (which leaves it
+	// alone but skips ticks).
+	if pulseInst.WasRunning() {
+		pulseInst.Start(d.baseCtx)
+		fmt.Fprintf(os.Stderr, "[teemd] auto-resumed Pulse for %q\n", t.Name)
+	}
 
 	// Summarizer goroutine: rolling digest + retention pruning per
 	// role. Best-effort — failures log to stderr and the next tick
