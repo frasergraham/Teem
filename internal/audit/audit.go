@@ -114,11 +114,11 @@ const (
 	// surface ("leader-chat" or "leader-telegram").
 	KindLeaderChatTurn Kind = "leader_chat_turn"
 	// KindLeaderStatusChanged is emitted by the update_leader_status
-	// MCP tool after a successful write to the leader-status board.
-	// Meta carries text, current_task_ids ([]string), and updated_at
-	// (RFC3339). AgentID is the writer (defaults to "leader"; PMs
-	// pass their own id). Lets the dashboard SPA patch the HeroPanel
-	// without a full /state refetch.
+	// MCP tool after a successful write to the per-team leader-status
+	// board. Meta carries agent_id, text, current_task_ids (when
+	// present), and updated_at (RFC3339). Lets the SPA refresh the
+	// HeroPanel leader-status text and "X ago" without a full /state
+	// refetch.
 	KindLeaderStatusChanged Kind = "leader_status_changed"
 )
 

@@ -182,6 +182,22 @@ export interface AuditEvent {
   meta?: Record<string, unknown>;
 }
 
+// RecentEvent is the server-formatted entry inside snapshot.recent_events
+// (cmd/teem/ui.go dashboardEvent). Mirrored on the wire so the SPA can
+// seed the event log on first paint, before any WS audit envelopes have
+// arrived. `ts` is the raw ISO timestamp for merge/dedupe against the
+// live ring; `time` is the pre-formatted HH:MM:SS render the server
+// produced.
+export interface RecentEvent {
+  ts: string;
+  time: string;
+  agent_id: string;
+  kind: string;
+  message: string;
+  job_id: string;
+  job_url: string;
+}
+
 export interface Envelope {
   kind: 'audit' | 'snapshot_invalidate' | 'ping';
   seq: number;
@@ -202,6 +218,7 @@ export interface StateSnapshot {
   pulse?: PulseSnapshot;
   usage?: UsageSnapshot | null;
   branches?: { count: number; rows?: unknown[] };
+  recent_events?: RecentEvent[];
   channels_state?: 'live' | 'fallback';
   status_headline?: string;
   has_pricing?: boolean;

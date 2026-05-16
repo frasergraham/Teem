@@ -670,6 +670,7 @@ func (s *Server) handleUpdateLeaderStatus(_ context.Context, req mcpgo.CallToolR
 	entry, _ := s.leaderStatus.Get(agentID)
 	if s.audit != nil {
 		meta := map[string]any{
+			"agent_id":   entry.AgentID,
 			"text":       entry.Text,
 			"updated_at": entry.UpdatedAt.UTC().Format(time.RFC3339),
 		}
@@ -678,7 +679,7 @@ func (s *Server) handleUpdateLeaderStatus(_ context.Context, req mcpgo.CallToolR
 		}
 		_ = s.audit.Write(audit.Event{
 			Timestamp: time.Now().UTC(),
-			AgentID:   agentID,
+			AgentID:   entry.AgentID,
 			Kind:      audit.KindLeaderStatusChanged,
 			Message:   entry.Text,
 			Meta:      meta,

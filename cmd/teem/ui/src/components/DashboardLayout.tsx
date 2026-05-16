@@ -11,6 +11,7 @@ import { ApprovalCard } from './ApprovalCard';
 import { DecisionsList } from './DecisionsList';
 import { UsageCard } from './UsageCard';
 import { PulseControls } from './PulseControls';
+import { EventLogPanel } from './EventLogPanel';
 import { SettingsMenu } from './SettingsMenu';
 
 // DashboardLayout is the top-level SPA frame: sticky header (team name,
@@ -63,6 +64,7 @@ function DashboardBody() {
       {visible.decisions && <DecisionsList />}
       {visible.tasksOpen && <TasksTable />}
       {visible.chat && <ChatPanel />}
+      {visible.events && <EventLogPanel />}
     </main>
   );
 }

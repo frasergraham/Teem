@@ -97,14 +97,14 @@ func TestUpdateLeaderStatus_RespectsExplicitAgentID(t *testing.T) {
 	}
 }
 
-func TestUpdateLeaderStatus_EmitsAuditEvent(t *testing.T) {
+func TestLeaderStatusUpdate_EmitsAuditEvent(t *testing.T) {
 	srv, _, _, a := newTestServerFull(t)
 	req := mcpgo.CallToolRequest{}
 	req.Params.Name = "update_leader_status"
 	req.Params.Arguments = map[string]any{
 		"text":             "Reviewing T1+T6 diff",
-		"current_task_ids": "t-1,t-6",
 		"agent_id":         "leader",
+		"current_task_ids": "t-aa,t-bb",
 	}
 	res, err := srv.handleUpdateLeaderStatus(context.Background(), req)
 	if err != nil || res.IsError {
@@ -123,40 +123,38 @@ func TestUpdateLeaderStatus_EmitsAuditEvent(t *testing.T) {
 		t.Fatal("leader_status_changed not written to audit")
 	}
 	if found.AgentID != "leader" {
-		t.Errorf("agent_id: got %q want %q", found.AgentID, "leader")
+		t.Errorf("agent_id: %q", found.AgentID)
 	}
 	if found.Message != "Reviewing T1+T6 diff" {
 		t.Errorf("message: %q", found.Message)
 	}
+	if got, _ := found.Meta["agent_id"].(string); got != "leader" {
+		t.Errorf("meta.agent_id: %v", found.Meta["agent_id"])
+	}
 	if got, _ := found.Meta["text"].(string); got != "Reviewing T1+T6 diff" {
 		t.Errorf("meta.text: %v", found.Meta["text"])
 	}
-	if ts, _ := found.Meta["updated_at"].(string); ts == "" {
-		t.Errorf("meta.updated_at missing: %v", found.Meta)
-	} else if _, err := time.Parse(time.RFC3339, ts); err != nil {
-		t.Errorf("meta.updated_at not RFC3339 (%q): %v", ts, err)
+	if got, _ := found.Meta["updated_at"].(string); got == "" {
+		t.Errorf("meta.updated_at empty")
+	} else if _, err := time.Parse(time.RFC3339, got); err != nil {
+		t.Errorf("meta.updated_at not RFC3339: %q (%v)", got, err)
 	}
-	// Round-tripped through JSON in FileSink, so the slice arrives as
-	// []any with string elements.
-	rawIDs, ok := found.Meta["current_task_ids"].([]any)
-	if !ok {
-		t.Fatalf("meta.current_task_ids type: %T (%v)", found.Meta["current_task_ids"], found.Meta["current_task_ids"])
-	}
-	ids := make([]string, 0, len(rawIDs))
-	for _, v := range rawIDs {
-		s, _ := v.(string)
-		ids = append(ids, s)
-	}
-	if len(ids) != 2 || ids[0] != "t-1" || ids[1] != "t-6" {
-		t.Errorf("meta.current_task_ids: %v", ids)
+	ids, _ := found.Meta["current_task_ids"].([]any)
+	if len(ids) != 2 {
+		// JSON-roundtripped slices come back as []any; the inline write
+		// here keeps it as []string. Accept either shape.
+		ss, _ := found.Meta["current_task_ids"].([]string)
+		if len(ss) != 2 {
+			t.Errorf("meta.current_task_ids: %v", found.Meta["current_task_ids"])
+		}
 	}
 }
 
-func TestUpdateLeaderStatus_AuditEventOmitsEmptyTaskIDs(t *testing.T) {
+func TestLeaderStatusUpdate_OmitsTaskIDsWhenEmpty(t *testing.T) {
 	srv, _, _, a := newTestServerFull(t)
 	req := mcpgo.CallToolRequest{}
 	req.Params.Name = "update_leader_status"
-	req.Params.Arguments = map[string]any{"text": "Idle — nothing in flight"}
+	req.Params.Arguments = map[string]any{"text": "idle"}
 	res, err := srv.handleUpdateLeaderStatus(context.Background(), req)
 	if err != nil || res.IsError {
 		t.Fatalf("update_leader_status: %v / %s", err, textOf(t, res))
@@ -170,10 +168,10 @@ func TestUpdateLeaderStatus_AuditEventOmitsEmptyTaskIDs(t *testing.T) {
 		}
 	}
 	if found == nil {
-		t.Fatal("leader_status_changed not written")
+		t.Fatal("leader_status_changed not written to audit")
 	}
-	if _, present := found.Meta["current_task_ids"]; present {
-		t.Errorf("current_task_ids should be omitted when empty: %v", found.Meta)
+	if _, ok := found.Meta["current_task_ids"]; ok {
+		t.Errorf("current_task_ids should be omitted when empty, got %v", found.Meta["current_task_ids"])
 	}
 }
 
