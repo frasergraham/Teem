@@ -668,6 +668,22 @@ func (s *Server) handleUpdateLeaderStatus(_ context.Context, req mcpgo.CallToolR
 		return mcpgo.NewToolResultErrorFromErr("update_leader_status", err), nil
 	}
 	entry, _ := s.leaderStatus.Get(agentID)
+	if s.audit != nil {
+		meta := map[string]any{
+			"text":       entry.Text,
+			"updated_at": entry.UpdatedAt.UTC().Format(time.RFC3339),
+		}
+		if len(entry.CurrentTaskIDs) > 0 {
+			meta["current_task_ids"] = entry.CurrentTaskIDs
+		}
+		_ = s.audit.Write(audit.Event{
+			Timestamp: time.Now().UTC(),
+			AgentID:   agentID,
+			Kind:      audit.KindLeaderStatusChanged,
+			Message:   entry.Text,
+			Meta:      meta,
+		})
+	}
 	body, _ := json.Marshal(entry)
 	return mcpgo.NewToolResultText(string(body)), nil
 }

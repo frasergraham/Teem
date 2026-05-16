@@ -49,6 +49,7 @@ const handlers: Record<string, Handler> = {
   pulse_tick: handlePulseTick,
   channels_state: handleChannelsState,
   usage_event: handleUsageEvent,
+  leader_status_changed: handleLeaderStatusChanged,
 };
 
 // bucketForStage mirrors cmd/teem/ui.go's per-task switch (Stage ==
@@ -174,6 +175,45 @@ function handleChannelsState(snap: StateSnapshot, ev: AuditEvent): StateSnapshot
   if (state !== 'live' && state !== 'fallback') return null;
   if (snap.channels_state === state) return null;
   return { ...snap, channels_state: state };
+}
+
+// handleLeaderStatusChanged refreshes snapshot.leader_status and the
+// status_headline so the HeroPanel's "X ago" + headline update live.
+// Mirrors cmd/teem/ui.go buildStatusHeadline: when text is non-empty,
+// the headline is the (lightly truncated) text; otherwise it falls
+// back to the quiet-day placeholder. Truncation matches the server's
+// 200-byte tile cap so a long status doesn't blow the tile mid-stream.
+function handleLeaderStatusChanged(snap: StateSnapshot, ev: AuditEvent): StateSnapshot | null {
+  const meta = ev.meta ?? {};
+  const text = typeof meta.text === 'string' ? meta.text : '';
+  // The board's own writer is the authoritative source; ignore events
+  // for other agents (PMs etc.) because snapshot.leader_status only
+  // pins the "leader" entry server-side (other_statuses is a separate
+  // slice we don't model here yet).
+  const writer = ev.agent_id || 'leader';
+  if (writer !== 'leader') return null;
+  const next: StateSnapshot = {
+    ...snap,
+    leader_status: {
+      agent_id: writer,
+      text,
+      updated_ago: '0s ago',
+    },
+    status_headline: text
+      ? truncateForTile(text, 200)
+      : "All quiet on the bridge — leader hasn't posted a status yet.",
+  };
+  return next;
+}
+
+// truncateForTile mirrors cmd/teem/ui.go truncateForTile: byte-length
+// cap with an ellipsis. UTF-8 safety isn't perfect at the byte level
+// in JS strings, but the cap is generous (200) so the practical risk
+// is just an ellipsis after a slightly shorter prefix; the next full
+// /state fetch will re-render with the server's canonical truncation.
+function truncateForTile(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max) + '…';
 }
 
 function handleUsageEvent(snap: StateSnapshot, ev: AuditEvent): StateSnapshot | null {

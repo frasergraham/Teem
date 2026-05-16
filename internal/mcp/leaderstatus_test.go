@@ -97,6 +97,86 @@ func TestUpdateLeaderStatus_RespectsExplicitAgentID(t *testing.T) {
 	}
 }
 
+func TestUpdateLeaderStatus_EmitsAuditEvent(t *testing.T) {
+	srv, _, _, a := newTestServerFull(t)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Name = "update_leader_status"
+	req.Params.Arguments = map[string]any{
+		"text":             "Reviewing T1+T6 diff",
+		"current_task_ids": "t-1,t-6",
+		"agent_id":         "leader",
+	}
+	res, err := srv.handleUpdateLeaderStatus(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("update_leader_status: %v / %s", err, textOf(t, res))
+	}
+
+	events, _ := a.Query("", parseZero(), 100)
+	var found *audit.Event
+	for i := range events {
+		if events[i].Kind == audit.KindLeaderStatusChanged {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("leader_status_changed not written to audit")
+	}
+	if found.AgentID != "leader" {
+		t.Errorf("agent_id: got %q want %q", found.AgentID, "leader")
+	}
+	if found.Message != "Reviewing T1+T6 diff" {
+		t.Errorf("message: %q", found.Message)
+	}
+	if got, _ := found.Meta["text"].(string); got != "Reviewing T1+T6 diff" {
+		t.Errorf("meta.text: %v", found.Meta["text"])
+	}
+	if ts, _ := found.Meta["updated_at"].(string); ts == "" {
+		t.Errorf("meta.updated_at missing: %v", found.Meta)
+	} else if _, err := time.Parse(time.RFC3339, ts); err != nil {
+		t.Errorf("meta.updated_at not RFC3339 (%q): %v", ts, err)
+	}
+	// Round-tripped through JSON in FileSink, so the slice arrives as
+	// []any with string elements.
+	rawIDs, ok := found.Meta["current_task_ids"].([]any)
+	if !ok {
+		t.Fatalf("meta.current_task_ids type: %T (%v)", found.Meta["current_task_ids"], found.Meta["current_task_ids"])
+	}
+	ids := make([]string, 0, len(rawIDs))
+	for _, v := range rawIDs {
+		s, _ := v.(string)
+		ids = append(ids, s)
+	}
+	if len(ids) != 2 || ids[0] != "t-1" || ids[1] != "t-6" {
+		t.Errorf("meta.current_task_ids: %v", ids)
+	}
+}
+
+func TestUpdateLeaderStatus_AuditEventOmitsEmptyTaskIDs(t *testing.T) {
+	srv, _, _, a := newTestServerFull(t)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Name = "update_leader_status"
+	req.Params.Arguments = map[string]any{"text": "Idle — nothing in flight"}
+	res, err := srv.handleUpdateLeaderStatus(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("update_leader_status: %v / %s", err, textOf(t, res))
+	}
+	events, _ := a.Query("", parseZero(), 100)
+	var found *audit.Event
+	for i := range events {
+		if events[i].Kind == audit.KindLeaderStatusChanged {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("leader_status_changed not written")
+	}
+	if _, present := found.Meta["current_task_ids"]; present {
+		t.Errorf("current_task_ids should be omitted when empty: %v", found.Meta)
+	}
+}
+
 func TestGetLeaderStatus_ReturnsMap(t *testing.T) {
 	srv, _, ls, _ := newTestServerFull(t)
 	_ = ls.Set("leader", "A", nil)
