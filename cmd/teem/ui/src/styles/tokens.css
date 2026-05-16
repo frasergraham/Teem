@@ -275,29 +275,14 @@ body.team-detail-page {
   min-width: 40px;
   padding: 0 8px;
   display: flex; align-items: center; justify-content: center; gap: 6px;
-  color: var(--c-text);
+  color: #0c0a09;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   border-right: 1px solid rgba(255,255,255,0.5);
-  background: var(--c-panel-alt);
 }
 .stage-bar .segment:last-child { border-right: none; }
 .stage-bar .segment .count { font-variant-numeric: tabular-nums; font-weight: 700; }
-
-/* Pipeline-bar per-stage colours track the pill rules above so the
-   hero bar and the task-table pills share one palette. */
-.stage-bar .segment.stage-proposed          { background: var(--c-panel-alt); color: var(--c-text-muted); }
-.stage-bar .segment.stage-ready             { background: var(--c-signal-accent); color: var(--c-on-signal); }
-.stage-bar .segment.stage-specced           { background: var(--c-panel-alt); color: var(--c-azure); }
-.stage-bar .segment.stage-awaiting_approval { background: var(--c-azure); color: var(--c-on-signal); }
-.stage-bar .segment.stage-planning          { background: var(--c-panel-alt); color: var(--c-signal-text); }
-.stage-bar .segment.stage-coding            { background: var(--c-signal); color: var(--c-on-signal); }
-.stage-bar .segment.stage-reviewing         { background: var(--c-panel-alt); color: var(--c-role-reviewer); }
-.stage-bar .segment.stage-integrating       { background: var(--c-role-integrator); color: var(--c-on-signal); }
-.stage-bar .segment.stage-verified          { background: var(--c-panel-alt); color: var(--c-role-integrator); }
-.stage-bar .segment.stage-blocked           { background: var(--c-plum); color: var(--c-on-signal); }
-.stage-bar .segment.stage-shelved           { background: var(--c-panel-alt); color: var(--c-text-muted); }
 .stage-bar-empty {
   color: var(--c-text-muted); font-style: italic; font-size: 13px;
   padding: 6px 0;
@@ -440,18 +425,21 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
   letter-spacing: 0.03em;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
 }
-.stage.proposed          { background: var(--c-panel-alt); color: var(--c-text-muted); }
-.stage.ready             { background: var(--c-signal-accent); color: var(--c-on-signal); }
-.stage.specced           { background: var(--c-panel-alt); color: var(--c-azure); }
-.stage.awaiting_approval { background: var(--c-azure); color: var(--c-on-signal); }
-.stage.planning          { background: var(--c-panel-alt); color: var(--c-signal-text); border: 1px solid var(--c-signal-text); }
-.stage.coding            { background: var(--c-signal); color: var(--c-on-signal); }
-.stage.reviewing         { background: var(--c-panel-alt); color: var(--c-role-reviewer); border: 1px solid var(--c-role-reviewer); }
-.stage.integrating       { background: var(--c-role-integrator); color: var(--c-on-signal); }
-.stage.blocked           { background: var(--c-plum); color: var(--c-on-signal); }
-.stage.done              { background: var(--c-panel-alt); color: var(--c-role-integrator); }
-.stage.verified          { background: var(--c-panel-alt); color: var(--c-role-integrator); }
-.stage.shelved           { background: var(--c-panel-alt); color: var(--c-text-muted); }
+/* Pill backgrounds track stageBarColors in cmd/teem/ui.go so the hero
+   pipeline bar and the task-table pills share the same palette. Dark
+   text reads on every fill in this set. */
+.stage.proposed          { background: #cbd5e1; color: #0c0a09; }
+.stage.ready             { background: #fde047; color: #0c0a09; }
+.stage.specced           { background: #94a3b8; color: #0c0a09; }
+.stage.awaiting_approval { background: #f59e0b; color: #0c0a09; }
+.stage.planning          { background: #7dd3fc; color: #0c0a09; }
+.stage.coding            { background: #3b82f6; color: #0c0a09; }
+.stage.reviewing         { background: #a78bfa; color: #0c0a09; }
+.stage.integrating       { background: #fb923c; color: #0c0a09; }
+.stage.verified          { background: #22c55e; color: #0c0a09; }
+.stage.done              { background: #22c55e; color: #0c0a09; }
+.stage.blocked           { background: #ef4444; color: #0c0a09; }
+.stage.shelved           { background: #cbd5e1; color: #0c0a09; }
 .stage.cancelled         { background: var(--c-panel-alt); color: var(--c-text-dim); }
 
 .stale-pill {
