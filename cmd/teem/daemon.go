@@ -1578,9 +1578,6 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// Audit event + ping_ts redirect always carry the canonical id so
-	// the team page (also id-keyed) can correlate the tick.
-	id := rt.team.ID
 
 	if rt.pulse == nil {
 		http.Error(w, "pulse not configured", http.StatusInternalServerError)
@@ -1605,18 +1602,18 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 				Meta:      map[string]any{"trigger": "manual", "route": "channel"},
 			})
 		}
-		d.pingRespond(w, r, id, http.StatusOK, "ping_nudged",
-			"operator chat session is active — ping delivered as a channel nudge", 0)
+		d.pingRespond(w, http.StatusOK,
+			"operator chat session is active — ping delivered as a channel nudge")
 		return
 	}
 	if rt.pulse.Paused() {
-		d.pingRespond(w, r, id, http.StatusConflict, "paused",
-			"pulse paused; `teem pulse resume` first", 0)
+		d.pingRespond(w, http.StatusConflict,
+			"pulse paused; `teem pulse resume` first")
 		return
 	}
 	if rt.pulse.Busy() {
-		d.pingRespond(w, r, id, http.StatusAccepted, "busy",
-			"tick already in progress", 0)
+		d.pingRespond(w, http.StatusAccepted,
+			"tick already in progress")
 		return
 	}
 
@@ -1629,19 +1626,14 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 			Meta:      map[string]any{"trigger": "manual"},
 		})
 	}
-	// Capture the timestamp we redirect with so the team page can scan
-	// the audit log for the matching leader pulse_tick and render the
-	// actual outcome (success / failure / still-working) instead of a
-	// fire-and-forget banner.
-	pingedAt := time.Now().Unix()
 	safeGo("pulse.ping:"+rt.team.ID, func() { _ = rt.pulse.Tick(d.baseCtx, "manual") })
-	d.pingRespond(w, r, id, http.StatusOK, "pinged", "ping queued", pingedAt)
+	d.pingRespond(w, http.StatusOK, "ping queued")
 }
 
 // pingRespond writes the plain-text ping outcome. The SPA reads this
 // via fetch; there is no SSR HTML branch since the dashboard form-post
 // path was removed.
-func (d *daemon) pingRespond(w http.ResponseWriter, _ *http.Request, _ string, code int, _, body string, _ int64) {
+func (d *daemon) pingRespond(w http.ResponseWriter, code int, body string) {
 	w.WriteHeader(code)
 	_, _ = io.WriteString(w, body)
 }

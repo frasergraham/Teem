@@ -33,20 +33,15 @@ type dashboardTeam struct {
 	// are ALSO included in OpenTaskCount (they're open) but pulled out
 	// of OpenTasks so the main table isn't duplicated.
 	AwaitingApproval []awaitingApprovalTask `json:"awaiting_approval"`
-	// Flash is a short status banner shown above the awaiting-approval
-	// section after a successful form POST redirect ("task_approved",
-	// "task_rejected", "task_commented", or ping outcomes via
-	// flashFromQuery's whitelist).
-	Flash          string          `json:"flash,omitempty"`
-	Shelved        []dashboardTask `json:"shelved"`
-	RecentDone     []dashboardTask `json:"recent_done"`
-	LeaderStatus   *leaderRow      `json:"leader_status"`
-	OtherStatuses  []leaderRow     `json:"other_statuses"`
-	PulseRunning   bool            `json:"pulse_running"`
-	PulsePaused    bool            `json:"pulse_paused"`
-	PulseInterval  string          `json:"pulse_interval"`
-	PulseLastTick  string          `json:"pulse_last_tick"`
-	PulseTickCount int64           `json:"pulse_tick_count"`
+	Shelved          []dashboardTask        `json:"shelved"`
+	RecentDone       []dashboardTask        `json:"recent_done"`
+	LeaderStatus     *leaderRow             `json:"leader_status"`
+	OtherStatuses    []leaderRow            `json:"other_statuses"`
+	PulseRunning     bool                   `json:"pulse_running"`
+	PulsePaused      bool                   `json:"pulse_paused"`
+	PulseInterval    string                 `json:"pulse_interval"`
+	PulseLastTick    string                 `json:"pulse_last_tick"`
+	PulseTickCount   int64                  `json:"pulse_tick_count"`
 	// Pulse is the richer per-team pulse view used by the bridge-console
 	// pulse-management panel: lamp toggle, interval input, wake-prompt
 	// textarea. Mirrors the top-level Pulse* fields above for the
