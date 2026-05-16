@@ -1563,7 +1563,7 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 		_ = rt.auditSink.Write(audit.Event{
 			Timestamp: time.Now().UTC(),
 			AgentID:   "operator",
-			Kind:      audit.Kind("pulse_tick"),
+			Kind:      audit.KindPulseTick,
 			Message:   "manual ping from dashboard",
 			Meta:      map[string]any{"trigger": "manual"},
 		})

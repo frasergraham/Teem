@@ -639,7 +639,7 @@ func (p *Pulse) Tick(ctx context.Context, trigger string) error {
 	ev := audit.Event{
 		Timestamp: now,
 		AgentID:   "leader",
-		Kind:      audit.Kind("pulse_tick"),
+		Kind:      audit.KindPulseTick,
 		Meta: map[string]any{
 			"trigger":         trigger,
 			"duration_ms":     int(dur.Milliseconds()),
@@ -745,7 +745,7 @@ func (p *Pulse) buildContextSnapshot(trigger string, priorLast time.Time) string
 		if err == nil && len(events) > 0 {
 			b.WriteString("Recent activity:\n")
 			for _, e := range events {
-				if e.Kind == "pulse_tick" {
+				if e.Kind == audit.KindPulseTick {
 					continue
 				}
 				job := ""

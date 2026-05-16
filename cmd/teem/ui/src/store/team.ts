@@ -5,7 +5,7 @@ import { create } from 'zustand';
 // structs yet; the doc is the authoritative contract until codegen
 // replaces these hand-typed mirrors.
 //
-// TODO(t-e2da7b3b0 codegen): regenerate from `dashboardTeam` json tags
+// TODO(t-e2da3b70 codegen): regenerate from `dashboardTeam` json tags
 // once Phase 2b lands so component subscribers get exhaustive fields.
 
 export interface TeamMeta {

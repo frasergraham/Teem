@@ -689,7 +689,7 @@ func resolvePingOutcome(sink audit.Sink, sinceTS time.Time) (string, string, boo
 		return "", "", false
 	}
 	for _, ev := range events {
-		if ev.Kind != audit.Kind("pulse_tick") {
+		if ev.Kind != audit.KindPulseTick {
 			continue
 		}
 		if errFlag, _ := ev.Meta["error"].(bool); errFlag {
