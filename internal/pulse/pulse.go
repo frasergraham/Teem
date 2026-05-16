@@ -737,9 +737,7 @@ func (p *Pulse) tickViaChannel(ctx context.Context, trigger string) error {
 			"route":   "channel",
 		},
 	})
-	if p.cfg.OnChannelNudge != nil {
-		p.cfg.OnChannelNudge(ctx)
-	}
+	p.cfg.OnChannelNudge(ctx)
 	return nil
 }
 
