@@ -1984,6 +1984,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		PauseFile:      filepath.Join(defaultStateDir(t.ID), "pulse.paused"),
 		RunningFile:    defaultPulseRunningFlag(t.ID),
 		WakePromptFile: filepath.Join(defaultStateDir(t.ID), "pulse-wake.txt"),
+		ConfigPath:     filepath.Join(defaultStateDir(t.ID), "pulse_config.json"),
 		MCPConfig:      pulseMCPPath,
 		RepoRoot:       repoRoot,
 		Plan:           planStore,

@@ -61,15 +61,23 @@ type Config struct {
 	// otherwise defaultWakePrompt is used. SetWakePrompt rewrites it
 	// so daemon restarts pick up overrides.
 	WakePromptFile string
-	MCPConfig      string // path to ~/.teem/state/<team>/pulse-mcp.json
-	RepoRoot       string // CWD for the claude subprocess
-	Plan           *plan.Plan
-	Audit          audit.Sink
-	Registry       *mcpsrv.Registry
-	Interval       time.Duration // timer cadence; default 5m
-	BodyCap        int           // truncation cap for assistant text in audit; default 64 KiB
-	ClaudePath     string        // optional override (default: exec.LookPath("claude"))
-	TickTimeout    time.Duration // per-tick deadline; default 5m
+	// ConfigPath, when non-empty, is the JSON file Pulse uses to persist
+	// the active interval + wake-prompt across daemon restarts. On
+	// construction (and ahead of any cfg.Interval default), Pulse loads
+	// this file; on every mutation (SetInterval / SetWakePrompt /
+	// UpdateConfig) the new state is written atomically. A missing file
+	// is fine — cfg.Interval and the wake-prompt loader supply
+	// defaults. Malformed JSON is logged and ignored.
+	ConfigPath  string
+	MCPConfig   string // path to ~/.teem/state/<team>/pulse-mcp.json
+	RepoRoot    string // CWD for the claude subprocess
+	Plan        *plan.Plan
+	Audit       audit.Sink
+	Registry    *mcpsrv.Registry
+	Interval    time.Duration // timer cadence; default 5m
+	BodyCap     int           // truncation cap for assistant text in audit; default 64 KiB
+	ClaudePath  string        // optional override (default: exec.LookPath("claude"))
+	TickTimeout time.Duration // per-tick deadline; default 5m
 	// MaxPerHour caps autonomous ticks; default 30. Exceeded ticks
 	// are skipped and counted but emit no claude invocation. A pause
 	// flag and stop() are the override knobs.
@@ -170,7 +178,74 @@ func New(cfg Config) *Pulse {
 	p := &Pulse{cfg: cfg, nudgeCh: make(chan string, 32)}
 	p.wakePrompt.Store(loadWakePromptFile(cfg.WakePromptFile))
 	p.intervalNs.Store(int64(cfg.Interval))
+	// Persisted config wins over cfg defaults so a daemon restart
+	// honors the last-set interval / wake prompt without operator
+	// intervention. Missing or malformed → fall back to defaults.
+	if loaded, ok := loadPulseConfigFile(cfg.ConfigPath); ok {
+		if loaded.Interval != "" {
+			if d, err := time.ParseDuration(loaded.Interval); err == nil && d > 0 {
+				p.intervalNs.Store(int64(d))
+			}
+		}
+		if wp := strings.TrimSpace(loaded.WakePrompt); wp != "" {
+			p.wakePrompt.Store(wp)
+		}
+	}
 	return p
+}
+
+// persistedConfig is the on-disk shape of pulse_config.json. Interval
+// is serialized as a Go duration string ("1h0m0s") to match the
+// dashboard's wire format; WakePrompt is the trimmed override text, or
+// empty to signal "use the built-in default."
+type persistedConfig struct {
+	Interval   string `json:"interval,omitempty"`
+	WakePrompt string `json:"wake_prompt,omitempty"`
+}
+
+// loadPulseConfigFile reads the on-disk pulse config. A missing file
+// returns ok=false with no error log; a malformed file is logged and
+// also returns ok=false — callers fall back to cfg defaults in both
+// cases.
+func loadPulseConfigFile(path string) (persistedConfig, bool) {
+	if path == "" {
+		return persistedConfig{}, false
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return persistedConfig{}, false
+	}
+	var cfg persistedConfig
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "[pulse] malformed config %s: %v\n", path, err)
+		return persistedConfig{}, false
+	}
+	return cfg, true
+}
+
+// persistConfig atomically writes the active interval + wake-prompt
+// override to ConfigPath. WakePrompt is empty when the active prompt
+// equals the built-in default so a missing file and "use default" are
+// indistinguishable on reload. No-op when ConfigPath is empty.
+func (p *Pulse) persistConfig() error {
+	if p.cfg.ConfigPath == "" {
+		return nil
+	}
+	wp := ""
+	if p.IsCustomWakePrompt() {
+		wp = p.WakePrompt()
+	}
+	body, err := json.MarshalIndent(persistedConfig{
+		Interval:   p.Interval().String(),
+		WakePrompt: wp,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p.cfg.ConfigPath), 0o700); err != nil {
+		return err
+	}
+	return atomicWrite(p.cfg.ConfigPath, body)
 }
 
 // loadWakePromptFile returns the file's trimmed contents when present
@@ -223,25 +298,30 @@ func DefaultWakePrompt() string { return defaultWakePrompt }
 // invokeClaude call observes the new value.
 func (p *Pulse) SetWakePrompt(text string) error {
 	trimmed := strings.TrimSpace(text)
+	var fileErr error
 	if trimmed == "" {
 		p.wakePrompt.Store(defaultWakePrompt)
-		if p.cfg.WakePromptFile == "" {
-			return nil
+		if p.cfg.WakePromptFile != "" {
+			if err := os.Remove(p.cfg.WakePromptFile); err != nil && !os.IsNotExist(err) {
+				fileErr = err
+			}
 		}
-		err := os.Remove(p.cfg.WakePromptFile)
-		if err != nil && !os.IsNotExist(err) {
-			return err
+	} else {
+		p.wakePrompt.Store(trimmed)
+		if p.cfg.WakePromptFile != "" {
+			if err := os.MkdirAll(filepath.Dir(p.cfg.WakePromptFile), 0o700); err == nil {
+				if err := os.WriteFile(p.cfg.WakePromptFile, []byte(trimmed+"\n"), 0o600); err != nil {
+					fileErr = err
+				}
+			} else {
+				fileErr = err
+			}
 		}
-		return nil
 	}
-	p.wakePrompt.Store(trimmed)
-	if p.cfg.WakePromptFile == "" {
-		return nil
+	if err := p.persistConfig(); err != nil && fileErr == nil {
+		fileErr = err
 	}
-	if err := os.MkdirAll(filepath.Dir(p.cfg.WakePromptFile), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(p.cfg.WakePromptFile, []byte(trimmed+"\n"), 0o600)
+	return fileErr
 }
 
 // Start kicks off the periodic loop AND the audit-event debouncer.
@@ -359,10 +439,12 @@ func (p *Pulse) Busy() bool {
 }
 
 // SetInterval changes the cadence. If Pulse is already running, the
-// change takes effect on the next tick wakeup.
+// change takes effect on the next tick wakeup. The new value is
+// persisted to ConfigPath so a daemon restart picks it up.
 func (p *Pulse) SetInterval(d time.Duration) {
 	if d > 0 {
 		p.intervalNs.Store(int64(d))
+		_ = p.persistConfig()
 	}
 }
 
@@ -376,10 +458,15 @@ func (p *Pulse) UpdateConfig(interval time.Duration, wakePrompt *string) error {
 	if interval > 0 {
 		p.intervalNs.Store(int64(interval))
 	}
-	if wakePrompt == nil {
-		return nil
+	if wakePrompt != nil {
+		// SetWakePrompt persists the combined config, so the new
+		// interval lands on disk in the same write.
+		return p.SetWakePrompt(*wakePrompt)
 	}
-	return p.SetWakePrompt(*wakePrompt)
+	if interval > 0 {
+		return p.persistConfig()
+	}
+	return nil
 }
 
 // Paused returns true if the pause flag file exists.

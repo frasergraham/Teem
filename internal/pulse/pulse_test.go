@@ -945,6 +945,162 @@ func TestPulse_SessionTickWhenChatNotLive(t *testing.T) {
 	}
 }
 
+// TestPulse_LoadsIntervalFromConfigFile guards the t-331c570d bug fix:
+// the interval persisted to ConfigPath must win over cfg.Interval on
+// construction so daemon restarts preserve operator overrides.
+func TestPulse_LoadsIntervalFromConfigFile(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "pulse_config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"interval":"1h0m0s","wake_prompt":"Scan and report."}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		TeamName:    "x",
+		LoadSession: func() (string, bool, error) { return "", false, nil },
+		PauseFile:   filepath.Join(dir, "paused"),
+		ConfigPath:  cfgPath,
+		MCPConfig:   filepath.Join(dir, "mcp.json"),
+		RepoRoot:    dir,
+		Audit:       tempSink(t),
+		Interval:    5 * time.Minute, // cfg default — disk value should beat this
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+
+	p := New(cfg)
+	if got := p.Interval(); got != time.Hour {
+		t.Errorf("Interval = %s, want 1h (loaded from disk)", got)
+	}
+	if got := p.WakePrompt(); got != "Scan and report." {
+		t.Errorf("WakePrompt = %q, want disk-loaded override", got)
+	}
+}
+
+// TestPulse_MissingConfigFileFallsBackToCfgInterval ensures a fresh
+// install (no on-disk config yet) uses cfg.Interval rather than
+// crashing or zero-defaulting.
+func TestPulse_MissingConfigFileFallsBackToCfgInterval(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:    "x",
+		LoadSession: func() (string, bool, error) { return "", false, nil },
+		PauseFile:   filepath.Join(dir, "paused"),
+		ConfigPath:  filepath.Join(dir, "missing.json"),
+		MCPConfig:   filepath.Join(dir, "mcp.json"),
+		RepoRoot:    dir,
+		Audit:       tempSink(t),
+		Interval:    7 * time.Minute,
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+
+	p := New(cfg)
+	if got := p.Interval(); got != 7*time.Minute {
+		t.Errorf("Interval = %s, want 7m (cfg default)", got)
+	}
+	if got := p.WakePrompt(); got != defaultWakePrompt {
+		t.Errorf("WakePrompt = %q, want defaultWakePrompt", got)
+	}
+}
+
+// TestPulse_MalformedConfigFileFallsBackToCfgInterval verifies the
+// daemon doesn't crash on garbled JSON (a hand-edited file, a partial
+// write that wasn't atomic, etc.). cfg.Interval is used instead.
+func TestPulse_MalformedConfigFileFallsBackToCfgInterval(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "pulse_config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{not valid json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		TeamName:    "x",
+		LoadSession: func() (string, bool, error) { return "", false, nil },
+		PauseFile:   filepath.Join(dir, "paused"),
+		ConfigPath:  cfgPath,
+		MCPConfig:   filepath.Join(dir, "mcp.json"),
+		RepoRoot:    dir,
+		Audit:       tempSink(t),
+		Interval:    3 * time.Minute,
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+
+	p := New(cfg)
+	if got := p.Interval(); got != 3*time.Minute {
+		t.Errorf("Interval on malformed config = %s, want 3m (cfg default)", got)
+	}
+}
+
+// TestPulse_SetIntervalPersists exercises the full restart cycle: a
+// SetInterval call writes the new cadence to disk, and a fresh Pulse
+// constructed against the same ConfigPath loads it.
+func TestPulse_SetIntervalPersists(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:    "x",
+		LoadSession: func() (string, bool, error) { return "", false, nil },
+		PauseFile:   filepath.Join(dir, "paused"),
+		ConfigPath:  filepath.Join(dir, "pulse_config.json"),
+		MCPConfig:   filepath.Join(dir, "mcp.json"),
+		RepoRoot:    dir,
+		Audit:       tempSink(t),
+		Interval:    5 * time.Minute,
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+	p := New(cfg)
+
+	p.SetInterval(time.Hour)
+	if got := p.Interval(); got != time.Hour {
+		t.Fatalf("Interval after Set = %s, want 1h", got)
+	}
+	if _, err := os.Stat(cfg.ConfigPath); err != nil {
+		t.Fatalf("pulse_config.json should exist after SetInterval: %v", err)
+	}
+
+	// Daemon restart: brand-new Pulse with cfg.Interval still 5m must
+	// honor the persisted 1h.
+	p2 := New(cfg)
+	if got := p2.Interval(); got != time.Hour {
+		t.Errorf("post-restart Interval = %s, want 1h (loaded from disk)", got)
+	}
+}
+
+// TestPulse_SetWakePromptPersistsConfig verifies that mutating the
+// wake prompt also writes to ConfigPath, so a daemon restart that
+// reads ConfigPath (not the legacy txt file) recovers the override.
+func TestPulse_SetWakePromptPersistsConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		TeamName:       "x",
+		LoadSession:    func() (string, bool, error) { return "", false, nil },
+		PauseFile:      filepath.Join(dir, "paused"),
+		WakePromptFile: filepath.Join(dir, "pulse-wake.txt"),
+		ConfigPath:     filepath.Join(dir, "pulse_config.json"),
+		MCPConfig:      filepath.Join(dir, "mcp.json"),
+		RepoRoot:       dir,
+		Audit:          tempSink(t),
+	}
+	_ = WriteMCPConfig(cfg.MCPConfig, "http://x/mcp", "x", "http://x", "")
+	p := New(cfg)
+	if err := p.SetWakePrompt("Scan loudly."); err != nil {
+		t.Fatalf("SetWakePrompt: %v", err)
+	}
+
+	loaded, ok := loadPulseConfigFile(cfg.ConfigPath)
+	if !ok {
+		t.Fatalf("pulse_config.json should exist + parse")
+	}
+	if loaded.WakePrompt != "Scan loudly." {
+		t.Errorf("persisted WakePrompt = %q, want %q", loaded.WakePrompt, "Scan loudly.")
+	}
+
+	// Clearing writes wake_prompt:"" and the next New picks default.
+	if err := p.SetWakePrompt(""); err != nil {
+		t.Fatalf("SetWakePrompt clear: %v", err)
+	}
+	loaded, ok = loadPulseConfigFile(cfg.ConfigPath)
+	if !ok || loaded.WakePrompt != "" {
+		t.Errorf("after clear: ok=%v WakePrompt=%q, want empty", ok, loaded.WakePrompt)
+	}
+}
+
 // TestPulse_TickStillFiresWhenInvokedDirectlyUnderChannelsLive guards
 // that the gating policy lives in the timer loop / daemon handler, not
 // inside Tick itself. Direct programmatic Tick callers (tests, future
