@@ -2367,6 +2367,15 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		}
 	}
 
+	// Orphan-job sweep: catch job_received events that never got a
+	// terminal partner (worker SIGKILL with no worker_stopped emit,
+	// audit-post lost mid-flight, etc.) so dangling worker rows in
+	// the SPA and JobTaskIndex entries get cleaned up. Idempotent —
+	// the synthetic interrupt itself terminates the job in the log,
+	// so subsequent ticks see nothing new.
+	teamID := t.ID
+	safeGo("orphan-sweep:"+teamID, func() { runOrphanJobSweep(d.baseCtx, teamID, auditSink) })
+
 	return &registeredTeam{
 		team:      t,
 		mcp:       srv,
