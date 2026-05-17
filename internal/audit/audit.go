@@ -113,6 +113,14 @@ const (
 	// recent-burst helper can scope past turns. AgentID matches the
 	// surface ("leader-chat" or "leader-telegram").
 	KindLeaderChatTurn Kind = "leader_chat_turn"
+	// KindTaskCreated is emitted by the add_task MCP tool after a
+	// successful plan-side create. Meta carries task_id, title, origin
+	// (operator|leader|project_manager|system), parent_id (when set),
+	// and the creator's agent_id. Surfaces the "how did this task come
+	// into existence" row in the task-detail modal so the participation
+	// log starts at the moment of creation rather than the first stage
+	// change.
+	KindTaskCreated Kind = "task_created"
 	// KindLeaderStatusChanged is emitted by the update_leader_status
 	// MCP tool after a successful write to the per-team leader-status
 	// board. Meta carries agent_id, text, current_task_ids (when

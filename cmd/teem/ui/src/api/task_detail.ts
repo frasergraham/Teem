@@ -11,6 +11,11 @@ export interface TaskRecord {
   stage: string;
   assigned_to?: string;
   notes?: string;
+  // Origin records who filed the task. Legacy tasks default to
+  // "operator" server-side; SPA falls back to "operator" too when the
+  // field is missing for very old snapshots.
+  origin?: string;
+  parent_id?: string;
   evidence?: string[];
   created_at: string;
   updated_at: string;
