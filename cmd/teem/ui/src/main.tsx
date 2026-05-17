@@ -11,8 +11,11 @@ const TEAM_ID_RE = /\/teams\/(t-[a-f0-9]+|[a-z0-9-]+)(?:\/v2)?(?:\/|$)/;
 
 // TRANSCRIPT_RE matches /teams/<id>/transcripts/<agent>/<job>. The id
 // segment is the same shape as the dashboard route; agent/job allow
-// the same chars the server's isSafeID accepts ([A-Za-z0-9._-]+).
-const TRANSCRIPT_RE = /^\/teams\/(t-[a-f0-9]+|[a-z0-9-]+)\/transcripts\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/?$/;
+// the same chars the server's isSafeID accepts ([A-Za-z0-9._-]+) but
+// the `(?!\.{1,2}\/)` negative lookahead mirrors isSafeID's explicit
+// rejection of the `.` and `..` literals so the SPA never sends the
+// daemon a path-escape that the server would have to bounce.
+const TRANSCRIPT_RE = /^\/teams\/(t-[a-f0-9]+|[a-z0-9-]+)\/transcripts\/(?!\.{1,2}\/)([A-Za-z0-9._-]+)\/(?!\.{1,2}(?:\/|$))([A-Za-z0-9._-]+)\/?$/;
 
 function parseTeamID(pathname: string): string | null {
   const m = pathname.match(TEAM_ID_RE);

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { marked } from 'marked';
 
 import { DashboardTask, useTeamStore } from '../store/team';
+import { renderMarkdownSafe } from '../lib/markdown';
 import {
   TaskDetailPayload,
   TaskJob,
@@ -70,7 +70,7 @@ export function TaskDetailModal({ task, onClose }: Props) {
     return () => ac.abort();
   }, [teamID, task.id]);
 
-  const notesHTML = renderNotes(task.notes);
+  const notesHTML = renderMarkdownSafe(task.notes);
 
   return (
     <div
@@ -432,15 +432,3 @@ function formatTime(ts: string): string {
   return `${y}-${m}-${day} ${hh}:${mm} UTC`;
 }
 
-function renderNotes(text: string | undefined): string {
-  if (!text) return '';
-  try {
-    return marked.parse(text, { async: false }) as string;
-  } catch {
-    return escapeHTML(text);
-  }
-}
-
-function escapeHTML(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}

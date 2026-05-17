@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { marked } from 'marked';
 
-import { TranscriptEvent, parseNDJSON } from '../lib/transcript';
+import { TranscriptEvent, parseNDJSON, truncate } from '../lib/transcript';
+import { renderMarkdownSafe } from '../lib/markdown';
 
 // TranscriptPage renders a single worker job's NDJSON transcript as a
 // proper HTML page. It is served at /teams/<id>/transcripts/<a>/<j>,
@@ -176,7 +176,7 @@ function EventContent({ ev }: { ev: TranscriptEvent }) {
       <>
         <div
           className="transcript-event-text transcript-markdown"
-          dangerouslySetInnerHTML={{ __html: renderMarkdown(ev.text) }}
+          dangerouslySetInnerHTML={{ __html: renderMarkdownSafe(ev.text) }}
         />
         <RawDetails raw={ev.raw} />
       </>
@@ -187,7 +187,7 @@ function EventContent({ ev }: { ev: TranscriptEvent }) {
       <>
         <div className="transcript-event-text transcript-tool-result">
           <span className="transcript-tool-result-label">tool_result:</span>{' '}
-          <code>{previewLine(ev.toolResultPreview)}</code>
+          <code>{truncate(ev.toolResultPreview, 200)}</code>
         </div>
         {ev.toolResultPreview.length > 200 && (
           <details className="transcript-tool-result-full">
@@ -241,30 +241,12 @@ function RawDetails({ raw }: { raw: string }) {
   );
 }
 
-function previewLine(s: string): string {
-  if (s.length <= 200) return s;
-  return s.slice(0, 199) + '…';
-}
-
 function pretty(raw: string): string {
   try {
     return JSON.stringify(JSON.parse(raw), null, 2);
   } catch {
     return raw;
   }
-}
-
-function renderMarkdown(text: string): string {
-  if (!text) return '';
-  try {
-    return marked.parse(text, { async: false }) as string;
-  } catch {
-    return escapeHTML(text);
-  }
-}
-
-function escapeHTML(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function formatBytes(n: number): string {
