@@ -5,9 +5,9 @@ import {
   useState,
   KeyboardEvent,
 } from 'react';
-import { marked } from 'marked';
 import { useTeamStore } from '../store/team';
 import { streamChat } from '../api/chat';
+import { renderMarkdownSafe } from '../lib/markdown';
 
 // ChatPanel is a component-local, focus-stable replacement for the SSR
 // chat block in cmd/teem/ui_dashboard.html. The SSR version loses
@@ -302,7 +302,7 @@ function MessageRow({ msg }: { msg: ChatMessage }) {
             // Leader output is markdown. marked emits HTML; we trust
             // the leader's own output since the daemon is the only
             // writer on this channel (localhost / tailnet boundary).
-            dangerouslySetInnerHTML={{ __html: renderLeaderMarkdown(msg.text) }}
+            dangerouslySetInnerHTML={{ __html: renderMarkdownSafe(msg.text) }}
           />
         ) : (
           // Operator turns are plain text — preserves whitespace and
@@ -315,23 +315,6 @@ function MessageRow({ msg }: { msg: ChatMessage }) {
       </div>
     </div>
   );
-}
-
-function renderLeaderMarkdown(text: string): string {
-  if (!text) return '';
-  try {
-    // marked.parse with async:false returns a string synchronously.
-    return marked.parse(text, { async: false }) as string;
-  } catch {
-    return escapeHTML(text);
-  }
-}
-
-function escapeHTML(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 }
 
 function fmtStamp(d: Date): string {

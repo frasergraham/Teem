@@ -1,5 +1,4 @@
 import { useCallback, useState } from 'react';
-import { marked } from 'marked';
 import {
   AwaitingApprovalTask,
   PlanFile,
@@ -8,6 +7,7 @@ import {
   useTeamStore,
 } from '../store/team';
 import { approveTask, commentTask, rejectTask } from '../api/control';
+import { renderMarkdownSafe } from '../lib/markdown';
 
 // ApprovalCard renders the top-of-page awaiting-approval block: one
 // card per task in snapshot.tasks.awaiting_approval. Buttons fire the
@@ -179,7 +179,7 @@ function ApprovalRow({ task, teamID }: { task: AwaitingApprovalTask; teamID: str
           <summary>Brief from leader (details collapsed)</summary>
           <div
             className="brief-body"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(task.notes) }}
+            dangerouslySetInnerHTML={{ __html: renderMarkdownSafe(task.notes) }}
           />
         </details>
       )}
@@ -264,19 +264,6 @@ function PlanFileRow({ file }: { file: PlanFile }) {
       )}
     </details>
   );
-}
-
-function renderMarkdown(text: string): string {
-  if (!text) return '';
-  try {
-    return marked.parse(text, { async: false }) as string;
-  } catch {
-    return escapeHTML(text);
-  }
-}
-
-function escapeHTML(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function toMessage(e: unknown): string {
