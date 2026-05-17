@@ -139,7 +139,7 @@ func TestAPITaskDetail_FullJoin(t *testing.T) {
 	if len(p.Jobs) != 1 {
 		t.Fatalf("jobs len=%d", len(p.Jobs))
 	}
-	wantURL := "/api/teams/alpha/transcripts/ada/j-1"
+	wantURL := "/teams/alpha/transcripts/ada/j-1"
 	if p.Jobs[0].TranscriptURL != wantURL {
 		t.Errorf("transcript_url=%q want %q", p.Jobs[0].TranscriptURL, wantURL)
 	}

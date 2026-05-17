@@ -3032,7 +3032,17 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		r2.URL.Path = "/audit"
 		rt.auditH.ServeHTTP(w, r2)
 	case strings.HasPrefix(suffix, "/transcripts/"):
-		d.handleTranscripts(w, r, rt, strings.TrimPrefix(suffix, "/transcripts/"))
+		// GET /teams/<id>/transcripts/<agent>/<job> serves the SPA so a
+		// browser following the participation-log link lands on a
+		// rendered transcript page (the SPA fetches the raw NDJSON from
+		// the /api/ path under the hood). POST stays on the bearer-auth
+		// mirror path — workers/leader writing transcripts back to disk.
+		rest := strings.TrimPrefix(suffix, "/transcripts/")
+		if r.Method == http.MethodGet && isTranscriptPageRest(rest) {
+			serveSPA(w, r, "")
+			return
+		}
+		d.handleTranscripts(w, r, rt, rest)
 	case suffix == "/channel-events" || strings.HasPrefix(suffix, "/channel-events?"):
 		d.handleChannelEvents(w, r, rt)
 	case suffix == "/v2" || suffix == "/v2/" || strings.HasPrefix(suffix, "/v2/"):
@@ -3056,6 +3066,24 @@ var validIDRegexp = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func isSafeID(s string) bool {
 	return validIDRegexp.MatchString(s) && s != "." && s != ".."
+}
+
+// isTranscriptPageRest reports whether the path tail after
+// "/teams/<id>/transcripts/" is the two-segment "<agent>/<job>" form
+// the SPA's <TranscriptPage> renders. Anything else — sub-paths
+// (/watch), missing segments, malformed ids — falls through to the
+// legacy bearer-auth mirror handler so we don't mask 400s with an
+// SPA shell.
+func isTranscriptPageRest(rest string) bool {
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return false
+	}
+	agentID, jobID := rest[:slash], rest[slash+1:]
+	if jobID == "" || strings.Contains(jobID, "/") {
+		return false
+	}
+	return isSafeID(agentID) && isSafeID(jobID)
 }
 
 // handleTranscripts implements GET/POST /teams/<name>/transcripts/<agent>/<job>.
