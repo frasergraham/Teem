@@ -23,7 +23,7 @@ export interface TranscriptEvent {
   ts: number;                         // arrival time (wall clock, ms)
   toolName?: string;                  // populated when kind=='assistant' and the turn is a tool_use
   toolInput?: string;                 // pretty-printed JSON of the tool call's input
-  toolResultPreview?: string;         // populated when kind=='user' and the turn is a tool_result
+  toolResultPreview?: string;         // populated when kind=='tool' and the turn is a tool_result
 }
 
 // parseStreamLine maps one claude stream-json line to a TranscriptEvent.
@@ -58,7 +58,13 @@ export function parseStreamLine(raw: string): TranscriptEvent | null {
       const msg = obj.message as Record<string, unknown> | undefined;
       if (msg) {
         const tr = extractToolResultPreview(msg);
-        if (tr) ev.toolResultPreview = tr;
+        if (tr) {
+          // tool_result rides on a `user` stream-json row but is really
+          // the tool side of the conversation — surface as kind='tool'
+          // so renderers and the .watch-event.tool styling pick it up.
+          ev.kind = 'tool';
+          ev.toolResultPreview = tr;
+        }
       }
       return ev;
     }

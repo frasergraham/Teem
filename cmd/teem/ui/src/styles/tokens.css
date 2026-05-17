@@ -14,6 +14,7 @@
   --accent: #15803d;
   --warn: #b45309;
   --error: #b91c1c;
+  --c-error: #b91c1c;
   --pill-bg: #f5f5f4;
   --code-bg: #fafaf9;
   --info: #2563eb;
@@ -29,6 +30,7 @@
     --accent: #22c55e;
     --warn: #f59e0b;
     --error: #ef4444;
+    --c-error: #ef4444;
     --pill-bg: #292524;
     --code-bg: #1c1917;
     --info: #60a5fa;
@@ -706,7 +708,8 @@ table.tasks .when { color: var(--c-text-muted); font-size: 12px; white-space: no
 .chat-msg.leader .body { border-top-left-radius: 2px; }
 .chat-msg.leader.pending .body { color: var(--c-text-dim); font-style: italic; }
 .chat-msg.error .body {
-  border-color: rgba(239,68,68,0.40); color: var(--c-error-text);
+  border-color: color-mix(in srgb, var(--c-error) 40%, transparent);
+  color: var(--c-error-text);
 }
 .chat-msg .stamp {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -1420,9 +1423,9 @@ table.tasks tbody tr.task-row:focus-visible {
   color: var(--c-text-muted, var(--muted));
 }
 .watch-state.error {
-  background: rgba(220, 80, 80, 0.10);
-  color: #ef6868;
-  border-color: #ef6868;
+  background: color-mix(in srgb, var(--c-error) 10%, transparent);
+  color: var(--c-error);
+  border-color: var(--c-error);
 }
 .watch-events {
   flex: 1 1 auto;
@@ -1484,10 +1487,10 @@ table.tasks tbody tr.task-row:focus-visible {
   color: var(--c-role-integrator, var(--c-azure));
 }
 .watch-event.error {
-  border-left-color: #ef6868;
-  background: rgba(220, 80, 80, 0.08);
+  border-left-color: var(--c-error);
+  background: color-mix(in srgb, var(--c-error) 8%, transparent);
 }
-.watch-event.error .watch-event-kind { color: #ef6868; }
+.watch-event.error .watch-event-kind { color: var(--c-error); }
 .watch-event.unknown {
   color: var(--c-text-dim);
   font-style: italic;
@@ -1541,7 +1544,7 @@ table.tasks tbody tr.task-row:focus-visible {
   font-style: italic;
 }
 .transcript-error {
-  color: #ef6868;
+  color: var(--c-error);
   font-style: normal;
 }
 .transcript-empty {
