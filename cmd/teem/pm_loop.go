@@ -63,6 +63,49 @@ the team's workflow state. In particular, never move a task in stage=ready
 back to specced or proposed — that is the operator's pre-flight signal.
 The leader owns those decisions.`
 
+// pmLoopDecision is the pure policy buildTeamServices consults to
+// decide whether to start the per-team PM goroutine. It returns the
+// effective interval, a boolean run flag, and an optional warn string
+// for the caller to log on stderr.
+//
+// Rules:
+//   - Tracker == nil or Type == "" → no loop, no warn (team is not
+//     tracker-configured; the leader prompt's PM mention is moot).
+//   - Tracker set but no project_manager archetype on the team → no
+//     loop, warn message returned so the operator notices the gap.
+//     (handleRegister/restoreTeams synth the PM archetype before
+//     buildTeamServices; this branch is the defensive fallback if
+//     the synth ever silently fails to land.)
+//   - PollInterval == 0 → default to pmLoopDefaultInterval (1h). The
+//     YAML zero value collapses "unset" and "explicit 0" — we treat
+//     both as "use the default".
+//   - PollInterval < 0 → no loop, no warn (operator explicitly
+//     disabled scheduled ticks; on-demand spawn still works).
+//   - Otherwise → run = true with the chosen interval.
+func pmLoopDecision(t *team.Team) (interval time.Duration, run bool, warn string) {
+	if t == nil || t.Tracker == nil || t.Tracker.Type == "" {
+		return 0, false, ""
+	}
+	hasPM := false
+	for _, a := range t.Archetypes {
+		if a.Role == team.PMArchetypeRole {
+			hasPM = true
+			break
+		}
+	}
+	if !hasPM {
+		return 0, false, fmt.Sprintf("tracker.type=%q but no %s archetype declared; PM loop not started", t.Tracker.Type, team.PMArchetypeRole)
+	}
+	interval = t.Tracker.PollInterval
+	if interval == 0 {
+		interval = pmLoopDefaultInterval
+	}
+	if interval <= 0 {
+		return 0, false, ""
+	}
+	return interval, true, ""
+}
+
 // pmSpawner is the slice of the agent.Spawner surface the PM loop
 // drives. Pulled out as an interface so the unit test can inject a
 // recording fake without standing up a real spawner / provisioner /

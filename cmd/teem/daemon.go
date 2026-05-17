@@ -400,6 +400,19 @@ type registeredTeam struct {
 	// docs/wake-strategy.md §5.
 	detectionMu  sync.Mutex
 	channelsLive bool
+
+	// pmCancel cancels the per-team project-manager scheduled tick
+	// loop. nil when the team is not tracker-configured (or the
+	// PM archetype is missing — see pmLoopDecision). Set by
+	// buildTeamServices and called by the team-unregister path and
+	// daemon shutdown teardown BEFORE the team is removed from
+	// d.teams so the goroutine cannot observe a stale registry.
+	pmCancel context.CancelFunc
+	// pmDone is closed by the PM-loop goroutine when it returns.
+	// Used by the teardown paths to wait for the goroutine to exit
+	// before closing the team's audit sink (which the loop writes
+	// to via writeAudit).
+	pmDone <-chan struct{}
 }
 
 // teamView pairs a stable *registeredTeam pointer with a snapshot of
@@ -718,6 +731,12 @@ func serveDaemon(ctx context.Context, df *daemonFlags) error {
 		// 3. Final teardown.
 		d.mu.Lock()
 		for _, rt := range d.teams {
+			// PM-loop first: it writes to the audit sink we close
+			// below and pokes the spawner we Stop next. d.baseCtx
+			// is already cancelled by this point (the outer select
+			// fired on ctx.Done), so the goroutine has likely already
+			// exited — stopPMLoop just waits on the done channel.
+			stopPMLoop(rt)
 			// Daemon shutdown: preserve the pulse running-flag so
 			// `teem start` auto-resumes Pulse on the next boot. Operator
 			// opt-out goes through `teem pulse stop` (the flag-clearing
@@ -1504,6 +1523,10 @@ func (d *daemon) handleControlTeamsItem(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// Stop the PM-loop goroutine BEFORE removing from d.teams so
+		// the goroutine can't observe a half-torn-down team. The audit
+		// sink and spawner it holds onto are still alive at this point.
+		stopPMLoop(rt)
 		d.mu.Lock()
 		delete(d.teams, id)
 		d.mu.Unlock()
@@ -2346,25 +2369,31 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 	}
 	safeGo("archmem.summarizer:"+t.ID, func() { _ = summarizer.Run(archMemCtx) })
 
-	// Scheduled project-manager tick. Only fires for tracker-configured
-	// teams (the PM archetype was synthesised by MaybePMArchetype
-	// earlier in the same code path); a zero/negative PollInterval
-	// disables the loop while leaving the on-demand leader spawn alive.
-	if t.Tracker != nil && t.Tracker.Type != "" {
-		interval := t.Tracker.PollInterval
-		if interval == 0 {
-			interval = pmLoopDefaultInterval
+	// Scheduled project-manager tick. pmLoopDecision encapsulates the
+	// policy (tracker present + PM archetype present + positive
+	// interval); we only own goroutine plumbing + shutdown hooks
+	// here. pmCancel and pmDone get stashed on registeredTeam so the
+	// unregister path and daemon shutdown can stop the loop cleanly
+	// BEFORE the team is removed from d.teams.
+	var pmCancel context.CancelFunc
+	var pmDone chan struct{}
+	if interval, run, warn := pmLoopDecision(t); warn != "" {
+		fmt.Fprintf(os.Stderr, "[teemd] %s: %s\n", t.Name, warn)
+	} else if run {
+		fmt.Fprintf(os.Stderr, "[teemd] %s: pm-loop interval=%s\n", t.Name, interval)
+		pmCtx, cancel := context.WithCancel(d.baseCtx)
+		pmCancel = cancel
+		pmDone = make(chan struct{})
+		pmCfg := PMLoopConfig{
+			TeamName: t.Name,
+			Interval: interval,
+			Spawner:  spawner,
+			Audit:    auditSink,
 		}
-		if interval > 0 {
-			fmt.Fprintf(os.Stderr, "[teemd] %s: pm-loop interval=%s\n", t.Name, interval)
-			pmCfg := PMLoopConfig{
-				TeamName: t.Name,
-				Interval: interval,
-				Spawner:  spawner,
-				Audit:    auditSink,
-			}
-			safeGo("pm.loop:"+t.ID, func() { pmCfg.Loop(d.baseCtx) })
-		}
+		safeGo("pm.loop:"+t.ID, func() {
+			defer close(pmDone)
+			pmCfg.Loop(pmCtx)
+		})
 	}
 
 	// Orphan-job sweep: catch job_received events that never got a
@@ -2402,7 +2431,31 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		repoRoot:       repoRoot,
 		channelBus:     chBus,
 		wsbus:          wsB,
+		pmCancel:       pmCancel,
+		pmDone:         pmDone,
 	}, nil
+}
+
+// stopPMLoop cancels the team's PM-loop goroutine (if any) and waits
+// for it to exit before returning. Safe to call multiple times; safe
+// when the team is not tracker-configured (pmCancel is nil). Bounded
+// by a generous timeout so a wedged goroutine cannot block daemon
+// shutdown or a team-unregister request indefinitely.
+func stopPMLoop(rt *registeredTeam) {
+	if rt == nil || rt.pmCancel == nil {
+		return
+	}
+	rt.pmCancel()
+	rt.pmCancel = nil
+	if rt.pmDone == nil {
+		return
+	}
+	select {
+	case <-rt.pmDone:
+	case <-time.After(30 * time.Second):
+		fmt.Fprintf(os.Stderr, "[teemd] %s: pm-loop did not exit within 30s\n", rt.team.Name)
+	}
+	rt.pmDone = nil
 }
 
 // defaultLeaderStatusPath returns the per-team leader-status board
