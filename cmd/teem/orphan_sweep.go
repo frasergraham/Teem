@@ -16,6 +16,12 @@ const (
 	// orphanJobStaleAfter is the age past which an unmatched
 	// job_received is considered orphaned and gets a synthetic
 	// job_interrupted emitted on its behalf.
+	//
+	// sweepOnce queries the audit log over a 2*orphanJobStaleAfter (4h)
+	// window, so jobs orphaned more than 4h ago fall outside the query
+	// and are silently skipped. Prior-shutdown orphans are caught at
+	// startup by inFlightLog.Outstanding() reconcile; this 4h ceiling
+	// only matters for jobs orphaned during a long-running daemon.
 	orphanJobStaleAfter = 2 * time.Hour
 )
 
@@ -26,6 +32,14 @@ const (
 // over the same state emit nothing new.
 //
 // Exits when ctx is cancelled (daemon shutdown).
+//
+// Bound to d.baseCtx (daemon-scoped): if a team is unregistered while
+// the daemon keeps running, this ticker would keep firing against a
+// closed sink. Team-unregister is currently a no-op path so this
+// never fires in practice — documented, not refactored.
+//
+// Single-goroutine-per-team: buildTeamServices is the only caller and
+// handleRegister/restoreTeams never both fire for the same team_id.
 func runOrphanJobSweep(ctx context.Context, teamID string, sink audit.Sink) {
 	t := time.NewTicker(orphanJobSweepInterval)
 	defer t.Stop()
@@ -79,6 +93,9 @@ type orphanJob struct {
 // without a matching terminal partner (job_complete, job_error, or
 // job_interrupted). Returns the subset whose received timestamp is
 // older than now - staleAfter. Pure — no I/O, easy to unit-test.
+//
+// Assumes events arrive in timestamp order; an out-of-order terminal
+// seen before its job_received would false-positive an orphan.
 func findOrphans(events []audit.Event, now time.Time, staleAfter time.Duration) []orphanJob {
 	type received struct {
 		agentID string
