@@ -64,6 +64,9 @@ export function WatchTranscriptModal({ agentID, jobID, persona, onClose }: Props
   // unmount and on terminal events.
   useEffect(() => {
     if (!url) return;
+    // Reset on URL change so a re-open (or future agent/job swap) starts
+    // with a clean event list instead of inheriting the previous run.
+    setEvents([]);
     const es = new EventSource(url);
     const append = (parsed: TranscriptEvent) => {
       setEvents((prev) => prev.concat(parsed));
@@ -152,7 +155,7 @@ export function WatchTranscriptModal({ agentID, jobID, persona, onClose }: Props
           )}
           {events.map((e, i) => (
             <div key={i} className={`watch-event ${e.kind}`} title={e.raw}>
-              <span className="watch-event-kind">{e.kind}</span>
+              <span className="watch-event-kind">{watchKindLabel(e)}</span>
               <span className="watch-event-text">{e.text}</span>
             </div>
           ))}
@@ -172,6 +175,16 @@ export function WatchTranscriptModal({ agentID, jobID, persona, onClose }: Props
       </div>
     </div>
   );
+}
+
+// watchKindLabel adds a direction hint to the `tool` kind so the
+// caller (tool_use, with a name) reads differently from the response
+// (tool_result, with a preview).
+function watchKindLabel(e: TranscriptEvent): string {
+  if (e.kind !== 'tool') return e.kind;
+  if (e.toolName) return `→ ${e.toolName}`;
+  if (e.toolResultPreview !== undefined) return '← result';
+  return 'tool';
 }
 
 function watchStateLabel(s: 'streaming' | 'done' | 'error'): string {

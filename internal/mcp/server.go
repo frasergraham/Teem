@@ -334,6 +334,8 @@ func (s *Server) registerTools() {
 			mcpgo.WithString("parent_id", mcpgo.Description("Optional parent task id for hierarchies.")),
 			mcpgo.WithString("depends_on", mcpgo.Description("Optional comma-separated task ids this task is blocked on.")),
 			mcpgo.WithString("notes", mcpgo.Description("Optional markdown notes the leader keeps as working memory.")),
+			mcpgo.WithString("origin", mcpgo.Enum("operator", "leader", "project_manager", "system"), mcpgo.Description("Who is filing this task. Pass `operator` when the user explicitly asked for the work; pass `leader` for tasks you decided to file on your own (cleanups, review follow-ups). Defaults by caller role: leader → `leader`, project_manager → `project_manager`. The first row of the task's participation log uses this to render \"<Origin> created this task\".")),
+			mcpgo.WithString("agent_id", mcpgo.Description("Optional. Defaults to `leader`. Identifies the calling agent for the synthetic task_created audit event and selects the default origin.")),
 		),
 		s.handleAddTask,
 	)

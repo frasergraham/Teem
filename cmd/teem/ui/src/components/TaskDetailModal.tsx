@@ -228,6 +228,12 @@ interface LogRow {
 // Returns oldest-first. Skips event kinds that don't represent a
 // significant participation moment (heartbeats, channels_state,
 // usage_event — none of which carry task-scoped meaning here).
+//
+// The first row is always synthetic: "<Origin> created this task". It
+// uses the audit task_created event's timestamp when present (so the
+// row reflects when the audit log saw the create), otherwise falls
+// back to task.created_at. The task_created audit row itself is then
+// suppressed from the rest of the log so it doesn't appear twice.
 export function buildLogRows(detail: TaskDetailPayload): LogRow[] {
   const jobByID = new Map<string, TaskJob>();
   for (const j of detail.jobs) {
@@ -235,6 +241,7 @@ export function buildLogRows(detail: TaskDetailPayload): LogRow[] {
   }
   const rows: LogRow[] = [];
   for (const e of detail.timeline) {
+    if (e.kind === 'task_created') continue;
     if (!shouldShow(e.kind)) continue;
     const row = renderEvent(e, jobByID);
     if (row) rows.push(row);
@@ -242,7 +249,70 @@ export function buildLogRows(detail: TaskDetailPayload): LogRow[] {
   // detail.timeline is newest-first per buildTaskTimeline; flip to
   // oldest-first so the participation log reads top-down by time.
   rows.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+
+  const creation = buildCreationRow(detail);
+  if (creation) rows.unshift(creation);
   return rows;
+}
+
+// buildCreationRow synthesises the first log entry: "<Persona> created
+// this task". Origin → persona mapping:
+//   - operator        → Operator
+//   - leader          → Leader
+//   - project_manager → PM, with a " (via project_manager)" suffix
+//   - system          → System
+// A leader-origin task with a parent_id gets "(follow-up from <parent>)"
+// appended; the parent's title isn't on the wire so we fall back to the
+// raw parent_id, which is still unambiguous and immutable.
+//
+// Legacy tasks loaded from disk without an Origin field still come back
+// from the server defaulted to "operator" — but if a very old snapshot
+// pre-dates that backfill and arrives blank, we apply the same fallback
+// here so the SPA never renders an empty creator.
+function buildCreationRow(detail: TaskDetailPayload): LogRow | null {
+  const task = detail.task;
+  if (!task) return null;
+  const created = findTaskCreatedEvent(detail.timeline);
+  const ts = created?.ts || task.created_at;
+  if (!ts) return null;
+  const origin = (task.origin || 'operator') as string;
+  let persona = 'Operator';
+  let suffix = '';
+  switch (origin) {
+    case 'operator':
+      persona = 'Operator';
+      break;
+    case 'leader':
+      persona = 'Leader';
+      if (task.parent_id) {
+        suffix = ` (follow-up from ${task.parent_id})`;
+      }
+      break;
+    case 'project_manager':
+      persona = 'PM';
+      suffix = ' (via project_manager)';
+      break;
+    case 'system':
+      persona = 'System';
+      break;
+    default:
+      persona = capitalize(origin);
+      break;
+  }
+  return {
+    ts,
+    persona,
+    verb: `created this task${suffix}`,
+  };
+}
+
+function findTaskCreatedEvent(
+  timeline: TaskTimelineEvent[],
+): TaskTimelineEvent | undefined {
+  for (const e of timeline) {
+    if (e.kind === 'task_created') return e;
+  }
+  return undefined;
 }
 
 function shouldShow(kind: string): boolean {

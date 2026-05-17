@@ -61,6 +61,9 @@ export interface DashboardTask {
   stale?: boolean;
   url?: string;
   notes?: string;
+  // origin: who filed this task (operator|leader|project_manager|system).
+  // Surfaced on the task-detail modal's first log row.
+  origin?: string;
 }
 
 // PlanFile mirrors cmd/teem/plan_artifact.go planFile. Rendered is

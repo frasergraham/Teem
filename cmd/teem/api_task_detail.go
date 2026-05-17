@@ -39,12 +39,18 @@ type apiTaskDetailPayload struct {
 // RFC3339 so the SPA can format them client-side; agoShort renders
 // are kept for the modal-header tiles.
 type apiTaskRecord struct {
-	ID             string    `json:"id"`
-	Title          string    `json:"title"`
-	Status         string    `json:"status"`
-	Stage          string    `json:"stage"`
-	AssignedTo     string    `json:"assigned_to,omitempty"`
-	Notes          string    `json:"notes,omitempty"`
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Status     string `json:"status"`
+	Stage      string `json:"stage"`
+	AssignedTo string `json:"assigned_to,omitempty"`
+	Notes      string `json:"notes,omitempty"`
+	// Origin is the snapshotted plan.Task.Origin (operator|leader|
+	// project_manager|system). Legacy tasks default to "operator" at
+	// replay; surface it so the SPA can render the synthetic creation
+	// row at the head of the participation log.
+	Origin         string    `json:"origin,omitempty"`
+	ParentID       string    `json:"parent_id,omitempty"`
 	Evidence       []string  `json:"evidence,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
@@ -152,6 +158,8 @@ func toAPITaskRecord(t plan.Task) apiTaskRecord {
 		Stage:      string(t.Stage),
 		AssignedTo: t.AssignedTo,
 		Notes:      t.Notes,
+		Origin:     string(t.Origin),
+		ParentID:   t.ParentID,
 		Evidence:   append([]string(nil), t.Evidence...),
 		CreatedAt:  t.CreatedAt,
 		UpdatedAt:  t.UpdatedAt,

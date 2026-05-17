@@ -1,3 +1,8 @@
+// snapshot.go builds the dashboardTeam JSON DTO consumed by
+// /api/teams/<id>/state (see api_state.go). The SPA in cmd/teem/ui/
+// is the only renderer; helpers here translate audit / plan / pulse
+// / registry / leader-status into a single flat snapshot per render.
+
 package main
 
 import (
@@ -39,14 +44,10 @@ type dashboardTeam struct {
 	OtherStatuses    []leaderRow            `json:"other_statuses"`
 	PulseRunning     bool                   `json:"pulse_running"`
 	PulsePaused      bool                   `json:"pulse_paused"`
-	PulseInterval    string                 `json:"pulse_interval"`
-	PulseLastTick    string                 `json:"pulse_last_tick"`
-	PulseTickCount   int64                  `json:"pulse_tick_count"`
-	// Pulse is the richer per-team pulse view used by the bridge-console
+	// Pulse is the per-team pulse view consumed by the SPA's
 	// pulse-management panel: lamp toggle, interval input, wake-prompt
-	// textarea. Mirrors the top-level Pulse* fields above for the
-	// existing header pill / heading line so we don't have to rewrite
-	// callers.
+	// textarea. PulseRunning/PulsePaused above mirror Pulse.Running/Paused
+	// for header-pill consumers that haven't been ported to read Pulse.*.
 	Pulse        pulseSnapshot    `json:"pulse"`
 	RecentEvents []dashboardEvent `json:"recent_events"`
 	UnreadNotes  int              `json:"unread_notes"`
@@ -73,9 +74,9 @@ type dashboardTeam struct {
 	// severity=question), and open blockers (record_blocker against a
 	// task still at stage=blocked). Sorted newest-first by timestamp.
 	Decisions []decisionRow `json:"decisions"`
-	// Usage is the daily-token-budget card rendered near the top of the
-	// team-detail page. Nil when the daemon has no Aggregator wired (the
-	// card is suppressed in that case).
+	// Usage is the daily-token-budget card the SPA snapshot exposes near
+	// the top of the team view. Nil when the daemon has no Aggregator
+	// wired (the card is suppressed in that case).
 	Usage *usageSnapshot `json:"usage"`
 	// HasPricing is true when ~/.teem/pricing.yaml loaded with at least
 	// one priced model. Drives whether the dashboard's Cost column and
@@ -98,7 +99,7 @@ type dashboardTeam struct {
 	HeroSpendDisplay string `json:"hero_spend_display"`
 }
 
-// usageSnapshot is the data behind the team-detail "Usage" card. Built
+// usageSnapshot is the data the SPA's "Usage" card renders. Built
 // from the daemon-global usage.Aggregator. Configured=false → the
 // operator hasn't set daily_token_budget; the card shows the
 // configuration hint instead of the bar.
@@ -164,11 +165,12 @@ type decisionAction struct {
 	Primary bool   `json:"primary"`
 }
 
-// pulseSnapshot is the data behind the bridge-console pulse-management
-// panel on the team-detail page. Derived from rt.pulse + the active
-// wake-prompt file. IntervalValue + IntervalUnit feed the number-input
-// + select pair so the form posts back the same shape; FormAction is
-// pre-built so the template doesn't have to know the URL prefix.
+// pulseSnapshot is the data the SPA snapshot exposes for the
+// bridge-console pulse-management panel. Derived from rt.pulse + the
+// active wake-prompt file. IntervalValue + IntervalUnit feed the
+// number-input + select pair so the form posts back the same shape;
+// the *URL fields are pre-built so the SPA doesn't have to know the
+// /control/teams/<id>/pulse URL prefix.
 type pulseSnapshot struct {
 	Running              bool   `json:"running"`
 	Paused               bool   `json:"paused"`
@@ -208,11 +210,12 @@ type workerRow struct {
 	CurrentJobID string `json:"current_job_id,omitempty"`
 }
 
-// teamHero is the data behind the prominent at-a-glance hero band at
-// the top of the team-detail page. ActiveAgentsTotal and OpenTasksTotal
-// are large numerals; AgentChips lists every archetype in the team's
-// roster (with count, including zero); StageBar enumerates the stages
-// that had ≥ 1 task transition today, with proportional segment widths.
+// teamHero is the data behind the prominent at-a-glance hero band the
+// SPA snapshot exposes at the top of the team view. ActiveAgentsTotal
+// and OpenTasksTotal are large numerals; AgentChips lists every
+// archetype in the team's roster (with count, including zero); StageBar
+// enumerates the stages that had ≥ 1 task transition today, with
+// proportional segment widths.
 type teamHero struct {
 	ActiveAgentsTotal int               `json:"active_agents_total"`
 	OpenTasksTotal    int               `json:"open_tasks_total"`
@@ -223,10 +226,11 @@ type teamHero struct {
 	HasStageActivity bool `json:"has_stage_activity"`
 }
 
-// teamPageBranches wraps the branch list rendered at the bottom of the
-// team-detail page. NamePeek is a short comma-joined preview ("teem/a,
-// teem/b, teem/c +2 more") shown in the collapsed <summary>; Rows is
-// the full table rendered inside the <details> body.
+// teamPageBranches wraps the branch list the SPA snapshot exposes for
+// the team's bottom-of-page branches panel. NamePeek is a short
+// comma-joined preview ("teem/a, teem/b, teem/c +2 more") shown in the
+// collapsed summary; Rows is the full table the panel reveals when
+// expanded.
 type teamPageBranches struct {
 	Count    int               `json:"count"`
 	NamePeek string            `json:"name_peek"`
@@ -277,8 +281,8 @@ type taskLink struct {
 	URL string `json:"url"`
 }
 
-// awaitingApprovalTask is the per-row data the team-detail page renders
-// inside the "Awaiting approval" section. Carries the bits the operator
+// awaitingApprovalTask is the per-row data the SPA snapshot exposes
+// for the "Awaiting approval" section. Carries the bits the operator
 // needs to decide: title, id, the leader's notes preview, evidence
 // links, and the URLs the inline form posts to.
 //
@@ -337,6 +341,11 @@ type dashboardTask struct {
 	// via plan.UpdateTask); the modal renders the HTML with
 	// dangerouslySetInnerHTML, same model as ChatPanel leader output.
 	Notes string `json:"notes"`
+	// Origin is plan.Task.Origin (operator|leader|project_manager|
+	// system). Surfaced so the SPA's task-detail modal can render a
+	// synthetic "<Origin> created this task" row at the top of the
+	// participation log.
+	Origin string `json:"origin,omitempty"`
 }
 
 // taskCostCell is the dashboardTask sub-struct holding the rendered
@@ -548,13 +557,6 @@ func teamSnapshot(v teamView) dashboardTeam {
 	if rt.pulse != nil {
 		out.PulseRunning = rt.pulse.Running()
 		out.PulsePaused = rt.pulse.Paused()
-		out.PulseInterval = rt.pulse.Interval().String()
-		out.PulseTickCount = rt.pulse.TickCount()
-		if last := rt.pulse.LastTick(); !last.IsZero() {
-			out.PulseLastTick = agoShort(last)
-		} else {
-			out.PulseLastTick = "(never)"
-		}
 		out.Pulse = buildPulseSnapshot(rt)
 	}
 
@@ -857,9 +859,9 @@ func buildBlockerRow(teamID, taskID string, e audit.Event, p *plan.Plan) decisio
 	return row
 }
 
-// buildTeamHero computes the hero band shown at the top of the
-// team-detail page: active-agents total, open-tasks total, one
-// alphabetically-sorted chip per archetype declared in the team's
+// buildTeamHero computes the hero band the SPA snapshot exposes at
+// the top of the team view: active-agents total, open-tasks total,
+// one alphabetically-sorted chip per archetype declared in the team's
 // roster (always including 0-count entries), and a stacked stage bar
 // for tasks that entered their current stage today. ABANDONED is
 // omitted from the bar entirely (operator-set noise).
@@ -1289,6 +1291,7 @@ func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool, j
 		AssigneeDerived: derived,
 		Stale:           stale,
 		Notes:           t.Notes,
+		Origin:          string(t.Origin),
 		Cost:            buildTaskCostCell(t.Evidence, pricing, costEvents),
 	}
 }
