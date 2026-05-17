@@ -686,19 +686,56 @@ func (p *Pulse) NudgeFromAudit(events []audit.Event) {
 	}
 }
 
-// isInterestingKind decides whether an audit event should wake the
-// leader. Lifecycle and error signals matter; heartbeats and
-// pulse_tick echoes don't (we'd loop on our own audit writes).
+// interestingKinds is the closed classification used by NudgeFromAudit:
+// every audit.Kind constant must appear here with an explicit
+// true (wake the leader) or false (ignore) value. The lint test in
+// pulse_test.go iterates audit.AllKinds and fails if any Kind is
+// missing — so adding a new Kind in internal/audit forces a deliberate
+// classification decision here.
 //
-// KindUsageEvent is deliberately excluded: every pulse tick now emits
-// one of those, and waking on it would loop forever (tick → usage →
-// nudge → tick → …). See docs/usage-capture.md §10.
+// Why most kinds are false:
+//   - KindHeartbeat, KindJobReceived: too noisy; arrival doesn't need a
+//     leader turn.
+//   - KindPulseTick, KindUsageEvent, KindLeaderChatTurn: feedback loops
+//     (pulse spawns claude → emits these → would nudge → loop).
+//   - KindJobInterrupted, KindJobTranscriptReady, KindDecisionNote,
+//     KindBlockerNote, KindTaskStageChanged, KindTaskCreated,
+//     KindLeaderStatusChanged: state-change records the leader itself
+//     produces (or that don't need an immediate response — the next
+//     scheduled tick will pick them up).
+//   - KindPMTick, KindChannelsState, KindUsageThrottle: control-plane
+//     bookkeeping, not work the leader needs to handle.
+//
+// True kinds are the worker-lifecycle "something happened, look now"
+// signals. See docs/wake-strategy.md and docs/usage-capture.md §10.
+var interestingKinds = map[audit.Kind]bool{
+	audit.KindJobReceived:         false,
+	audit.KindJobComplete:         true,
+	audit.KindJobError:            true,
+	audit.KindNote:                true,
+	audit.KindHeartbeat:           false,
+	audit.KindJobInterrupted:      false,
+	audit.KindJobTranscriptReady:  false,
+	audit.KindWorkerStopped:       true,
+	audit.KindDecisionNote:        false,
+	audit.KindBlockerNote:         false,
+	audit.KindTaskStageChanged:    false,
+	audit.KindPMTick:              false,
+	audit.KindChannelsState:       false,
+	audit.KindUsageEvent:          false,
+	audit.KindUsageThrottle:       false,
+	audit.KindPulseTick:           false,
+	audit.KindLeaderChatTurn:      false,
+	audit.KindTaskCreated:         false,
+	audit.KindLeaderStatusChanged: false,
+}
+
+// isInterestingKind decides whether an audit event should wake the
+// leader. Unregistered (ad-hoc string) kinds are treated as
+// non-interesting — only the explicitly-classified set in
+// interestingKinds wakes.
 func isInterestingKind(k audit.Kind) bool {
-	switch k {
-	case audit.KindJobComplete, audit.KindJobError, audit.KindNote, audit.KindWorkerStopped:
-		return true
-	}
-	return false
+	return interestingKinds[k]
 }
 
 // Tick performs a single autonomous turn. Idempotent under concurrent

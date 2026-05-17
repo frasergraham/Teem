@@ -36,6 +36,23 @@ export function applyAuditEnvelope(env: Envelope): void {
 
 type Handler = (snap: StateSnapshot, ev: AuditEvent) => StateSnapshot | null;
 
+// Unhandled audit kinds (intentionally not in `handlers`, but still
+// listed in `internal/audit/AllKinds` and so guaranteed to be a
+// well-known string):
+//   - note: free-form worker text; rendered by the event log, no
+//     snapshot mutation needed.
+//   - heartbeat: registry liveness ping; presence-only.
+//   - pm_tick: PM-loop bookkeeping; surfaced in the event log.
+//   - usage_throttle: handled by the UsageCard via /state refetch on
+//     snapshot_invalidate, not by per-event patch.
+//   - leader_chat_turn: ChatPanel reads its own history via /control;
+//     not reflected in the team snapshot.
+//   - task_created: add_task emits this but not task_stage_changed, so
+//     a brand-new task is only reflected via the next
+//     snapshot_invalidate. Worth a dedicated handler later; harmless
+//     for now since the next /state refetch picks it up.
+// New kinds added to internal/audit/kinds.go land here as misses until
+// a handler (or an explicit "ignore" entry above) is added.
 const handlers: Record<string, Handler> = {
   task_stage_changed: handleTaskStageChanged,
   decision_note: handleDecisionNote,
