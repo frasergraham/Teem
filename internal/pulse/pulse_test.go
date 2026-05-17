@@ -748,6 +748,23 @@ func TestPulse_IsInterestingKind(t *testing.T) {
 	}
 }
 
+// TestInterestingKindsCoversAllAuditKinds is the registry-coverage
+// lint: every Kind constant declared in internal/audit must appear in
+// the interestingKinds map with an explicit wake/ignore decision. When
+// someone adds a new Kind, this test fails until the classification is
+// recorded here — preventing silent "this new event is ignored by
+// pulse" regressions.
+func TestInterestingKindsCoversAllAuditKinds(t *testing.T) {
+	if len(audit.AllKinds) == 0 {
+		t.Fatal("audit.AllKinds is empty — registry not wired?")
+	}
+	for _, k := range audit.AllKinds {
+		if _, ok := interestingKinds[k]; !ok {
+			t.Errorf("audit.Kind %q is in audit.AllKinds but missing from interestingKinds — add an explicit true/false in internal/pulse/pulse.go", k)
+		}
+	}
+}
+
 // TestPulse_NudgeSuppressedWhenChannelsLive verifies the t-50458567
 // gate: when channels-live is set, NudgeFromAudit must not enqueue
 // (and so must not produce a tick), but the timer/manual paths are
