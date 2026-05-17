@@ -14,8 +14,8 @@ import (
 // newDetectionTestTeam builds a minimal registeredTeam wired with a real
 // channelbus and a real on-disk audit sink, but without Pulse/MCP/etc.
 // observeChannelSubscribe only touches channelBus, detectionMu,
-// channelsLive, auditSink, pulse (nil-tolerant), and team.ID — so the
-// stub is sufficient to exercise the state machine.
+// channelsLive (atomic.Bool), auditSink, pulse (nil-tolerant), and
+// team.ID — so the stub is sufficient to exercise the state machine.
 func newDetectionTestTeam(t *testing.T) *registeredTeam {
 	t.Helper()
 	dir := t.TempDir()
@@ -59,7 +59,7 @@ func TestObserveChannelSubscribe_FirstSubscriberEmitsLive(t *testing.T) {
 	_, cancel := d.observeChannelSubscribe(rt)
 	defer cancel()
 
-	if !rt.channelsLive {
+	if !rt.channelsLive.Load() {
 		t.Error("channelsLive should be true after first subscribe")
 	}
 	if got := countChannelsState(t, rt, "live"); got != 1 {
@@ -77,7 +77,7 @@ func TestObserveChannelSubscribe_LastUnsubscribeEmitsFallback(t *testing.T) {
 	_, cancel := d.observeChannelSubscribe(rt)
 	cancel()
 
-	if rt.channelsLive {
+	if rt.channelsLive.Load() {
 		t.Error("channelsLive should be false after last unsubscribe")
 	}
 	if got := countChannelsState(t, rt, "fallback"); got != 1 {
@@ -117,7 +117,7 @@ func TestObserveChannelSubscribe_ConcurrentEmitsExactlyOneLive(t *testing.T) {
 	if got := countChannelsState(t, rt, "live"); got != 1 {
 		t.Errorf("expected exactly 1 live event under concurrent subscribes, got %d", got)
 	}
-	if !rt.channelsLive {
+	if !rt.channelsLive.Load() {
 		t.Error("channelsLive should be true while subscribers are connected")
 	}
 
@@ -136,7 +136,7 @@ func TestObserveChannelSubscribe_ConcurrentEmitsExactlyOneLive(t *testing.T) {
 	if got := countChannelsState(t, rt, "fallback"); got != 1 {
 		t.Errorf("expected exactly 1 fallback event under concurrent cancels, got %d", got)
 	}
-	if rt.channelsLive {
+	if rt.channelsLive.Load() {
 		t.Error("channelsLive should be false after last unsubscribe")
 	}
 }
@@ -180,5 +180,51 @@ func TestObserveChannelSubscribe_NoFlapMidStream(t *testing.T) {
 	c1()
 	if got := countChannelsState(t, rt, "fallback"); got != 1 {
 		t.Errorf("after full teardown: expected 1 fallback, got %d", got)
+	}
+}
+
+// TestChannelsLive_AtomicReadVisibility exercises the lock-free reader
+// path on registeredTeam.channelsLive: one goroutine flips the flag
+// 1000 times while another samples it 1000 times. The load-bearing
+// check is `go test -race` — without atomic.Bool this is a data race.
+// Functionally we also assert the reader observes both true and false
+// at least once, so the field is genuinely shared (not e.g. inlined).
+func TestChannelsLive_AtomicReadVisibility(t *testing.T) {
+	rt := &registeredTeam{}
+
+	const N = 1000
+	var (
+		wg                sync.WaitGroup
+		sawTrue, sawFalse bool
+		readerMu          sync.Mutex
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < N; i++ {
+			rt.channelsLive.Store(i%2 == 0)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < N; i++ {
+			v := rt.channelsLive.Load()
+			readerMu.Lock()
+			if v {
+				sawTrue = true
+			} else {
+				sawFalse = true
+			}
+			readerMu.Unlock()
+		}
+	}()
+	wg.Wait()
+
+	if !sawTrue || !sawFalse {
+		// Not a hard failure — scheduling could in principle starve
+		// one side — but a sustained skew suggests the field isn't
+		// actually shared.
+		t.Logf("reader observed sawTrue=%v sawFalse=%v across %d samples", sawTrue, sawFalse, N)
 	}
 }

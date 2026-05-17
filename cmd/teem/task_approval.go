@@ -382,10 +382,7 @@ func (d *daemon) autoWakeLeaderOnTaskReady(rt *registeredTeam) {
 	if rt == nil || rt.pulse == nil {
 		return
 	}
-	rt.detectionMu.Lock()
-	live := rt.channelsLive
-	rt.detectionMu.Unlock()
-	if live {
+	if rt.channelsLive.Load() {
 		publishPulseChannelNudge(rt.channelBus)
 		if rt.auditSink != nil {
 			_ = rt.auditSink.Write(audit.Event{
