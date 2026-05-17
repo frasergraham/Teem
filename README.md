@@ -43,6 +43,40 @@ roster, task list, and a chat panel.
 `teem stop` shuts the daemon down. In-flight workers are detached
 subprocesses and keep running across a restart.
 
+## Pulse
+
+When no one is actively chatting, the leader still needs to react to
+workers finishing, blockers, and operator approvals. **Pulse** is the
+heartbeat that wakes the leader every few minutes to scan state and
+take action — dispatch new work, integrate finished branches, escalate
+stuck tasks. Without it the team would sit idle between your chat
+turns.
+
+- Default interval: 5 minutes. Backs off automatically after a streak
+  of idle ticks.
+- The interval, wake prompt, and pause/resume live in the dashboard
+  Settings panel, or via `teem pulse {start,stop,pause,resume,tick,status}`.
+- Each tick is ephemeral — the leader's persona + memory ride in via
+  the system prompt, not a saved session.
+
+### Channels (experimental, faster wake)
+
+Pulse is a polling fallback. If you have the experimental Claude Code
+**channels** feature enabled, audit events get pushed directly into
+the leader's running chat session as `<channel>` blocks the moment
+they happen — sub-second wake instead of waiting for the next pulse
+tick. When channels go live, pulse stays out of the way; when they
+drop, pulse picks up again.
+
+Channels are gated upstream in Claude Code. To opt in:
+
+```sh
+export TEEM_CHANNELS_DEV=1
+```
+
+Then `teem stop && teem start`. If your account isn't on the
+allowlist the flag is a no-op — Teem falls back to pulse silently.
+
 ## Telegram (optional)
 
 The leader can be chatted with from your phone. Useful when you're
