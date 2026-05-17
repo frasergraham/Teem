@@ -163,16 +163,32 @@ type Sink interface {
 // Concurrent Writes are serialized through an internal mutex; reads
 // happen on a fresh file handle so callers can tail while writes
 // continue.
+//
+// FileSink wraps a TailCache so since-anchored Query calls inside the
+// cache's window (24h / 100k events) are answered in O(window) instead
+// of O(file). Queries with a zero since, or a since older than the
+// cache's floor, fall through to the on-disk scan.
 type FileSink struct {
 	path string
 
 	mu sync.Mutex
 	f  *os.File
+
+	cache *TailCache
 }
+
+const (
+	// tailCacheMaxEvents is the FileSink cache's capacity in events.
+	tailCacheMaxEvents = 100_000
+	// tailCacheMaxAge is the wall-clock window the FileSink cache
+	// covers. Bootstrap reads this far back into the on-disk log.
+	tailCacheMaxAge = 24 * time.Hour
+)
 
 // OpenFile opens (creating if needed) the JSONL file at path. The parent
 // directory is created with 0o700 since audit logs may contain sensitive
-// command output.
+// command output. The tail cache is bootstrapped from the last
+// tailCacheMaxAge of the on-disk log before OpenFile returns.
 func OpenFile(path string) (*FileSink, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("audit: mkdir: %w", err)
@@ -181,7 +197,44 @@ func OpenFile(path string) (*FileSink, error) {
 	if err != nil {
 		return nil, fmt.Errorf("audit: open: %w", err)
 	}
-	return &FileSink{path: path, f: f}, nil
+	s := &FileSink{
+		path:  path,
+		f:     f,
+		cache: NewTailCache(tailCacheMaxEvents, tailCacheMaxAge),
+	}
+	s.bootstrapCache(time.Now().UTC())
+	return s, nil
+}
+
+// bootstrapCache fills the tail cache from the on-disk log. It scans
+// the entire file forward and Appends events newer than the maxAge
+// cutoff; SetBootstrapFloor then lowers the floor to cutoff so the
+// cache will serve queries spanning the full window even when no
+// events were loaded.
+func (s *FileSink) bootstrapCache(now time.Time) {
+	cutoff := now.Add(-tailCacheMaxAge)
+	f, err := os.Open(s.path)
+	if err != nil {
+		// Missing file is fine — nothing to bootstrap. Floor is
+		// still pinned to cutoff so subsequent in-window queries
+		// can be served from the (empty) cache.
+		s.cache.SetBootstrapFloor(cutoff)
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		var e Event
+		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			continue
+		}
+		if e.Timestamp.Before(cutoff) {
+			continue
+		}
+		s.cache.Append(e, now)
+	}
+	s.cache.SetBootstrapFloor(cutoff)
 }
 
 // Path returns the on-disk path the FileSink is writing to.
@@ -201,13 +254,30 @@ func (s *FileSink) Write(e Event) error {
 	if _, err := s.f.Write(body); err != nil {
 		return fmt.Errorf("audit: write: %w", err)
 	}
+	if s.cache != nil {
+		s.cache.Append(e, time.Now().UTC())
+	}
 	return nil
 }
 
-// Query reads the file from the start and returns events matching the
-// filter. It's intentionally simple — JSONL is not a database. For v1
-// scans are O(file); we can revisit when log files grow huge.
+// Query returns events matching the filter. It first consults the
+// in-memory tail cache; if the cache cannot cover the requested since
+// window (since is zero, or older than the cache's floor) it falls
+// through to a full on-disk scan. The cache's lock is NOT held during
+// the disk fallback.
+//
+// For v1 the disk scan is O(file); the cache makes the common
+// "since=now-30m" path O(window).
 func (s *FileSink) Query(agentID string, since time.Time, limit int) ([]Event, error) {
+	if s.cache != nil {
+		if events, ok := s.cache.QueryFromCache(agentID, since, limit); ok {
+			return events, nil
+		}
+	}
+	return s.queryFromDisk(agentID, since, limit)
+}
+
+func (s *FileSink) queryFromDisk(agentID string, since time.Time, limit int) ([]Event, error) {
 	f, err := os.Open(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
