@@ -279,6 +279,35 @@ func TestSetTaskStage_EmitsAudit(t *testing.T) {
 	}
 }
 
+// TestSetTaskStage_DoesNotEmitPulseTick covers the recursive-wake
+// guard: the MCP set_task_stage tool path is leader-initiated, so it
+// must NOT emit any operator pulse_tick audit event. The operator
+// auto-wake lives in cmd/teem/handleControlTaskReady (the HTTP
+// /tasks/<id>/ready route) and is keyed on a synthesised
+// "trigger=task_ready" pulse_tick row. If a future change ever wired
+// a wake-on-stage-change into this handler, every leader-driven
+// transition would recursively wake itself — this test fails fast in
+// that case.
+func TestSetTaskStage_DoesNotEmitPulseTick(t *testing.T) {
+	srv, p, _, a := newTestServerFull(t)
+	task, _ := p.AddTask(plan.NewTaskInput{Title: "leader-driven"})
+
+	req := mcpgo.CallToolRequest{}
+	req.Params.Name = "set_task_stage"
+	req.Params.Arguments = map[string]any{"task_id": task.ID, "stage": "ready"}
+	res, err := srv.handleSetTaskStage(context.Background(), req)
+	if err != nil || res.IsError {
+		t.Fatalf("set_task_stage: %v / %s", err, textOf(t, res))
+	}
+
+	events, _ := a.Query("", parseZero(), 100)
+	for _, e := range events {
+		if e.Kind == audit.KindPulseTick {
+			t.Errorf("set_task_stage emitted pulse_tick (recursive-wake regression): %+v", e)
+		}
+	}
+}
+
 func TestSetTaskStage_SkipsAuditWhenStageUnchanged(t *testing.T) {
 	srv, p, _, a := newTestServerFull(t)
 	task, _ := p.AddTask(plan.NewTaskInput{Title: "X"})

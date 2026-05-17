@@ -587,78 +587,50 @@ func TestControlTaskReady_FiresPulseTick(t *testing.T) {
 	}
 }
 
-// TestControlTaskReady_IdempotentDoesNotRefirePulse covers the
-// already-ready branch: a re-POST against a task that's already in
-// stage=ready returns 200 + the task (markTaskReady's idempotent path)
-// but must NOT fire a second pulse tick. Without the changed-bool gate
-// in handleControlTaskReady, every double-click would queue an extra
-// wake.
-func TestControlTaskReady_IdempotentDoesNotRefirePulse(t *testing.T) {
+// TestControlTaskReady_DoubleClickFiresPulseOnce mirrors the operator
+// double-click the changed-bool gate in handleControlTaskReady was
+// designed for: POST against a proposed task (real proposed→ready
+// transition, pulse fires), then POST again against the now-ready task
+// (idempotent path, pulse MUST NOT fire a second time). Without the
+// gate, every double-click would queue an extra wake.
+func TestControlTaskReady_DoubleClickFiresPulseOnce(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
 	rt := newPingTeam(t, "alpha")
 	d.teams["alpha"] = rt
 	task, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "double-click ready"})
-	if _, err := rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageReady}); err != nil {
-		t.Fatal(err)
-	}
 
 	preTicks := rt.pulse.TickCount()
+	url := "/control/teams/alpha/tasks/" + task.ID + "/ready"
 
-	req := httptest.NewRequest(http.MethodPost,
-		"/control/teams/alpha/tasks/"+task.ID+"/ready",
-		bytes.NewReader([]byte(`{}`)))
-	w := httptest.NewRecorder()
-	d.handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	// First POST: proposed → ready, pulse fires (async).
+	req1 := httptest.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(`{}`)))
+	w1 := httptest.NewRecorder()
+	d.handler().ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first POST: code=%d body=%s", w1.Code, w1.Body.String())
 	}
+	deadline := time.Now().Add(time.Second)
+	for rt.pulse.TickCount() == preTicks && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := rt.pulse.TickCount(); got != preTicks+1 {
+		t.Fatalf("first POST: pulse TickCount = %d want %d (pre=%d)", got, preTicks+1, preTicks)
+	}
+	afterFirst := rt.pulse.TickCount()
 
+	// Second POST against the now-ready task: idempotent, must NOT
+	// fire again.
+	req2 := httptest.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(`{}`)))
+	w2 := httptest.NewRecorder()
+	d.handler().ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second POST: code=%d body=%s", w2.Code, w2.Body.String())
+	}
 	// Give any (incorrectly fired) goroutine a moment to bump the
 	// counter, then assert it stayed put.
 	time.Sleep(50 * time.Millisecond)
-	if got := rt.pulse.TickCount(); got != preTicks {
-		t.Errorf("pulse fired on idempotent /ready: pre=%d post=%d", preTicks, got)
-	}
-}
-
-// TestSetTaskStage_DoesNotFirePulse covers the recursive-wake guard:
-// leader-initiated stage transitions (the MCP set_task_stage tool path)
-// must NOT trigger the operator auto-wake. set_task_stage's plan-side
-// effect is a plain rt.plan.UpdateTask + audit Write — exactly what
-// this test simulates. If the auto-wake were ever wired into
-// Plan.UpdateTask or the audit hook chain, every leader-initiated
-// stage flip would recursively wake itself; this test fails fast in
-// that case.
-func TestSetTaskStage_DoesNotFirePulse(t *testing.T) {
-	rt := newPingTeam(t, "alpha")
-	task, err := rt.plan.AddTask(plan.NewTaskInput{Title: "leader-driven"})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	preTicks := rt.pulse.TickCount()
-
-	// Mirror what internal/mcp/tools.go's set_task_stage does on the
-	// "advance to ready" path: update the plan, then write a
-	// task_stage_changed audit event attributed to the leader. The
-	// HTTP /tasks/<id>/ready route is deliberately bypassed.
-	if _, err := rt.plan.UpdateTask(task.ID, plan.UpdateInput{Stage: plan.StageReady}); err != nil {
-		t.Fatalf("UpdateTask: %v", err)
-	}
-	_ = rt.auditSink.Write(audit.Event{
-		Timestamp: time.Now().UTC(),
-		AgentID:   "leader",
-		Kind:      audit.KindTaskStageChanged,
-		Message:   "leader advanced task to ready",
-		Meta: map[string]any{
-			"task_id": task.ID,
-			"to":      string(plan.StageReady),
-		},
-	})
-
-	time.Sleep(50 * time.Millisecond)
-	if got := rt.pulse.TickCount(); got != preTicks {
-		t.Errorf("pulse fired %d tick(s) on leader-initiated set_task_stage; want 0", got-preTicks)
+	if got := rt.pulse.TickCount(); got != afterFirst {
+		t.Errorf("pulse fired on idempotent /ready: after-first=%d post-second=%d", afterFirst, got)
 	}
 }
 
