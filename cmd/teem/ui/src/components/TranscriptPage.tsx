@@ -182,23 +182,7 @@ function EventContent({ ev }: { ev: TranscriptEvent }) {
       </>
     );
   }
-  if (ev.kind === 'tool') {
-    return (
-      <>
-        <div className="transcript-event-text transcript-tool-head">
-          → Tool: <code>{ev.toolName ?? 'unknown'}</code>
-        </div>
-        {ev.toolInput && (
-          <details className="transcript-tool-input">
-            <summary>input</summary>
-            <pre>{ev.toolInput}</pre>
-          </details>
-        )}
-        <RawDetails raw={ev.raw} />
-      </>
-    );
-  }
-  if (ev.kind === 'user' && ev.toolResultPreview) {
+  if (ev.kind === 'tool' && ev.toolResultPreview) {
     return (
       <>
         <div className="transcript-event-text transcript-tool-result">
@@ -209,6 +193,22 @@ function EventContent({ ev }: { ev: TranscriptEvent }) {
           <details className="transcript-tool-result-full">
             <summary>full result</summary>
             <pre>{ev.toolResultPreview}</pre>
+          </details>
+        )}
+        <RawDetails raw={ev.raw} />
+      </>
+    );
+  }
+  if (ev.kind === 'tool') {
+    return (
+      <>
+        <div className="transcript-event-text transcript-tool-head">
+          → Tool: <code>{ev.toolName ?? 'unknown'}</code>
+        </div>
+        {ev.toolInput && (
+          <details className="transcript-tool-input">
+            <summary>input</summary>
+            <pre>{ev.toolInput}</pre>
           </details>
         )}
         <RawDetails raw={ev.raw} />
