@@ -25,6 +25,7 @@ func (SSHProvisioner) Provision(_ context.Context, spec AgentSpec) (*Agent, erro
 		Transport:  transport.SSHTransport{Target: spec.SSHTarget},
 		MCPs:       spec.MCPs,
 		Skill:      spec.Skill,
+		Model:      spec.Model,
 	}, nil
 }
 

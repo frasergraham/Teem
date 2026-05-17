@@ -201,6 +201,9 @@ func runChat(args []string) error {
 		"--mcp-config", mcpCfgPath,
 		"--append-system-prompt", brief,
 	}
+	if m := t.Leader.ModelOrDefault(); m != "" {
+		argv = append(argv, "--model", m)
+	}
 	if !*noRemoteControl {
 		// --remote-control [name]: optional name. Following token is
 		// another --flag, so claude won't interpret it as the name.

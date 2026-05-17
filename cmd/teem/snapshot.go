@@ -100,25 +100,18 @@ type dashboardTeam struct {
 }
 
 // usageSnapshot is the data the SPA's "Usage" card renders. Built
-// from the daemon-global usage.Aggregator. Configured=false → the
-// operator hasn't set daily_token_budget; the card shows the
-// configuration hint instead of the bar.
+// from the daemon-global usage.Aggregator. Just the running per-model
+// totals plus their sums — daily quota / throttle UI was dropped; the
+// Aggregator still emits transition audit events for anyone watching
+// the stream, but the dashboard now reports raw tokens only.
 type usageSnapshot struct {
-	Configured  bool      `json:"configured"`
-	Used        int64     `json:"used"`
-	Cap         int64     `json:"cap"`
-	PercentUsed float64   `json:"percent_used"`
-	Throttle    bool      `json:"throttle"`
-	NextReset   time.Time `json:"next_reset"`
-	LastReset   time.Time `json:"last_reset"`
-	// NextResetIn is the formatted "in 4h 23m" countdown. NextResetAbs
-	// is the wall-clock tooltip (local time). Both empty when the
-	// anchor parse fails (defensive — operator sees no countdown).
-	NextResetIn  string       `json:"next_reset_in"`
-	NextResetAbs string       `json:"next_reset_abs"`
-	LastResetAbs string       `json:"last_reset_abs"`
+	Input        int64        `json:"input"`
+	Output       int64        `json:"output"`
+	CacheCreate  int64        `json:"cache_create"`
+	CacheRead    int64        `json:"cache_read"`
 	PerModel     []modelUsage `json:"per_model"`
-	BarColour    string       `json:"bar_colour"` // "green" | "amber" | "red"
+	LastReset    time.Time    `json:"last_reset"`
+	LastResetAbs string       `json:"last_reset_abs"`
 }
 
 // modelUsage is one row in the per-model breakdown. Total is
@@ -1156,53 +1149,37 @@ func personaOrFallback(id string) string {
 // trim).
 func buildStatusHeadline(team *dashboardTeam) string {
 	if team.LeaderStatus != nil && team.LeaderStatus.Text != "" {
-		return truncateForTile(team.LeaderStatus.Text, 200)
+		// Match leaderstatus.MaxTextBytes so a status that survived the
+		// write-time cap also survives the headline render — the SPA
+		// styles this body at a smaller font and wraps it.
+		return truncateForTile(team.LeaderStatus.Text, 600)
 	}
 	return "All quiet on the bridge — leader hasn't posted a status yet."
 }
 
 // buildUsageSnapshot turns the daemon-global usage.Aggregator into the
 // per-team-page Usage card payload. Nil aggregator returns nil (card
-// suppressed). When daily_token_budget == 0 the snapshot is marked
-// Configured=false so the template renders the configuration hint
-// instead of the progress bar.
+// suppressed). Sums per-model totals into the four top-level columns
+// the SPA renders as big numbers.
 //
-// PerModel rows are sorted by Total descending so the loudest model
-// reads first; CacheRead is reported separately because it isn't part
-// of the billable total the throttle gates on.
-func buildUsageSnapshot(agg *usage.Aggregator, now time.Time) *usageSnapshot {
+// PerModel rows are sorted by Total (input + output + cache_create)
+// descending so the loudest model reads first; CacheRead is reported
+// separately because cache reads are read-side activity rather than
+// fresh generation.
+func buildUsageSnapshot(agg *usage.Aggregator, _ time.Time) *usageSnapshot {
 	if agg == nil {
 		return nil
 	}
-	cfg := agg.Config()
 	snap := agg.Snapshot()
-	used, capLimit, throttle, _ := agg.AvailableQuota(now)
-
-	out := &usageSnapshot{
-		Configured: cfg.DailyTokenBudget > 0,
-		Used:       used,
-		Cap:        capLimit,
-		Throttle:   throttle,
-		LastReset:  snap.LastReset,
-	}
+	out := &usageSnapshot{LastReset: snap.LastReset}
 	if !snap.LastReset.IsZero() {
 		out.LastResetAbs = snap.LastReset.Local().Format("Mon Jan 2 15:04 MST")
 	}
-	if next, err := cfg.NextReset(now); err == nil {
-		out.NextReset = next
-		until := next.Sub(now)
-		out.NextResetIn = formatUntil(until)
-		out.NextResetAbs = next.Local().Format("Mon Jan 2 15:04 MST")
-	}
-	if out.Configured {
-		pct := 100 * float64(used) / float64(capLimit)
-		if pct < 0 {
-			pct = 0
-		}
-		out.PercentUsed = pct
-		out.BarColour = usageBarColour(pct)
-	}
 	for model, t := range snap.ByModel {
+		out.Input += t.Input
+		out.Output += t.Output
+		out.CacheCreate += t.CacheCreate
+		out.CacheRead += t.CacheRead
 		out.PerModel = append(out.PerModel, modelUsage{
 			Model:       model,
 			Input:       t.Input,
@@ -1219,21 +1196,6 @@ func buildUsageSnapshot(agg *usage.Aggregator, now time.Time) *usageSnapshot {
 		return out.PerModel[i].Model < out.PerModel[j].Model
 	})
 	return out
-}
-
-// usageBarColour picks the progress-bar shade by percent-used. The
-// breakpoints match the spec (green <50, amber 50-80, red ≥80); 80% is
-// the default throttle threshold so the visual cue lines up with the
-// gate.
-func usageBarColour(pct float64) string {
-	switch {
-	case pct >= 80:
-		return "red"
-	case pct >= 50:
-		return "amber"
-	default:
-		return "green"
-	}
 }
 
 // formatUntil renders a future duration as "4h 23m" / "23m" / "now".

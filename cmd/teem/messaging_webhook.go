@@ -378,7 +378,7 @@ func (d *daemon) runTelegramLeaderTurn(turnCtx context.Context, cancel context.C
 	}
 
 	startedAt := time.Now().UTC()
-	stdout, wait, err := runner(turnCtx, mcpConfig, rt.repoRoot, contextBody, userMessage)
+	stdout, wait, err := runner(turnCtx, mcpConfig, rt.team.Leader.ModelOrDefault(), rt.repoRoot, contextBody, userMessage)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[messaging-webhook] leader chat start: %v\n", err)
 		// Record the operator's message even though no assistant text
@@ -607,7 +607,7 @@ func (d *daemon) runTelegramTurn(token, userMessage string, chatID int64, rctx m
 	)
 
 	startedAt := time.Now().UTC()
-	stdout, wait, err := runner(turnCtx, mcpConfig, rt.repoRoot, contextBody, userMessage)
+	stdout, wait, err := runner(turnCtx, mcpConfig, rt.team.Leader.ModelOrDefault(), rt.repoRoot, contextBody, userMessage)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[messaging-webhook] start: %v\n", err)
 		if rep != nil && chatID != 0 {

@@ -68,9 +68,14 @@ type Config struct {
 	// UpdateConfig) the new state is written atomically. A missing file
 	// is fine — cfg.Interval and the wake-prompt loader supply
 	// defaults. Malformed JSON is logged and ignored.
-	ConfigPath  string
-	MCPConfig   string // path to ~/.teem/state/<team>/pulse-mcp.json
-	RepoRoot    string // CWD for the claude subprocess
+	ConfigPath string
+	MCPConfig  string // path to ~/.teem/state/<team>/pulse-mcp.json
+	RepoRoot   string // CWD for the claude subprocess
+	// ClaudeModel pins the leader subprocess (pulse tick + dashboard
+	// chat) to a specific Claude model via `claude --model`. Empty
+	// means "no override" — claude uses the user's account default.
+	// The daemon resolves this from team.Leader.ModelOrDefault().
+	ClaudeModel string
 	Plan        *plan.Plan
 	Audit       audit.Sink
 	Registry    *mcpsrv.Registry
@@ -1016,7 +1021,7 @@ func (p *Pulse) invokeClaude(ctx context.Context, contextBody string) (tickResul
 		}
 		claudePath = path
 	}
-	args := buildClaudeArgs(p.cfg.MCPConfig, contextBody, p.WakePrompt())
+	args := buildClaudeArgs(p.cfg.MCPConfig, p.cfg.ClaudeModel, contextBody, p.WakePrompt())
 	cmd := exec.CommandContext(ctx, claudePath, args...)
 	cmd.Dir = p.cfg.RepoRoot
 	cmd.Stdin = nil
@@ -1060,7 +1065,7 @@ Scan in this order:
 
 Then take the next action: dispatch waiting work, reincarnate stuck workers, escalate decisions you can't make alone, or fast-forward main if an integrator branch is ready. Only conclude "idle" AFTER an actual scan shows nothing actionable.
 
-Required before ending your turn (no exceptions): call update_leader_status with one or two sentences in the human-readable style (Coder/Reviewer/Integrator/PM personas, natural prose, no bare task IDs in the prose). Cover what's in flight, what just landed, and what's next. If genuinely idle, say so explicitly and name what you scanned.`
+Required before ending your turn (no exceptions): call update_leader_status with a short, conversational paragraph — write it like you're texting a colleague who has been away from the dashboard. Use Coder/Reviewer/Integrator/PM personas (never bare agent_ids), natural-language task descriptions (no bare task IDs in prose), and cover what's in flight, what just landed, what's next, and anything that surprised you. The dashboard renders this with room to breathe, so a few sentences of texture beat a clipped log line. If genuinely idle, say so plainly and name what you scanned so the operator knows it's a real idle and not a stale one.`
 
 // buildClaudeArgs assembles the argv passed to `claude` for one tick.
 //
@@ -1073,11 +1078,11 @@ Required before ending your turn (no exceptions): call update_leader_status with
 // trailing prompt). ChannelFlags are placed BEFORE another flag so the
 // next `--…` token terminates the variadic, leaving the prompt at the
 // end intact.
-func buildClaudeArgs(mcpConfig, contextBody, wakePrompt string) []string {
+func buildClaudeArgs(mcpConfig, model, contextBody, wakePrompt string) []string {
 	if wakePrompt == "" {
 		wakePrompt = defaultWakePrompt
 	}
-	return assembleClaudeArgs(mcpConfig, contextBody, wakePrompt)
+	return assembleClaudeArgs(mcpConfig, model, contextBody, wakePrompt)
 }
 
 // BuildChatArgs is the exported chat-panel sibling of buildClaudeArgs:
@@ -1085,17 +1090,21 @@ func buildClaudeArgs(mcpConfig, contextBody, wakePrompt string) []string {
 // build the leader subprocess argv with the operator's message as the
 // final prompt instead of the autonomous wake prompt. Same MCP config,
 // same channel-flag ordering, same --append-system-prompt context body
-// — only the trailing prompt changes.
-func BuildChatArgs(mcpConfig, contextBody, userMessage string) []string {
-	return assembleClaudeArgs(mcpConfig, contextBody, userMessage)
+// — only the trailing prompt changes. model is the resolved leader
+// model (team.LeaderSpec.ModelOrDefault); empty means no --model flag.
+func BuildChatArgs(mcpConfig, model, contextBody, userMessage string) []string {
+	return assembleClaudeArgs(mcpConfig, model, contextBody, userMessage)
 }
 
-func assembleClaudeArgs(mcpConfig, contextBody, prompt string) []string {
+func assembleClaudeArgs(mcpConfig, model, contextBody, prompt string) []string {
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--mcp-config", mcpConfig,
+	}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	args = append(args, claudeflags.ChannelFlags()...)
 	args = append(args,

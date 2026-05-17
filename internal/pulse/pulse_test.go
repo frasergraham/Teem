@@ -486,7 +486,7 @@ func TestPulse_Stop_ClearsFlag(t *testing.T) {
 // its single-arg value), never by a value that belongs to a variadic
 // option like --channels.
 func TestPulse_BuildClaudeArgs_PromptNotSwallowedByChannels(t *testing.T) {
-	args := buildClaudeArgs("/tmp/mcp.json", "ctx", "")
+	args := buildClaudeArgs("/tmp/mcp.json", "", "ctx", "")
 	if len(args) == 0 {
 		t.Fatal("empty args")
 	}
@@ -571,7 +571,7 @@ func TestPulse_LoadsCustomWakePromptFromDisk(t *testing.T) {
 	if !p.IsCustomWakePrompt() {
 		t.Errorf("IsCustomWakePrompt should be true when override file is present")
 	}
-	args := buildClaudeArgs(cfg.MCPConfig, "ctx", p.WakePrompt())
+	args := buildClaudeArgs(cfg.MCPConfig, "", "ctx", p.WakePrompt())
 	if last := args[len(args)-1]; last != custom {
 		t.Errorf("buildClaudeArgs trailing prompt = %q, want %q", last, custom)
 	}

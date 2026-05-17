@@ -120,6 +120,12 @@ type ArchetypeSpec struct {
 	// claude subprocess's system prompt via --append-system-prompt
 	// (there is no dedicated --load-skill CLI flag upstream).
 	Skill string `yaml:"skill,omitempty"`
+	// Model names the Claude model the worker subprocess should be
+	// pinned to via `claude --model <name>`. Empty means "fall back to
+	// the role default" (Sonnet for worker/reviewer/integrator/PM —
+	// see ModelOrDefault). Setting it explicitly lets a team override
+	// per role (e.g. promote workers to Opus for a hard project).
+	Model string `yaml:"model,omitempty"`
 }
 
 // LifecycleOrDefault returns the archetype's lifecycle, defaulting to
@@ -131,6 +137,17 @@ func (a ArchetypeSpec) LifecycleOrDefault() string {
 	return a.Lifecycle
 }
 
+// ModelOrDefault returns the archetype's Model if set, otherwise the
+// role-default from DefaultModelForRole. Workers run on Sonnet by
+// default — Opus is reserved for the leader where planning quality
+// compounds across every dispatched worker.
+func (a ArchetypeSpec) ModelOrDefault() string {
+	if a.Model != "" {
+		return a.Model
+	}
+	return DefaultModelForRole(a.Role)
+}
+
 type TailnetSpec struct {
 	Hostname   string `yaml:"hostname,omitempty"`
 	AuthKeyEnv string `yaml:"auth_key_env,omitempty"`
@@ -139,6 +156,23 @@ type TailnetSpec struct {
 type LeaderSpec struct {
 	SystemPrompt string   `yaml:"system_prompt"`
 	MCPs         []MCPRef `yaml:"mcps,omitempty"`
+	// Model pins the leader subprocess to a specific Claude model via
+	// `claude --model <name>`. Empty falls back to DefaultLeaderModel
+	// (Opus). The leader's planning + dispatch quality compounds
+	// across every worker spawn, so the default is the strongest
+	// model — operators can downgrade per team here if cost matters
+	// more than throughput for that team.
+	Model string `yaml:"model,omitempty"`
+}
+
+// ModelOrDefault returns the leader's Model if set, otherwise
+// DefaultLeaderModel. Lookup helper so the pulse + chat handlers can
+// resolve in one place.
+func (l LeaderSpec) ModelOrDefault() string {
+	if l.Model != "" {
+		return l.Model
+	}
+	return DefaultLeaderModel
 }
 
 type AgentSpec struct {
@@ -173,6 +207,20 @@ type AgentSpec struct {
 	// Skill mirrors the archetype field. Forwarded to the worker so
 	// the claude subprocess can be told to invoke the named skill.
 	Skill string `yaml:"skill,omitempty"`
+	// Model mirrors the archetype field — see ArchetypeSpec.Model.
+	// Empty falls back to DefaultModelForRole(Role) via
+	// ModelOrDefault. Stamped at spawn time by the spawner from the
+	// originating archetype.
+	Model string `yaml:"model,omitempty"`
+}
+
+// ModelOrDefault returns the agent's Model if set, otherwise the
+// role-default from DefaultModelForRole. Workers default to Sonnet.
+func (a AgentSpec) ModelOrDefault() string {
+	if a.Model != "" {
+		return a.Model
+	}
+	return DefaultModelForRole(a.Role)
 }
 
 // SupportedBackends is the set of cloud backend strings accepted in

@@ -33,3 +33,6 @@ go.work.sum
 
 # Worker outbox written into worktrees by teem-worker
 .teem-events/
+
+# Local team config (machine-specific, pins canonical team ID)
+/teem.yaml

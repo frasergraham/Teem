@@ -282,15 +282,14 @@ function handleUsageEvent(snap: StateSnapshot, ev: AuditEvent): StateSnapshot | 
   } else {
     nextPer = prevPer;
   }
-  const used = snap.usage.used + total;
-  const cap = snap.usage.cap;
-  const percent = cap > 0 ? Math.round((used / cap) * 1000) / 10 : snap.usage.percent_used;
   return {
     ...snap,
     usage: {
       ...snap.usage,
-      used,
-      percent_used: percent,
+      input: snap.usage.input + input,
+      output: snap.usage.output + output,
+      cache_create: snap.usage.cache_create + cacheCreate,
+      cache_read: snap.usage.cache_read + cacheRead,
       per_model: nextPer,
     },
   };

@@ -33,6 +33,35 @@ type apiTaskDetailPayload struct {
 	Timeline []apiTaskTimelineEvent `json:"timeline"`
 	Agents   []apiTaskAgentRollup   `json:"agents"`
 	Jobs     []apiTaskJob           `json:"jobs"`
+	Tokens   apiTaskTokens          `json:"tokens"`
+}
+
+// apiTaskTokens rolls up every KindUsageEvent emitted by a job in the
+// task's evidence list. Totals sum across jobs; Jobs is the per-job
+// breakdown the modal renders as a small table. Same multi-task
+// over-attribution caveat as PerTaskCost — a job linked to two tasks
+// is counted under each.
+type apiTaskTokens struct {
+	Input       int64                  `json:"input"`
+	Output      int64                  `json:"output"`
+	CacheCreate int64                  `json:"cache_create"`
+	CacheRead   int64                  `json:"cache_read"`
+	Jobs        []apiTaskTokenJobUsage `json:"jobs"`
+}
+
+// apiTaskTokenJobUsage is one row in the per-job token table. Multiple
+// usage_event rows for the same job (rare but possible — a worker that
+// recorded a chat-turn rollup mid-flight then a final one) are summed
+// into a single row; Model is whichever model the most-recent event
+// reported, since that's the model the row's outputs are billed under.
+type apiTaskTokenJobUsage struct {
+	JobID       string `json:"job_id"`
+	AgentID     string `json:"agent_id,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Input       int64  `json:"input"`
+	Output      int64  `json:"output"`
+	CacheCreate int64  `json:"cache_create"`
+	CacheRead   int64  `json:"cache_read"`
 }
 
 // apiTaskRecord is the plan.Task projection. Times are preserved as
@@ -142,6 +171,7 @@ func (d *daemon) handleAPITeamTaskDetail(w http.ResponseWriter, _ *http.Request,
 			payload.Timeline = buildTaskTimeline(task, events)
 			payload.Jobs = buildTaskJobs(task, events, rt.team.ID)
 			payload.Agents = buildTaskAgentRollups(payload.Jobs, payload.Timeline)
+			payload.Tokens = buildTaskTokens(task, events)
 		}
 	}
 
@@ -258,6 +288,60 @@ func buildTaskJobs(task plan.Task, events []audit.Event, teamID string) []apiTas
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].StartedAt.Before(out[j].StartedAt)
 	})
+	return out
+}
+
+// buildTaskTokens sums KindUsageEvent rows whose job_id is in
+// task.Evidence into per-job rows + totals. Stable order: rows match
+// the evidence-list order so the modal renders the same job sequence
+// as the "Jobs" section above.
+func buildTaskTokens(task plan.Task, events []audit.Event) apiTaskTokens {
+	out := apiTaskTokens{Jobs: []apiTaskTokenJobUsage{}}
+	if len(task.Evidence) == 0 {
+		return out
+	}
+	want := make(map[string]bool, len(task.Evidence))
+	for _, j := range task.Evidence {
+		if j != "" {
+			want[j] = true
+		}
+	}
+	rows := make(map[string]*apiTaskTokenJobUsage, len(task.Evidence))
+	for _, e := range events {
+		if e.Kind != audit.KindUsageEvent {
+			continue
+		}
+		jid := metaString(e.Meta, "job_id")
+		if jid == "" || !want[jid] {
+			continue
+		}
+		r, ok := rows[jid]
+		if !ok {
+			r = &apiTaskTokenJobUsage{JobID: jid, AgentID: e.AgentID}
+			rows[jid] = r
+		}
+		r.Input += metaInt64(e.Meta, "input_tokens")
+		r.Output += metaInt64(e.Meta, "output_tokens")
+		r.CacheCreate += metaInt64(e.Meta, "cache_create_tokens")
+		r.CacheRead += metaInt64(e.Meta, "cache_read_tokens")
+		if m := metaString(e.Meta, "model"); m != "" {
+			r.Model = m
+		}
+		if r.AgentID == "" && e.AgentID != "" {
+			r.AgentID = e.AgentID
+		}
+	}
+	for _, jid := range task.Evidence {
+		r, ok := rows[jid]
+		if !ok {
+			continue
+		}
+		out.Input += r.Input
+		out.Output += r.Output
+		out.CacheCreate += r.CacheCreate
+		out.CacheRead += r.CacheRead
+		out.Jobs = append(out.Jobs, *r)
+	}
 	return out
 }
 

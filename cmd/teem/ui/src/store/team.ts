@@ -140,18 +140,13 @@ export interface ModelUsage {
 }
 
 export interface UsageSnapshot {
-  configured: boolean;
-  used: number;
-  cap: number;
-  percent_used: number;
-  throttle: boolean;
-  next_reset?: string;
-  last_reset?: string;
-  next_reset_in: string;
-  next_reset_abs: string;
-  last_reset_abs: string;
+  input: number;
+  output: number;
+  cache_create: number;
+  cache_read: number;
   per_model: ModelUsage[] | null;
-  bar_colour: string;
+  last_reset?: string;
+  last_reset_abs?: string;
 }
 
 export interface PulseSnapshot {

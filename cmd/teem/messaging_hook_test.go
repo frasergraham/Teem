@@ -81,6 +81,82 @@ func TestMessagingHook_NilNotifierReturnsNil(t *testing.T) {
 	}
 }
 
+func TestMessagingHook_SuppressesConsecutiveIdlePulses(t *testing.T) {
+	idle := func() audit.Event {
+		return audit.Event{Kind: audit.KindPulseTick, AgentID: "leader", Meta: map[string]any{"tool_calls": 0}}
+	}
+	busy := func() audit.Event {
+		return audit.Event{Kind: audit.KindPulseTick, AgentID: "leader", Meta: map[string]any{"tool_calls": 3}}
+	}
+	blocker := func() audit.Event {
+		return audit.Event{Kind: audit.KindBlockerNote, AgentID: "reviewer-blake", Message: "creds missing", Meta: map[string]any{"task_id": "t-1"}}
+	}
+	// Pulse_tick dedup keys collapse to "team//info"; with a fixed clock
+	// they'd swallow back-to-back distinct events in these tests. Drive
+	// the dedup clock forward 1h per read so consecutive events always
+	// escape the window, leaving the idle-suppression logic as the only
+	// gate we're exercising.
+	newOpenDedup := func() *messaging.Dedup {
+		d, err := messaging.NewDedup(filepath.Join(t.TempDir(), "ded.json"), time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+		var ticks int64
+		d.SetClock(func() time.Time {
+			ticks++
+			return base.Add(time.Duration(ticks) * time.Hour)
+		})
+		return d
+	}
+
+	// Two idles in a row: first goes through, second is dropped.
+	t.Run("idle then idle drops the second", func(t *testing.T) {
+		n := &recNotifier{}
+		fmtr := messaging.MessageFormatter{TeamID: "foo"}
+		hook := makeMessagingHook(n, fmtr, newOpenDedup(), nil)
+		hook([]audit.Event{idle()})
+		hook([]audit.Event{idle()})
+		if got := len(n.snapshot()); got != 1 {
+			t.Fatalf("expected 1 notification (second idle suppressed), got %d", got)
+		}
+	})
+
+	// Busy tick resets the marker so the next idle is delivered.
+	t.Run("busy tick resets the streak", func(t *testing.T) {
+		n := &recNotifier{}
+		fmtr := messaging.MessageFormatter{TeamID: "foo"}
+		hook := makeMessagingHook(n, fmtr, newOpenDedup(), nil)
+		hook([]audit.Event{idle(), busy(), idle()})
+		if got := len(n.snapshot()); got != 3 {
+			t.Fatalf("expected 3 notifications (busy clears suppression), got %d", got)
+		}
+	})
+
+	// Any non-pulse operator-must-see event ("something happened") also
+	// resets the marker, so the next idle is informative again.
+	t.Run("non-pulse event resets the streak", func(t *testing.T) {
+		n := &recNotifier{}
+		fmtr := messaging.MessageFormatter{TeamID: "foo"}
+		hook := makeMessagingHook(n, fmtr, newOpenDedup(), nil)
+		hook([]audit.Event{idle(), blocker(), idle()})
+		if got := len(n.snapshot()); got != 3 {
+			t.Fatalf("expected 3 notifications (non-pulse event clears suppression), got %d", got)
+		}
+	})
+
+	// Many idles in a row: only the first one is forwarded.
+	t.Run("long idle streak collapses to one", func(t *testing.T) {
+		n := &recNotifier{}
+		fmtr := messaging.MessageFormatter{TeamID: "foo"}
+		hook := makeMessagingHook(n, fmtr, newOpenDedup(), nil)
+		hook([]audit.Event{idle(), idle(), idle(), idle()})
+		if got := len(n.snapshot()); got != 1 {
+			t.Fatalf("expected 1 notification (rest suppressed), got %d", got)
+		}
+	})
+}
+
 func TestMessagingHook_DedupBlocksRepeats(t *testing.T) {
 	n := &recNotifier{}
 	fmtr := messaging.MessageFormatter{TeamID: "foo"}

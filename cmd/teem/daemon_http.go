@@ -1076,7 +1076,11 @@ func (d *daemon) handleTeamRoute(w http.ResponseWriter, r *http.Request) {
 		// mirror path — workers/leader writing transcripts back to disk.
 		rest := strings.TrimPrefix(suffix, "/transcripts/")
 		if r.Method == http.MethodGet && isTranscriptPageRest(rest) {
-			serveSPA(w, r, "")
+			// Inject <base> so the SPA's relative ./assets/... refs
+			// resolve under /teams/<id>/ rather than the transcript
+			// URL's directory, which would 401 against the bearer-auth
+			// transcripts mirror.
+			serveSPAWithBase(w, r, "", "/teams/"+id+"/")
 			return
 		}
 		d.handleTranscripts(w, r, rt, rest)

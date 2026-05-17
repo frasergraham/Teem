@@ -18,7 +18,7 @@ import (
 // would print for a multi-chunk assistant turn.
 func fakeChatRunner(lines ...string) chatRunner {
 	body := strings.Join(lines, "\n") + "\n"
-	return func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	return func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		return io.NopCloser(strings.NewReader(body)), func() error { return nil }, nil
 	}
 }
@@ -128,7 +128,7 @@ func TestChatEndpoint_TimeoutAfter5Minutes(t *testing.T) {
 	d.chatTimeout = 50 * time.Millisecond
 
 	cancelReason := make(chan error, 1)
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		pr, pw := io.Pipe()
 		go func() {
 			<-ctx.Done()

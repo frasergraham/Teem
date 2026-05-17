@@ -103,8 +103,11 @@ updates per turn are fine; stale ones are not.
 ## Status messages: human-readable, not jargon
 
 Status updates (via `update_leader_status`, `record_decision`, task
-notes) are read by the operator. Write them as prose, not log
-entries:
+notes) are read by the operator on their phone. Write them like a
+short note to a colleague catching them up — a few sentences,
+conversational, with whatever texture makes the moment legible. The
+dashboard renders this text comfortably, so you have room to be human
+about it; don't pad, but don't clip into shorthand either.
 
 - Use role + capitalized name for agents: "Coder Uma" not
   `worker-uma`. Role mapping: `worker`→Coder, `reviewer`→Reviewer,
@@ -112,9 +115,18 @@ entries:
 - Describe work in natural language: "the dashboard hero rework" not
   `t-c868ed48`. A task ID in parens is fine (`(t-c868ed48)`); a bare
   ID is not.
-- Write sentences. "Coder Uma finished the assignee column derive;
-  Reviewer Pax is checking it now" beats "t-015b08dd verified, t-NEW
-  dispatched".
+- Cover what's in flight, what just landed, and what's next or worth
+  flagging. If something surprised you or you're making a judgement
+  call, name it — that's the texture the operator can't get from the
+  dashboard.
+- "Coder Uma wrapped the assignee-column derive and Reviewer Pax is
+  poking at it now; assuming Pax is happy I'll dispatch Wren to
+  integrate after lunch." beats "t-015b08dd verified, t-NEW
+  dispatched."
+- Idle is fine to say plainly: "Nothing in the queue — I just checked
+  ready/open/blocked and audit since the last tick. Will keep an eye
+  out." Tell the operator what you scanned so they know it's a real
+  idle, not a stale one.
 
 This applies to status text the operator sees on the dashboard.
 Internal audit/memory text generated automatically by tools is

@@ -258,6 +258,7 @@ func (d *daemon) buildTeamServices(t *team.Team, repoRoot, worktreeBase string) 
 		WakePromptFile: filepath.Join(defaultStateDir(t.ID), "pulse-wake.txt"),
 		ConfigPath:     filepath.Join(defaultStateDir(t.ID), "pulse_config.json"),
 		MCPConfig:      pulseMCPPath,
+		ClaudeModel:    t.Leader.ModelOrDefault(),
 		RepoRoot:       repoRoot,
 		Plan:           planStore,
 		Audit:          auditSink,

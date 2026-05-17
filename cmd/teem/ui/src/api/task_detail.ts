@@ -61,12 +61,31 @@ export interface TaskJob {
   transcript_url?: string;
 }
 
+export interface TaskTokenJobUsage {
+  job_id: string;
+  agent_id?: string;
+  model?: string;
+  input: number;
+  output: number;
+  cache_create: number;
+  cache_read: number;
+}
+
+export interface TaskTokens {
+  input: number;
+  output: number;
+  cache_create: number;
+  cache_read: number;
+  jobs: TaskTokenJobUsage[];
+}
+
 export interface TaskDetailPayload {
   now: string;
   task: TaskRecord;
   timeline: TaskTimelineEvent[];
   agents: TaskAgentRollup[];
   jobs: TaskJob[];
+  tokens?: TaskTokens;
 }
 
 export async function fetchTaskDetail(

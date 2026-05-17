@@ -82,6 +82,9 @@ func (p *ProcessExecutor) Execute(ctx context.Context, job Job) (string, error) 
 	if mcpPath != "" {
 		args = append(args, "--mcp-config", mcpPath)
 	}
+	if job.Model != "" {
+		args = append(args, "--model", job.Model)
+	}
 	// Skill loading: claude has no --load-skill flag, so the next
 	// best thing is a system-prompt instruction that tells the
 	// assistant to invoke the named skill via the Skill tool. Skills

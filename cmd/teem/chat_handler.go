@@ -27,16 +27,16 @@ type chatRequest struct {
 // `claude -p` invocation; tests inject a fake that emits canned
 // stream-json on stdout. Returns the spawned process's stdout reader
 // and a wait callback that blocks until the subprocess exits.
-type chatRunner func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error)
+type chatRunner func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error)
 
 // defaultChatRunner is the production runner: locates `claude` on PATH
 // and spawns it with the chat-flavour argv from pulse.BuildChatArgs.
-func defaultChatRunner(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+func defaultChatRunner(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
 		return nil, nil, fmt.Errorf("claude CLI not on PATH: %w", err)
 	}
-	args := pulse.BuildChatArgs(mcpConfig, contextBody, userMessage)
+	args := pulse.BuildChatArgs(mcpConfig, model, contextBody, userMessage)
 	cmd := exec.CommandContext(ctx, claudePath, args...)
 	cmd.Dir = repoRoot
 	stdout, err := cmd.StdoutPipe()
@@ -128,7 +128,7 @@ func (d *daemon) handleChatTeam(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	startedAt := time.Now().UTC()
-	stdout, wait, err := runner(ctx, mcpConfig, rt.repoRoot, contextBody, msg)
+	stdout, wait, err := runner(ctx, mcpConfig, rt.team.Leader.ModelOrDefault(), rt.repoRoot, contextBody, msg)
 	if err != nil {
 		// Record the operator's message even though no assistant text
 		// was produced — keeps the next turn's burst aware of what was

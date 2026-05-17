@@ -6,6 +6,7 @@ import {
   TaskDetailPayload,
   TaskJob,
   TaskTimelineEvent,
+  TaskTokens,
   fetchTaskDetail,
 } from '../api/task_detail';
 import { APIError } from '../api/client';
@@ -108,43 +109,118 @@ export function TaskDetailModal({ task, onClose }: Props) {
             ×
           </button>
         </header>
-        <dl className="task-modal-meta">
-          <div>
-            <dt>Assignee</dt>
-            <dd>
-              {task.assigned_to || '—'}
-              {task.assignee_derived && <em> (derived)</em>}
-            </dd>
-          </div>
-          <div>
-            <dt>In stage</dt>
-            <dd>{task.stage_ago || '—'}</dd>
-          </div>
-          {task.stale && (
-            <div>
-              <dt>Health</dt>
-              <dd>
-                <span className="stale-pill">STALE</span>
-              </dd>
-            </div>
-          )}
-        </dl>
-        <section className="task-modal-notes" aria-label="task notes">
-          {notesHTML ? (
-            <div
-              className="task-modal-notes-body"
-              dangerouslySetInnerHTML={{ __html: notesHTML }}
-            />
-          ) : (
-            <div className="task-modal-notes-empty">No notes recorded for this task.</div>
-          )}
-        </section>
-        <TaskDetailLog detail={detail} loadError={loadError} />
+        <div className="task-modal-body">
+          <TaskMeta task={task} />
+          <TaskDetailLog detail={detail} loadError={loadError} />
+          <section className="task-modal-notes" aria-label="task notes">
+            {notesHTML ? (
+              <div
+                className="task-modal-notes-body"
+                dangerouslySetInnerHTML={{ __html: notesHTML }}
+              />
+            ) : (
+              <div className="task-modal-notes-empty">No notes recorded for this task.</div>
+            )}
+          </section>
+          <TaskTokensPanel tokens={detail?.tokens} />
+        </div>
       </div>
     </div>
   );
 }
 
+// TaskMeta renders the small key/value strip under the header.
+// Terminal stages (verified/done) hide the Assignee row entirely —
+// the work is finished and the assignee adds no signal.
+function TaskMeta({ task }: { task: DashboardTask }) {
+  const terminal = task.stage === 'verified' || task.stage === 'done';
+  return (
+    <dl className="task-modal-meta">
+      {!terminal && (
+        <div>
+          <dt>Assignee</dt>
+          <dd>
+            {task.assigned_to || '—'}
+            {task.assignee_derived && <em> (derived)</em>}
+          </dd>
+        </div>
+      )}
+      <div>
+        <dt>In stage</dt>
+        <dd>{task.stage_ago || '—'}</dd>
+      </div>
+      {task.stale && (
+        <div>
+          <dt>Health</dt>
+          <dd>
+            <span className="stale-pill">STALE</span>
+          </dd>
+        </div>
+      )}
+    </dl>
+  );
+}
+
+function TaskTokensPanel({ tokens }: { tokens: TaskTokens | undefined }) {
+  if (!tokens) return null;
+  const total = tokens.input + tokens.output + tokens.cache_create + tokens.cache_read;
+  if (total === 0 && tokens.jobs.length === 0) return null;
+  return (
+    <section className="task-modal-tokens" aria-label="token usage for this task">
+      <h3 className="task-modal-h3">Token usage</h3>
+      <div className="usage-stats">
+        <UsageStat label="tokens in" value={tokens.input} />
+        <UsageStat label="tokens out" value={tokens.output} />
+        <UsageStat label="cache hits" value={tokens.cache_read} />
+        <UsageStat label="cache writes" value={tokens.cache_create} />
+      </div>
+      {tokens.jobs.length > 0 && (
+        <details className="usage-models">
+          <summary>per-job breakdown ({tokens.jobs.length})</summary>
+          <table className="usage-models-table">
+            <thead>
+              <tr>
+                <th>agent · job</th>
+                <th>model</th>
+                <th>input</th>
+                <th>output</th>
+                <th>cache write</th>
+                <th>cache hit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tokens.jobs.map((j) => (
+                <tr key={j.job_id}>
+                  <td>
+                    {j.agent_id || '—'} · {j.job_id.slice(0, 8)}
+                  </td>
+                  <td>{j.model || '—'}</td>
+                  <td>{j.input.toLocaleString()}</td>
+                  <td>{j.output.toLocaleString()}</td>
+                  <td>{j.cache_create.toLocaleString()}</td>
+                  <td>{j.cache_read.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      )}
+    </section>
+  );
+}
+
+function UsageStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="usage-stat">
+      <span className="n">{value.toLocaleString()}</span>
+      <span className="lbl">{label}</span>
+    </div>
+  );
+}
+
+// TaskDetailLog sits at the top of the modal body as a collapsible
+// section — closed by default so the notes/tokens are the first thing
+// the operator sees, and the chronological history is one click away.
 function TaskDetailLog({
   detail,
   loadError,
@@ -152,27 +228,23 @@ function TaskDetailLog({
   detail: TaskDetailPayload | null;
   loadError: string | null;
 }) {
-  if (loadError) {
-    return (
-      <section className="task-modal-detail" aria-label="task participation log">
-        <div className="task-modal-error">Couldn't load task detail: {loadError}</div>
-      </section>
-    );
-  }
-  if (!detail) {
-    return (
-      <section className="task-modal-detail" aria-label="task participation log">
-        <div className="task-modal-loading">Loading audit history…</div>
-      </section>
-    );
-  }
-  const rows = buildLogRows(detail);
+  const rows = detail ? buildLogRows(detail) : [];
+  const summary = loadError
+    ? 'Task log (failed to load)'
+    : !detail
+      ? 'Task log (loading…)'
+      : rows.length === 0
+        ? 'Task log (empty)'
+        : `Task log (${rows.length})`;
+
   return (
-    <section className="task-modal-detail" aria-label="task participation log">
-      <h3 className="task-modal-h3">
-        Participation log <span className="count">{rows.length}</span>
-      </h3>
-      {rows.length === 0 ? (
+    <details className="task-modal-detail" aria-label="task log">
+      <summary className="task-modal-detail-summary">{summary}</summary>
+      {loadError ? (
+        <div className="task-modal-error">Couldn't load task detail: {loadError}</div>
+      ) : !detail ? (
+        <div className="task-modal-loading">Loading audit history…</div>
+      ) : rows.length === 0 ? (
         <div className="task-modal-log-empty">No audit activity yet for this task.</div>
       ) : (
         <ol className="task-modal-log">
@@ -207,7 +279,7 @@ function TaskDetailLog({
           ))}
         </ol>
       )}
-    </section>
+    </details>
   );
 }
 

@@ -113,6 +113,7 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 			TailnetHost: "teem-" + spec.ID,
 			MCPs:        spec.MCPs,
 			Skill:       spec.Skill,
+			Model:       spec.Model,
 		}, nil
 	}
 
@@ -170,6 +171,7 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 			Transport:  transport.LocalTransport{},
 			MCPs:       spec.MCPs,
 			Skill:      spec.Skill,
+			Model:      spec.Model,
 		}
 		if branch != "" {
 			a.Cloud = &CloudPlacement{TaskARN: workDir}
@@ -254,6 +256,7 @@ func (p *LocalProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Agen
 		SocketPath: socketPath,
 		MCPs:       spec.MCPs,
 		Skill:      spec.Skill,
+		Model:      spec.Model,
 	}
 	if branch != "" {
 		// Stash the worktree path on Cloud so Teardown knows what to

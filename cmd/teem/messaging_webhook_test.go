@@ -148,7 +148,7 @@ func TestWebhook_SpawnsLeaderChat_RespondsToTelegram(t *testing.T) {
 	}
 
 	gotPrompt := make(chan string, 1)
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		gotPrompt <- userMessage
 		stream := strings.Join([]string{
 			`{"type":"assistant","message":{"content":[{"type":"text","text":"Hello operator."}]}}`,
@@ -195,7 +195,7 @@ func TestWebhook_DoneCommandCancelsActiveSession(t *testing.T) {
 
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		close(started)
 		pr, pw := io.Pipe()
 		go func() {
@@ -261,7 +261,7 @@ func TestWebhook_IdleKill_RespectsContextDeadline(t *testing.T) {
 	tok, _ := d.messagingReplyTokens.Issue(messaging.ReplyContext{TeamID: "alpha", TaskID: "t-1"})
 
 	gotDeadline := make(chan time.Time, 1)
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		dl, ok := ctx.Deadline()
 		if !ok {
 			gotDeadline <- time.Time{}
@@ -310,7 +310,7 @@ func TestWebhook_EmitsUsageEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		stream := strings.Join([]string{
 			`{"type":"system","subtype":"init","model":"claude-opus-4-7"}`,
 			`{"type":"assistant","message":{"content":[{"type":"text","text":"Hi"}]}}`,
@@ -378,7 +378,7 @@ func TestHandleTelegramWebhook_NativeReplyResolvesToken(t *testing.T) {
 	}
 
 	gotPrompt := make(chan string, 1)
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		gotPrompt <- userMessage
 		stream := strings.Join([]string{
 			`{"type":"assistant","message":{"content":[{"type":"text","text":"ack"}]}}`,
@@ -440,7 +440,7 @@ func TestHandleTelegramWebhook_BareMessageStartsLeaderChat(t *testing.T) {
 	d.teams["alpha"] = rt
 
 	gotPrompt := make(chan string, 1)
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		gotPrompt <- userMessage
 		stream := strings.Join([]string{
 			`{"type":"assistant","message":{"content":[{"type":"text","text":"queue is empty"}]}}`,
@@ -483,7 +483,7 @@ func TestHandleTelegramWebhook_BareMessageWhileSessionInFlight(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		// Signal start once, then block until the test releases us so
 		// the second bare-text request can race against the live
 		// session.
@@ -541,7 +541,7 @@ func TestHandleTelegramWebhook_DoneEndsBareSession(t *testing.T) {
 
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		close(started)
 		pr, pw := io.Pipe()
 		go func() {
@@ -602,7 +602,7 @@ func TestHandleTelegramWebhook_BareMessageRejectedFromUnauthorisedChatID(t *test
 	d.messagingCfg = messaging.TelegramConfig{ChatID: 12345}
 
 	invoked := false
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		invoked = true
 		return io.NopCloser(strings.NewReader("")), func() error { return nil }, nil
 	}

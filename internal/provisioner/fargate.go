@@ -270,6 +270,7 @@ func (p *FargateProvisioner) Provision(ctx context.Context, spec AgentSpec) (*Ag
 		// builds an HTTPExecutor in lieu.
 		MCPs:  spec.MCPs,
 		Skill: spec.Skill,
+		Model: spec.Model,
 		Cloud: &CloudPlacement{
 			TaskARN: taskArn,
 		},
@@ -328,6 +329,7 @@ func (p *FargateProvisioner) tryReuse(ctx context.Context, spec AgentSpec, hostn
 		TailnetHost: hostname,
 		MCPs:        spec.MCPs,
 		Skill:       spec.Skill,
+		Model:       spec.Model,
 		Cloud:       &CloudPlacement{TaskARN: rec.TaskARN},
 	}, true, nil
 }

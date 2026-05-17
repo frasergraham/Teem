@@ -39,6 +39,10 @@ type AgentSpec struct {
 	// disables. Forwarded onto the resulting Agent so the worker can
 	// pass it through to the claude subprocess.
 	Skill string
+	// Model pins the worker's claude subprocess to a specific Claude
+	// model (passed as --model). Empty resolves to the role default
+	// in team.AgentSpec.ModelOrDefault before reaching the executor.
+	Model string
 }
 
 // IsPersistent reports whether the spec carries a persistent lifecycle.
@@ -78,6 +82,10 @@ type Agent struct {
 	// build the right --append-system-prompt instruction for the
 	// claude subprocess.
 	Skill string
+	// Model pins the agent's claude subprocess to a specific Claude
+	// model (passed as --model). Empty means inherit the user's
+	// account default; non-empty wins over it.
+	Model string
 	// Stopped is true when the worker has already terminated under
 	// its own steam (typically the self-exit-after-idle path). The
 	// LocalProvisioner uses this to skip the /shutdown POST and
@@ -129,6 +137,7 @@ func FromTeamSpec(a team.AgentSpec) AgentSpec {
 		MCPs:       a.MCPs,
 		NoWorktree: a.NoWorktree,
 		Skill:      a.Skill,
+		Model:      a.ModelOrDefault(),
 	}
 	switch {
 	case a.Backend != "":

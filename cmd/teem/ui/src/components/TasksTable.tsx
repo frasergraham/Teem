@@ -44,7 +44,6 @@ export function TasksTable() {
         <table className="tasks">
           <thead>
             <tr>
-              <th>Task</th>
               <th>Title</th>
               <th>Stage</th>
               <th>Assignee</th>
@@ -66,7 +65,6 @@ export function TasksTable() {
           <table className="tasks">
             <thead>
               <tr>
-                <th>Task</th>
                 <th>Title</th>
                 <th>Stage</th>
                 <th>Assignee</th>
@@ -89,10 +87,15 @@ export function TasksTable() {
 }
 
 function TaskRow({ task, onOpen }: { task: DashboardTask; onOpen: (id: string) => void }) {
+  // Hide assignee on terminal stages — once a task is verified/done the
+  // assignee adds no signal (and a crossed-out "(gone)" worker is just
+  // visual noise on a completed row).
+  const terminalStage = task.stage === 'verified' || task.stage === 'done';
   const assigneeClass = ['assignee']
-    .concat(task.assigned_to && !task.assignee_active ? ['gone'] : [])
-    .concat(task.assignee_derived ? ['derived'] : [])
+    .concat(!terminalStage && task.assigned_to && !task.assignee_active ? ['gone'] : [])
+    .concat(!terminalStage && task.assignee_derived ? ['derived'] : [])
     .join(' ');
+  const assigneeText = terminalStage ? '—' : task.assigned_to || '—';
 
   function handleClick(e: MouseEvent<HTMLTableRowElement>) {
     // Don't intercept clicks on interactive children — the "→ ready"
@@ -119,9 +122,8 @@ function TaskRow({ task, onOpen }: { task: DashboardTask; onOpen: (id: string) =
       onClick={handleClick}
       onKeyDown={handleKey}
     >
-      <td className="id">{task.id}</td>
-      <td>{task.title}</td>
-      <td>
+      <td className="title" data-label="Title">{task.title}</td>
+      <td data-label="Stage">
         {task.stage && <span className={`stage ${task.stage}`}>{task.stage}</span>}
         {task.stale && (
           <span
@@ -135,11 +137,12 @@ function TaskRow({ task, onOpen }: { task: DashboardTask; onOpen: (id: string) =
       </td>
       <td
         className={assigneeClass}
-        title={task.assignee_derived ? 'inferred from the latest evidence job' : undefined}
+        data-label="Assignee"
+        title={!terminalStage && task.assignee_derived ? 'inferred from the latest evidence job' : undefined}
       >
-        {task.assigned_to || '—'}
+        {assigneeText}
       </td>
-      <td className="when">{task.stage_ago}</td>
+      <td className="when" data-label="In stage">{task.stage_ago}</td>
     </tr>
   );
 }

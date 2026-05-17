@@ -57,11 +57,13 @@ Operating rules:
 // Interpolated into LeaderSystemPrompt and mirrored verbatim into the
 // teem-orchestration SKILL.md "Status messages" section so the two
 // can't drift.
-const StatusMessageGuidance = `Status updates (via update_leader_status, record_decision, task notes) are read by the operator. Write them as prose, not log entries:
+const StatusMessageGuidance = `Status updates (via update_leader_status, record_decision, task notes) are read by the operator on their phone. Write them like a short note to a colleague catching them up — a few sentences, conversational, with whatever texture makes the moment legible. The dashboard renders this text comfortably, so you have room to be human about it; don't pad, but don't clip into shorthand either.
 
 - Use role + capitalized name for agents: "Coder Uma" not "worker-uma". Role mapping: worker→Coder, reviewer→Reviewer, integrator→Integrator, project_manager→PM.
 - Describe work in natural language: "the dashboard hero rework" not "t-c868ed48". A task ID in parens is fine ("(t-c868ed48)"); a bare ID is not.
-- Write sentences. "Coder Uma finished the assignee column derive; Reviewer Pax is checking it now" beats "t-015b08dd verified, t-NEW dispatched".
+- Cover what's in flight, what just landed, and what's next or worth flagging. If something surprised you or you're making a judgement call, name it — that's the texture the operator can't get from the dashboard.
+- "Coder Uma wrapped the assignee-column derive and Reviewer Pax is poking at it now; assuming Pax is happy I'll dispatch Wren to integrate after lunch." beats "t-015b08dd verified, t-NEW dispatched."
+- Idle is fine to say plainly: "Nothing in the queue — I just checked ready/open/blocked and audit since the last tick. Will keep an eye out." Tell the operator what you scanned so they know it's a real idle, not a stale one.
 
 This applies to status text the operator sees on the dashboard. Internal audit/memory text generated automatically by tools is unaffected.`
 
@@ -103,6 +105,27 @@ worktree; you do not.
 
 The only ref you may move is refs/heads/teem/integrator-<your-name>.`
 
+// DefaultLeaderModel and DefaultWorkerModel are the per-role fallbacks
+// applied when a team's YAML doesn't pin a model on the leader or an
+// archetype. The leader runs on the strongest model because its
+// planning + dispatch decisions compound across every worker spawn;
+// workers default to Sonnet because most coding/review/integration
+// turns are well within Sonnet's capability and cost ~1/5 of Opus.
+// Operators can override per-archetype or per-leader in teem.yaml.
+const (
+	DefaultLeaderModel = "claude-opus-4-7"
+	DefaultWorkerModel = "claude-sonnet-4-6"
+)
+
+// DefaultModelForRole returns the role-default Claude model name. All
+// worker-tier roles (worker, reviewer, integrator, project_manager)
+// share DefaultWorkerModel; unknown roles also fall through to it so a
+// custom archetype gets Sonnet by default rather than the user's
+// account default.
+func DefaultModelForRole(role string) string {
+	return DefaultWorkerModel
+}
+
 // DefaultArchetypes is the set of archetypes the wizard appends when the
 // operator accepts the defaults. Roles are deliberately generic
 // (worker/reviewer/integrator) so the same template covers most projects.
@@ -112,18 +135,21 @@ var DefaultArchetypes = []ArchetypeSpec{
 		Description:   "Implements features, fixes bugs, and investigates code. Runs in an isolated git worktree per instance so multiple workers can work in parallel without stepping on each other.",
 		Placement:     "local",
 		MaxConcurrent: 5,
+		Model:         DefaultWorkerModel,
 	},
 	{
 		Role:          "reviewer",
 		Description:   "Independent code reviewer. Reads diffs against main, flags correctness/design/security risks, does not write code. Spawn one per review round.",
 		Placement:     "local",
 		MaxConcurrent: 3,
+		Model:         DefaultWorkerModel,
 	},
 	{
 		Role:          "integrator",
 		Description:   "Merges reviewed worker branches into its own teem/integrator-<name> branch, resolves conflicts, runs final checks. The leader fast-forwards main from there. Never advances main directly. Run at most one at a time per merge train.",
 		Placement:     "local",
 		MaxConcurrent: 1,
+		Model:         DefaultWorkerModel,
 	},
 }
 
@@ -160,6 +186,7 @@ func MaybePMArchetype(t *Team) *ArchetypeSpec {
 		Lifecycle:     "ephemeral",
 		NoWorktree:    true,
 		Skill:         t.Tracker.Type,
+		Model:         DefaultWorkerModel,
 	}
 }
 

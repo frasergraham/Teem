@@ -57,14 +57,14 @@ function DashboardBody() {
   return (
     <main className="spa-grid">
       {visible.hero && <HeroPanel />}
-      {visible.usage && <UsageCard />}
       {visible.tasksAwaitingApproval && <ApprovalCard />}
-      {visible.workers && <WorkersPanel />}
-      {visible.pulse && <PulseControls />}
       {visible.decisions && <DecisionsList />}
+      {visible.workers && <WorkersPanel />}
       {visible.tasksOpen && <TasksTable />}
+      {visible.pulse && <PulseControls />}
       {visible.chat && <ChatPanel />}
       {visible.events && <EventLogPanel />}
+      {visible.usage && <UsageCard />}
     </main>
   );
 }

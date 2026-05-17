@@ -44,14 +44,14 @@ export const SECTION_KEYS: SectionKey[] = [
 // keeps tracking them, but they're hidden from the UI for now.
 export const MENU_SECTION_KEYS: SectionKey[] = [
   'hero',
-  'workers',
-  'tasksOpen',
   'tasksAwaitingApproval',
   'decisions',
-  'usage',
+  'workers',
+  'tasksOpen',
   'pulse',
   'chat',
   'events',
+  'usage',
 ];
 
 export const SECTION_LABELS: Record<SectionKey, string> = {

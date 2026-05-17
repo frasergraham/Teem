@@ -290,7 +290,7 @@ func TestChatEndpoint_BurstIncludedInContextBody(t *testing.T) {
 	d.recordChatTurn(rt, "leader-chat", 0, "follow-up", "follow-up-answer")
 
 	var seenContext string
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		seenContext = contextBody
 		return io.NopCloser(strings.NewReader(`{"type":"result","result":"ok"}` + "\n")), func() error { return nil }, nil
 	}
@@ -381,7 +381,7 @@ func TestTelegramBareChat_BurstIncludedInContextBody(t *testing.T) {
 	d.recordChatTurn(rt, "leader-telegram", 99, "other-chat", "other-chat-answer")
 
 	gotContext := make(chan string, 1)
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		gotContext <- contextBody
 		return io.NopCloser(strings.NewReader(`{"type":"result","result":"ok"}` + "\n")), func() error { return nil }, nil
 	}
@@ -415,7 +415,7 @@ func TestTelegramBareChat_RecordsChatTurn(t *testing.T) {
 	d, _ := newWebhookTestDaemon(t)
 	rt := newFullTestTeam(t, "alpha")
 	d.teams["alpha"] = rt
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		stream := strings.Join([]string{
 			`{"type":"assistant","message":{"content":[{"type":"text","text":"Roger"}]}}`,
 			`{"type":"result","result":"Roger"}`,
@@ -468,7 +468,7 @@ func TestChatEndpoint_RecordsTurnOnSpawnError(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
 	rt := newFullTestTeam(t, "alpha")
 	d.teams["alpha"] = rt
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		return nil, nil, errors.New("claude CLI not on PATH")
 	}
 
@@ -515,7 +515,7 @@ func TestTelegramBareChat_RecordsTurnOnSpawnError(t *testing.T) {
 	d, _ := newWebhookTestDaemon(t)
 	rt := newFullTestTeam(t, "alpha")
 	d.teams["alpha"] = rt
-	d.chatRunner = func(ctx context.Context, mcpConfig, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
+	d.chatRunner = func(ctx context.Context, mcpConfig, model, repoRoot, contextBody, userMessage string) (io.ReadCloser, func() error, error) {
 		return nil, nil, errors.New("claude CLI not on PATH")
 	}
 

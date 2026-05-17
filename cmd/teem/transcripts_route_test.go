@@ -32,6 +32,13 @@ func TestHandleTeamRoute_TranscriptPathServesSPA(t *testing.T) {
 		if !strings.Contains(w.Body.String(), `<div id="root">`) {
 			t.Errorf("SPA shell missing root div; body excerpt:\n%s", excerpt(w.Body.String()))
 		}
+		// Without a <base href>, the browser resolves the SPA's relative
+		// ./assets/... refs against the transcript URL's directory and
+		// 401s against the bearer-auth mirror. Assert the injection
+		// lands so asset loads target /teams/<id>/assets/...
+		if !strings.Contains(w.Body.String(), `<base href="/teams/alpha/">`) {
+			t.Errorf("SPA shell missing <base href> injection; body excerpt:\n%s", excerpt(w.Body.String()))
+		}
 	})
 
 	t.Run("malformed agent id falls through to mirror handler", func(t *testing.T) {

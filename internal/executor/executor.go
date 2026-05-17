@@ -27,6 +27,13 @@ type Job struct {
 	// to invoke. ProcessExecutor passes it via --append-system-prompt
 	// since claude has no dedicated --load-skill flag. Empty disables.
 	Skill string `json:"skill,omitempty"`
+	// Model pins the claude subprocess for this job to a specific
+	// Claude model via --model. Empty means "no override" — the
+	// subprocess uses whatever model `claude` defaults to. The leader
+	// stamps this from the spawning agent's archetype model when it
+	// publishes the job, so HTTP-routed jobs to remote workers carry
+	// the model selection over the wire.
+	Model string `json:"model,omitempty"`
 }
 
 // Executor runs a single job and returns the final assistant text (or an

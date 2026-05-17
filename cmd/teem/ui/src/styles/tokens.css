@@ -180,8 +180,8 @@ body.team-detail-page {
 }
 .status-lamp {
   display: inline-block;
-  width: 12px; height: 12px;
-  margin-top: 12px;
+  width: 10px; height: 10px;
+  margin-top: 7px;
   border-radius: 50%;
   background: var(--c-signal);
   box-shadow:
@@ -198,11 +198,15 @@ body.team-detail-page {
   font-family: 'Fraunces', Georgia, serif;
   font-style: italic;
   font-weight: 500;
-  font-size: 26px;
-  line-height: 1.22;
-  letter-spacing: -0.012em;
+  font-size: 17px;
+  line-height: 1.45;
+  letter-spacing: -0.005em;
   margin: 0;
   color: var(--c-text);
+  /* Status text can be a short paragraph now — let it wrap rather than
+     squeezing onto one line. The lamp stays anchored at the top via
+     status-headline-row's align-items: flex-start. */
+  white-space: normal;
 }
 .status-headline.empty { color: var(--c-text-dim); }
 .status-headline .when {
@@ -1151,10 +1155,20 @@ table.tasks tbody tr.task-row:focus-visible {
   display: flex;
   flex-direction: column;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
-  overflow: hidden;
+  /* One scroll context: the card itself scrolls. The header is sticky
+     so the close button + title stay reachable while scrolling. */
+  overflow-y: auto;
+}
+.task-modal-body {
+  display: flex;
+  flex-direction: column;
 }
 
 .task-modal-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--c-panel, var(--card));
   display: grid;
   grid-template-columns: 1fr auto auto;
   align-items: start;
@@ -1252,7 +1266,13 @@ table.tasks tbody tr.task-row:focus-visible {
 
 .task-modal-notes {
   padding: 16px 18px 20px;
-  overflow-y: auto;
+}
+.task-modal-tokens {
+  padding: 8px 18px 16px;
+  border-top: 1px solid var(--c-rule);
+}
+.task-modal-tokens .usage-stats {
+  margin: 4px 0 8px;
 }
 .task-modal-notes-body {
   font-size: 14px;
@@ -1294,11 +1314,27 @@ table.tasks tbody tr.task-row:focus-visible {
    undefined customs (--danger, --c-success-bg, etc.) were silently
    falling back, re-creating exactly the divergence commit 4b8e54f
    was meant to prevent. */
+/* Task log: a <details> at the top of the modal body, default closed.
+   The summary line acts as the section header; opening it reveals
+   the chronological row list below. The list scrolls with the rest
+   of the modal — no nested scroll. */
 .task-modal-detail {
-  margin-top: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--c-rule, var(--border));
+}
+.task-modal-detail-summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+  padding: 4px 0;
+  list-style: revert;
+}
+.task-modal-detail-summary:hover { color: var(--c-text); }
+.task-modal-detail[open] .task-modal-detail-summary {
+  margin-bottom: 8px;
 }
 .task-modal-loading,
 .task-modal-error {
@@ -1335,8 +1371,6 @@ table.tasks tbody tr.task-row:focus-visible {
   font-size: 13px;
   border: 1px solid var(--c-border);
   border-radius: 4px;
-  max-height: 360px;
-  overflow-y: auto;
 }
 .task-modal-log .task-log-row {
   display: flex;
@@ -1654,4 +1688,352 @@ table.tasks tbody tr.task-row:focus-visible {
 .transcript-markdown code {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
   font-size: 12px;
+}
+
+/* --- Usage panel ------------------------------------------------ */
+
+.usage-panel {
+  background: var(--c-panel);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 20px 22px;
+}
+.usage-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 18px;
+  margin: 4px 0 12px;
+}
+.usage-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.usage-stat .n {
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--c-text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+.usage-stat .lbl {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+}
+@media (max-width: 720px) {
+  .usage-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .usage-stat .n { font-size: 18px; }
+}
+.usage-meta {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--c-text-muted);
+}
+.usage-meta .label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+  margin-right: 6px;
+}
+.usage-meta .value {
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text);
+}
+.usage-hint {
+  font-size: 13px;
+  color: var(--c-text-muted);
+  background: var(--c-panel-alt);
+  border: 1px dashed var(--c-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.usage-hint code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--c-text);
+  background: var(--c-tile);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.usage-models {
+  margin-top: 12px;
+}
+.usage-models > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--c-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 6px 0;
+}
+.usage-models > summary:hover { color: var(--c-text); }
+.usage-models-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-top: 6px;
+}
+.usage-models-table th,
+.usage-models-table td {
+  text-align: right;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--c-rule);
+  font-variant-numeric: tabular-nums;
+  color: var(--c-text);
+}
+.usage-models-table th:first-child,
+.usage-models-table td:first-child {
+  text-align: left;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--c-text-muted);
+}
+.usage-models-table th {
+  color: var(--c-text-dim);
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* --- Approvals panel ------------------------------------------- */
+
+.approvals-section {
+  background: var(--c-panel);
+  border: 1px solid var(--c-border);
+  border-radius: 10px;
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.approval-card {
+  background: var(--c-panel-alt);
+  border: 1px solid var(--c-border-2);
+  border-left: 3px solid var(--c-signal);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.approval-card .head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.approval-card .head .id {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--c-text-dim);
+}
+.approval-card .head .title {
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: 16px;
+  color: var(--c-text);
+  flex: 1;
+  min-width: 0;
+}
+.approval-card .head .title a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dashed var(--c-text-dim);
+}
+.approval-card .head .title a:hover { border-bottom-color: var(--c-text); }
+.approval-card .head .when {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--c-text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.approval-card .plan-artifact {
+  font-size: 13px;
+  color: var(--c-text-muted);
+  background: var(--c-tile);
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.approval-card .plan-artifact .header {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+  margin-bottom: 6px;
+}
+.approval-card .evidence-row {
+  font-size: 12px;
+  color: var(--c-text-muted);
+  padding: 2px 0;
+}
+.approval-card .evidence-row a {
+  color: var(--c-azure);
+  text-decoration: none;
+}
+.approval-card .evidence-row a:hover { text-decoration: underline; }
+.approval-card .files {
+  margin: 6px 0 4px;
+  padding-left: 18px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--c-text-muted);
+}
+.approval-card .plan-artifact-doc {
+  margin: 4px 0;
+}
+.approval-card .plan-artifact-doc > summary {
+  cursor: pointer;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--c-text);
+  padding: 3px 0;
+}
+.approval-card .plan-artifact-doc > summary:hover { color: var(--c-signal-text); }
+.approval-card .plan-artifact-doc .muted { color: var(--c-text-dim); }
+.approval-card .plan-artifact-rendered {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--c-panel);
+  border: 1px solid var(--c-rule);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--c-text);
+  line-height: 1.5;
+}
+.approval-card .plan-artifact-rendered p { margin: 0 0 8px; }
+.approval-card .plan-artifact-rendered p:last-child { margin-bottom: 0; }
+.approval-card .brief-deemph > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--c-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 4px 0;
+}
+.approval-card .brief-deemph > summary:hover { color: var(--c-text); }
+.approval-card .brief-body {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--c-panel);
+  border: 1px solid var(--c-rule);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--c-text);
+  line-height: 1.5;
+}
+.approval-card .brief-body p { margin: 0 0 8px; }
+.approval-card .brief-body p:last-child { margin-bottom: 0; }
+.approval-card .approval-error {
+  font-size: 12px;
+  color: var(--c-on-signal);
+  background: var(--error, #b91c1c);
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+.approval-card .actions {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+.approval-card .actions input {
+  flex: 1;
+  min-width: 160px;
+  background: var(--c-panel);
+  border: 1px solid var(--c-border-2);
+  border-radius: 4px;
+  padding: 6px 10px;
+  color: var(--c-text);
+  font-family: inherit;
+  font-size: 13px;
+}
+.approval-card .actions input::placeholder { color: var(--c-text-dim); }
+.approval-card .actions input:focus {
+  outline: none;
+  border-color: var(--c-border-hover);
+}
+.approval-card .actions button {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--c-border-2);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  color: var(--c-text);
+}
+.approval-card .actions button:disabled { opacity: 0.5; cursor: progress; }
+.approval-card .actions button.approve {
+  color: var(--c-role-integrator);
+  border-color: var(--c-role-integrator);
+}
+.approval-card .actions button.approve:hover:not(:disabled) {
+  background: var(--c-role-integrator);
+  color: var(--c-on-signal);
+}
+.approval-card .actions button.reject {
+  color: var(--error, #ef4444);
+  border-color: var(--error, #ef4444);
+}
+.approval-card .actions button.reject:hover:not(:disabled) {
+  background: var(--error, #ef4444);
+  color: var(--c-on-signal);
+}
+.approval-card .actions button.comment {
+  color: var(--c-text-muted);
+}
+.approval-card .actions button.comment:hover:not(:disabled) {
+  border-color: var(--c-border-hover);
+  color: var(--c-text);
+}
+
+/* --- Tasks table: phone-screen stacking ------------------------ */
+
+@media (max-width: 720px) {
+  .tasks-panel { padding: 14px 12px; }
+  table.tasks, table.tasks thead, table.tasks tbody, table.tasks tr, table.tasks td {
+    display: block;
+    width: 100%;
+  }
+  table.tasks thead { display: none; }
+  table.tasks tr.task-row {
+    border: 1px solid var(--c-rule);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
+    background: var(--c-panel-alt);
+  }
+  table.tasks td {
+    border-bottom: none;
+    padding: 2px 0;
+  }
+  table.tasks td.title {
+    font-size: 15px;
+    color: var(--c-text);
+    margin-bottom: 4px;
+  }
+  table.tasks td[data-label]:not(.title)::before {
+    content: attr(data-label) ": ";
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--c-text-dim);
+    margin-right: 6px;
+  }
+  .approvals-section { padding: 14px 12px; }
+  .approval-card .actions input { min-width: 0; flex-basis: 100%; }
 }

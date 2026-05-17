@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"errors"
 	"io/fs"
@@ -23,6 +24,17 @@ func spaDistFS() (fs.FS, error) {
 // History fallback: any path that doesn't resolve to a real file in
 // dist/ returns index.html so the React router can take over.
 func serveSPA(w http.ResponseWriter, r *http.Request, trimPath string) {
+	serveSPAWithBase(w, r, trimPath, "")
+}
+
+// serveSPAWithBase is like serveSPA but injects a <base href="..."> tag
+// into the index.html so the SPA's relative ./assets/... refs resolve
+// against basePrefix instead of the current URL's directory. Needed for
+// SPA pages served at deeper paths like /teams/<id>/transcripts/<a>/<j>
+// where the directory inferred by the browser would otherwise pull
+// assets from /teams/<id>/transcripts/<a>/assets/... and miss the
+// /assets/ router branch.
+func serveSPAWithBase(w http.ResponseWriter, r *http.Request, trimPath, basePrefix string) {
 	dist, err := spaDistFS()
 	if err != nil {
 		http.Error(w, "spa bundle missing: "+err.Error(), http.StatusInternalServerError)
@@ -31,7 +43,7 @@ func serveSPA(w http.ResponseWriter, r *http.Request, trimPath string) {
 
 	clean := strings.TrimPrefix(trimPath, "/")
 	if clean == "" {
-		serveSPAIndex(w, r, dist)
+		serveSPAIndexWithBase(w, r, dist, basePrefix)
 		return
 	}
 
@@ -45,7 +57,7 @@ func serveSPA(w http.ResponseWriter, r *http.Request, trimPath string) {
 				http.NotFound(w, r)
 				return
 			}
-			serveSPAIndex(w, r, dist)
+			serveSPAIndexWithBase(w, r, dist, basePrefix)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -56,15 +68,41 @@ func serveSPA(w http.ResponseWriter, r *http.Request, trimPath string) {
 	http.FileServer(http.FS(dist)).ServeHTTP(w, withPath(r, "/"+clean))
 }
 
-func serveSPAIndex(w http.ResponseWriter, _ *http.Request, dist fs.FS) {
+func serveSPAIndex(w http.ResponseWriter, r *http.Request, dist fs.FS) {
+	serveSPAIndexWithBase(w, r, dist, "")
+}
+
+func serveSPAIndexWithBase(w http.ResponseWriter, _ *http.Request, dist fs.FS, basePrefix string) {
 	data, err := fs.ReadFile(dist, "index.html")
 	if err != nil {
 		http.Error(w, "spa index.html missing: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if basePrefix != "" {
+		data = injectBaseHref(data, basePrefix)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write(data)
+}
+
+// injectBaseHref inserts <base href="basePrefix"> right after the
+// opening <head> tag. Idempotent enough for our use — the embedded
+// dist/index.html ships without a base element, so this only runs
+// once per response. We avoid pulling in an HTML parser for a tag we
+// fully control at build time.
+func injectBaseHref(data []byte, basePrefix string) []byte {
+	headIdx := bytes.Index(data, []byte("<head>"))
+	if headIdx < 0 {
+		return data
+	}
+	insertAt := headIdx + len("<head>")
+	tag := []byte(`<base href="` + basePrefix + `">`)
+	out := make([]byte, 0, len(data)+len(tag))
+	out = append(out, data[:insertAt]...)
+	out = append(out, tag...)
+	out = append(out, data[insertAt:]...)
+	return out
 }
 
 // withPath returns a shallow clone of r with URL.Path rewritten so

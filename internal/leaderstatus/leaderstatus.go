@@ -34,10 +34,12 @@ type Entry struct {
 	CurrentTaskIDs []string  `json:"current_task_ids,omitempty"`
 }
 
-// MaxTextBytes bounds the per-entry status text. Status is meant to
-// answer "what are you doing right now" — long planning prose belongs
-// in record_decision, not here. Trimmed (with ellipsis) on Set.
-const MaxTextBytes = 240
+// MaxTextBytes bounds the per-entry status text. Generous enough for
+// a short conversational paragraph — the dashboard renders the body
+// at a small font, so a few sentences of texture beat a clipped log
+// line. Long-form planning prose still belongs in record_decision.
+// Trimmed (with ellipsis) on Set.
+const MaxTextBytes = 600
 
 // Store owns the on-disk per-agent status map. Safe for concurrent
 // callers.

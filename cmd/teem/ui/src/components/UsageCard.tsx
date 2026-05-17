@@ -1,74 +1,28 @@
 import { useTeamStore } from '../store/team';
 
-// UsageCard renders snapshot.usage — the daily token-budget card.
-// Visual parity with the SSR usage-panel: small headline at top
-// (today's spend lives in HeroPanel, so here we show used/cap +
-// percent), a colour-coded progress bar, and a collapsible per-model
-// breakdown table. Hidden entirely when the daemon has no
-// Aggregator wired (usage === null) — the SSR template suppresses the
-// panel in that case for the same reason.
+// UsageCard renders snapshot.usage — running token totals only. No
+// daily quota, no throttle, no countdown; just tokens in / out / cache
+// activity, with the per-model breakdown available as a <details>.
 export function UsageCard() {
   const usage = useTeamStore((s) => s.snapshot?.usage);
   if (!usage) return null;
   return (
-    <section className="usage-panel" aria-label="daily token usage">
-      <h3 className="panel-label">
-        Usage
-        {usage.configured && (
-          <span className="pct"> · {usage.percent_used.toFixed(1)}%</span>
-        )}
-        {usage.throttle && (
-          <span className="throttling-badge" role="status">
-            THROTTLING
+    <section className="usage-panel" aria-label="token usage">
+      <h3 className="panel-label">Usage</h3>
+      <div className="usage-stats">
+        <UsageStat label="tokens in" value={usage.input} />
+        <UsageStat label="tokens out" value={usage.output} />
+        <UsageStat label="cache hits" value={usage.cache_read} />
+        <UsageStat label="cache writes" value={usage.cache_create} />
+      </div>
+      {usage.last_reset_abs && (
+        <div className="usage-meta">
+          <span>
+            <span className="label">since</span>
+            <span className="value">{usage.last_reset_abs}</span>
           </span>
-        )}
-      </h3>
-
-      {usage.configured ? (
-        <>
-          <div className="usage-headline-row">
-            <span className="usage-numbers">
-              <span className="n">{usage.used.toLocaleString()}</span> /{' '}
-              {usage.cap.toLocaleString()} tokens
-            </span>
-          </div>
-          <div
-            className="usage-bar"
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={Number(usage.percent_used.toFixed(1))}
-          >
-            <div
-              className={`usage-bar-fill ${usage.bar_colour}`}
-              style={{ width: `${Math.min(100, usage.percent_used).toFixed(2)}%` }}
-            />
-          </div>
-          <div className="usage-meta">
-            {usage.next_reset_in && (
-              <span>
-                <span className="label">next reset</span>
-                <span className="value" title={usage.next_reset_abs}>
-                  in {usage.next_reset_in}
-                </span>
-              </span>
-            )}
-            {usage.last_reset_abs && (
-              <span>
-                <span className="label">last reset</span>
-                <span className="value">{usage.last_reset_abs}</span>
-              </span>
-            )}
-          </div>
-        </>
-      ) : (
-        <div className="usage-hint">
-          Daily token budget not configured. Add a cap to <code>~/.teem/usage.yaml</code>:
-          <br />
-          <code>usage:&nbsp;&nbsp;daily_token_budget:&nbsp;5000000</code>
         </div>
       )}
-
       {usage.per_model && usage.per_model.length > 0 && (
         <details className="usage-models">
           <summary>per-model breakdown ({usage.per_model.length})</summary>
@@ -78,8 +32,8 @@ export function UsageCard() {
                 <th>model</th>
                 <th>input</th>
                 <th>output</th>
-                <th>cache create</th>
-                <th>cache read</th>
+                <th>cache write</th>
+                <th>cache hit</th>
               </tr>
             </thead>
             <tbody>
@@ -97,5 +51,14 @@ export function UsageCard() {
         </details>
       )}
     </section>
+  );
+}
+
+function UsageStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="usage-stat">
+      <span className="n">{value.toLocaleString()}</span>
+      <span className="lbl">{label}</span>
+    </div>
   );
 }
