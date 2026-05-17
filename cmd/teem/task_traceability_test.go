@@ -282,7 +282,7 @@ func TestTaskDetailLog_RendersChronologically(t *testing.T) {
 	if coderJob.AgentID != "worker-ada" {
 		t.Errorf("coder job agent=%q want worker-ada", coderJob.AgentID)
 	}
-	wantURL := "/api/teams/alpha/transcripts/worker-ada/job-coder"
+	wantURL := "/teams/alpha/transcripts/worker-ada/job-coder"
 	if coderJob.TranscriptURL != wantURL {
 		t.Errorf("coder transcript_url=%q want %q", coderJob.TranscriptURL, wantURL)
 	}

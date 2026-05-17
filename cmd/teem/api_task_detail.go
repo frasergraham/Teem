@@ -86,7 +86,8 @@ type apiTaskAgentRollup struct {
 }
 
 // apiTaskJob is one materialized evidence job. TranscriptURL is the
-// SPA-visible link to the unauth NDJSON download; populated when a
+// SPA-visible link to the rendered transcript page
+// (/teams/<id>/transcripts/<agent>/<job>); populated when a
 // transcript event has been recorded (TranscriptBytes > 0).
 type apiTaskJob struct {
 	JobID           string    `json:"job_id"`
@@ -240,7 +241,9 @@ func buildTaskJobs(task plan.Task, events []audit.Event, teamID string) []apiTas
 			row.DurationMs = d.Milliseconds()
 		}
 		if j.TranscriptBytes > 0 && j.AgentID != "" && isSafeID(j.AgentID) && isSafeID(j.JobID) {
-			row.TranscriptURL = fmt.Sprintf("/api/teams/%s/transcripts/%s/%s", teamID, j.AgentID, j.JobID)
+			// SPA path — opens <TranscriptPage>, which fetches the raw
+			// NDJSON from /api/teams/<id>/transcripts/<a>/<j> itself.
+			row.TranscriptURL = fmt.Sprintf("/teams/%s/transcripts/%s/%s", teamID, j.AgentID, j.JobID)
 		}
 		out = append(out, row)
 	}

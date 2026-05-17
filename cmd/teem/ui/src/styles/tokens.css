@@ -1492,3 +1492,163 @@ table.tasks tbody tr.task-row:focus-visible {
   color: var(--c-text-dim);
   font-style: italic;
 }
+
+/* Transcript page — full-screen renderer for a job's post-mortem
+   NDJSON. Shares the kind-color vocabulary with the watch modal
+   (.watch-event.<kind>) so a row reads the same after the run as it
+   did while live. */
+.transcript-page {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 24px 20px 60px;
+  color: var(--c-text);
+}
+.transcript-header {
+  border-bottom: 1px solid var(--c-rule, var(--border));
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+}
+.transcript-back {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--c-text-muted, var(--muted));
+  text-decoration: none;
+  margin-bottom: 10px;
+}
+.transcript-back:hover { color: var(--c-text); text-decoration: underline; }
+.transcript-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  line-height: 1.3;
+}
+.transcript-persona { color: var(--c-text); }
+.transcript-job { font-family: 'JetBrains Mono', ui-monospace, monospace; color: var(--c-text-muted, var(--muted)); }
+.transcript-sub {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--c-text-dim);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.transcript-sep { opacity: 0.5; }
+.transcript-status {
+  padding: 28px 0;
+  text-align: center;
+  color: var(--c-text-muted, var(--muted));
+  font-style: italic;
+}
+.transcript-error {
+  color: #ef6868;
+  font-style: normal;
+}
+.transcript-empty {
+  color: var(--c-text-dim);
+}
+.transcript-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.transcript-event {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 14px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border-left: 2px solid transparent;
+  background: var(--c-panel, var(--card));
+  align-items: start;
+}
+.transcript-event-kind {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--c-text-dim);
+  padding-top: 2px;
+}
+.transcript-event-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.transcript-event-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.transcript-event.assistant {
+  border-left-color: var(--c-azure);
+}
+.transcript-event.assistant .transcript-event-kind { color: var(--c-azure); }
+.transcript-event.tool {
+  border-left-color: var(--c-role-reviewer, var(--c-text-muted));
+}
+.transcript-event.tool .transcript-event-kind { color: var(--c-role-reviewer, var(--c-text-muted)); }
+.transcript-event.system {
+  border-left-color: var(--c-text-dim);
+}
+.transcript-event.result {
+  border-left-color: var(--c-role-integrator, var(--c-azure));
+  background: var(--c-panel-alt, var(--pill-bg));
+}
+.transcript-event.result .transcript-event-kind {
+  color: var(--c-role-integrator, var(--c-azure));
+}
+.transcript-event.unknown {
+  color: var(--c-text-dim);
+  font-style: italic;
+}
+.transcript-tool-head code,
+.transcript-tool-result code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  background: var(--c-panel-alt, var(--pill-bg));
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.transcript-tool-result-label { color: var(--c-text-muted, var(--muted)); }
+.transcript-tool-input pre,
+.transcript-tool-result-full pre,
+.transcript-raw pre {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  background: var(--c-panel-alt, var(--pill-bg));
+  padding: 8px 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 6px 0 0;
+  max-height: 320px;
+}
+.transcript-tool-input summary,
+.transcript-tool-result-full summary,
+.transcript-raw summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--c-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.transcript-raw summary { color: var(--c-text-dim); }
+.transcript-markdown p { margin: 0 0 8px; }
+.transcript-markdown p:last-child { margin-bottom: 0; }
+.transcript-markdown pre {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  background: var(--c-panel-alt, var(--pill-bg));
+  padding: 8px 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.transcript-markdown code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
