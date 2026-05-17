@@ -118,11 +118,8 @@ func (d *daemon) handleAPITeamState(w http.ResponseWriter, _ *http.Request, rt *
 	team := teamSnapshot(tv)
 	team.Usage = buildUsageSnapshot(d.usageAgg, time.Now())
 
-	rt.detectionMu.Lock()
-	channelsLive := rt.channelsLive
-	rt.detectionMu.Unlock()
 	channelsState := "fallback"
-	if channelsLive {
+	if rt.channelsLive.Load() {
 		channelsState = "live"
 	}
 

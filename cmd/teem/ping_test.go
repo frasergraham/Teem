@@ -173,7 +173,7 @@ func TestPing_NudgesChannelWhenChannelsLive(t *testing.T) {
 	_, busCh, cancel := rt.channelBus.Subscribe()
 	defer cancel()
 	d.teams["alpha"] = rt
-	rt.channelsLive = true
+	rt.channelsLive.Store(true)
 
 	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/ping", nil)
 	w := httptest.NewRecorder()
@@ -221,7 +221,7 @@ func TestPing_ResumesWhenChannelsCleared(t *testing.T) {
 	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
 	rt := newPingTeam(t, "alpha")
 	d.teams["alpha"] = rt
-	rt.channelsLive = false
+	rt.channelsLive.Store(false)
 
 	req := httptest.NewRequest(http.MethodPost, "/control/teams/alpha/ping", nil)
 	w := httptest.NewRecorder()

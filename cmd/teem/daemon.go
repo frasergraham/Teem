@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -392,14 +393,18 @@ type registeredTeam struct {
 	// counter (clients fall back to snapshot_invalidate).
 	wsbus *wsbus.Bus
 
-	// detectionMu guards channelsLive and serializes the per-team
-	// channels-live ↔ fallback state machine. Held around BOTH the
-	// channelbus Subscribe/cancel call and the flag mutation so the
-	// "first subscriber" / "last subscriber" decision is TOCTOU-safe
-	// even when two SSE handlers connect concurrently. See
-	// docs/wake-strategy.md §5.
+	// detectionMu serializes the per-team channels-live ↔ fallback
+	// state machine. Held around BOTH the channelbus Subscribe/cancel
+	// call and the flag mutation so the "first subscriber" / "last
+	// subscriber" decision is TOCTOU-safe even when two SSE handlers
+	// connect concurrently. See docs/wake-strategy.md §5.
+	//
+	// channelsLive itself is atomic so the hot read paths
+	// (api_state, ping, autoWakeLeaderOnTaskReady) can sample it
+	// lock-free; detectionMu is only taken on the rare connect/
+	// disconnect transition.
 	detectionMu  sync.Mutex
-	channelsLive bool
+	channelsLive atomic.Bool
 }
 
 // teamView pairs a stable *registeredTeam pointer with a snapshot of
@@ -1729,12 +1734,7 @@ func (d *daemon) handlePingTeam(w http.ResponseWriter, r *http.Request) {
 	// channels-live = operator chat is active. Route the ping as a
 	// channel nudge into the running chat session instead of starting
 	// a fresh claude subprocess — same wake signal, no session race.
-	// Read under detectionMu so we serialize against the SSE handler's
-	// flag flips.
-	rt.detectionMu.Lock()
-	live := rt.channelsLive
-	rt.detectionMu.Unlock()
-	if live {
+	if rt.channelsLive.Load() {
 		publishPulseChannelNudge(rt.channelBus)
 		if rt.auditSink != nil {
 			_ = rt.auditSink.Write(audit.Event{
@@ -3184,8 +3184,8 @@ func (d *daemon) observeChannelSubscribe(rt *registeredTeam) (<-chan channelbus.
 	}
 	_, ch, count, cancelSub := rt.channelBus.SubscribeAndCount()
 	rt.detectionMu.Lock()
-	if count == 1 && !rt.channelsLive {
-		rt.channelsLive = true
+	if count == 1 && !rt.channelsLive.Load() {
+		rt.channelsLive.Store(true)
 		if rt.pulse != nil {
 			rt.pulse.SetChannelsLive(true)
 		}
@@ -3203,8 +3203,8 @@ func (d *daemon) observeChannelSubscribe(rt *registeredTeam) (<-chan channelbus.
 		rt.detectionMu.Lock()
 		defer rt.detectionMu.Unlock()
 		post := cancelSub()
-		if post == 0 && rt.channelsLive {
-			rt.channelsLive = false
+		if post == 0 && rt.channelsLive.Load() {
+			rt.channelsLive.Store(false)
 			if rt.pulse != nil {
 				rt.pulse.SetChannelsLive(false)
 			}
