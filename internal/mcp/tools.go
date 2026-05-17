@@ -470,10 +470,34 @@ func (s *Server) handleAddTask(_ context.Context, req mcpgo.CallToolRequest) (*m
 	if err != nil {
 		return mcpgo.NewToolResultError(err.Error()), nil
 	}
+	// agent_id is self-identification: callers pass their own id so the
+	// audit event credits the right actor. Defaults to "leader" because
+	// the leader is the dominant caller of add_task today (Telegram and
+	// dashboard chat both flow through the leader's claude -p).
+	agentID := strings.TrimSpace(req.GetString("agent_id", "leader"))
+	if agentID == "" {
+		agentID = "leader"
+	}
+	// origin: explicit value wins; otherwise default by caller-role.
+	// Operator-driven surfaces (a future dashboard "add task" button)
+	// must pass origin=operator explicitly since this handler can't
+	// distinguish "leader called add_task on the operator's behalf"
+	// from "leader filed it on its own."
+	originStr := strings.TrimSpace(req.GetString("origin", ""))
+	var origin plan.Origin
+	if originStr != "" {
+		origin = plan.Origin(originStr)
+		if !plan.IsValidOrigin(origin) {
+			return mcpgo.NewToolResultErrorf("origin %q is not one of operator, leader, project_manager, system", originStr), nil
+		}
+	} else {
+		origin = defaultOriginForCaller(agentID)
+	}
 	in := plan.NewTaskInput{
 		Title:    title,
 		ParentID: req.GetString("parent_id", ""),
 		Notes:    req.GetString("notes", ""),
+		Origin:   origin,
 	}
 	if v := req.GetString("depends_on", ""); v != "" {
 		in.DependsOn = splitCSV(v)
@@ -482,8 +506,48 @@ func (s *Server) handleAddTask(_ context.Context, req mcpgo.CallToolRequest) (*m
 	if err != nil {
 		return mcpgo.NewToolResultErrorFromErr("add_task", err), nil
 	}
+	if s.audit != nil {
+		meta := map[string]any{
+			"task_id":  task.ID,
+			"title":    task.Title,
+			"origin":   string(task.Origin),
+			"agent_id": agentID,
+		}
+		if task.ParentID != "" {
+			meta["parent_id"] = task.ParentID
+		}
+		_ = s.audit.Write(audit.Event{
+			Timestamp: time.Now().UTC(),
+			AgentID:   agentID,
+			Kind:      audit.KindTaskCreated,
+			Message:   task.Title,
+			Meta:      meta,
+		})
+	}
 	body, _ := json.Marshal(task)
 	return mcpgo.NewToolResultText(string(body)), nil
+}
+
+// defaultOriginForCaller picks an Origin from the calling agent's id
+// when the caller didn't supply one. "leader" stays leader; a
+// project_manager-* worker maps to project_manager; everything else
+// falls back to leader since the MCP server's only first-class callers
+// today are the leader and the PM. Operator-driven surfaces are
+// expected to override with origin="operator" explicitly.
+func defaultOriginForCaller(agentID string) plan.Origin {
+	if agentID == "operator" {
+		return plan.OriginOperator
+	}
+	if agentID == "" || agentID == "leader" {
+		return plan.OriginLeader
+	}
+	if idx := strings.Index(agentID, "-"); idx > 0 {
+		switch agentID[:idx] {
+		case "project_manager":
+			return plan.OriginProjectManager
+		}
+	}
+	return plan.OriginLeader
 }
 
 func (s *Server) handleUpdateTask(_ context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

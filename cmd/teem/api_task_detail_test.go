@@ -305,6 +305,57 @@ func TestSummarizeTaskEvent(t *testing.T) {
 	}
 }
 
+// TestAPITaskDetail_OriginAndParentSurfaced verifies the task-detail
+// API exposes Origin + ParentID so the SPA can render the synthetic
+// "<Origin> created this task" row at the head of the participation
+// log. Also covers the legacy-default-to-operator path: tasks loaded
+// from disk without an Origin should arrive at the SPA as operator.
+func TestAPITaskDetail_OriginAndParentSurfaced(t *testing.T) {
+	d := &daemon{teams: map[string]*registeredTeam{}, baseCtx: context.Background()}
+	rt := newFullTestTeam(t, "alpha")
+	d.teams["alpha"] = rt
+
+	parent, _ := rt.plan.AddTask(plan.NewTaskInput{Title: "parent"})
+	child, err := rt.plan.AddTask(plan.NewTaskInput{
+		Title:    "child",
+		ParentID: parent.ID,
+		Origin:   plan.OriginLeader,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/teams/alpha/tasks/"+child.ID, nil)
+	w := httptest.NewRecorder()
+	d.handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	var p apiTaskDetailPayload
+	if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if p.Task.Origin != string(plan.OriginLeader) {
+		t.Errorf("origin = %q want leader", p.Task.Origin)
+	}
+	if p.Task.ParentID != parent.ID {
+		t.Errorf("parent_id = %q want %s", p.Task.ParentID, parent.ID)
+	}
+
+	// Parent itself had no Origin supplied — AddTask's library-level
+	// fallback should land it on operator (and the wire field reflects
+	// that, so the SPA's legacy fallback never has to kick in for
+	// freshly-created tasks).
+	req2 := httptest.NewRequest(http.MethodGet, "/api/teams/alpha/tasks/"+parent.ID, nil)
+	w2 := httptest.NewRecorder()
+	d.handler().ServeHTTP(w2, req2)
+	var p2 apiTaskDetailPayload
+	_ = json.Unmarshal(w2.Body.Bytes(), &p2)
+	if p2.Task.Origin != string(plan.OriginOperator) {
+		t.Errorf("default origin = %q want operator", p2.Task.Origin)
+	}
+}
+
 // TestAPITeamTranscript_Missing returns 404 when the file doesn't
 // exist on disk (e.g. transcript event was emitted but the file was
 // rotated). Distinct from "transcripts not configured" → 500.

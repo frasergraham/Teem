@@ -337,6 +337,11 @@ type dashboardTask struct {
 	// via plan.UpdateTask); the modal renders the HTML with
 	// dangerouslySetInnerHTML, same model as ChatPanel leader output.
 	Notes string `json:"notes"`
+	// Origin is plan.Task.Origin (operator|leader|project_manager|
+	// system). Surfaced so the SPA's task-detail modal can render a
+	// synthetic "<Origin> created this task" row at the top of the
+	// participation log.
+	Origin string `json:"origin,omitempty"`
 }
 
 // taskCostCell is the dashboardTask sub-struct holding the rendered
@@ -1289,6 +1294,7 @@ func taskToDashboardTask(team string, t plan.Task, liveAgents map[string]bool, j
 		AssigneeDerived: derived,
 		Stale:           stale,
 		Notes:           t.Notes,
+		Origin:          string(t.Origin),
 		Cost:            buildTaskCostCell(t.Evidence, pricing, costEvents),
 	}
 }

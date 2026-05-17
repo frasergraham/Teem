@@ -497,3 +497,68 @@ func TestPlan_LegacyContradictionHealsOnReplay(t *testing.T) {
 		t.Errorf("status=%q want shelved", got.Status)
 	}
 }
+
+// TestPlan_AddTaskOriginDefaultAndExplicit covers the two AddTask paths:
+// no Origin → OriginOperator (the safe library fallback; the MCP handler
+// picks a smarter default per caller-role on top of this); explicit
+// Origin round-trips and survives replay.
+func TestPlan_AddTaskOriginDefaultAndExplicit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.jsonl")
+	p, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultOrigin, err := p.AddTask(NewTaskInput{Title: "no origin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultOrigin.Origin != OriginOperator {
+		t.Errorf("missing-origin default = %q want operator", defaultOrigin.Origin)
+	}
+	leader, err := p.AddTask(NewTaskInput{Title: "leader-filed", Origin: OriginLeader})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leader.Origin != OriginLeader {
+		t.Errorf("explicit leader origin = %q", leader.Origin)
+	}
+	if _, err := p.AddTask(NewTaskInput{Title: "bogus", Origin: "nope"}); err == nil {
+		t.Error("invalid origin should error")
+	}
+	_ = p.Close()
+
+	p2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p2.Close()
+	got, _ := p2.Get(leader.ID)
+	if got.Origin != OriginLeader {
+		t.Errorf("replay origin = %q want leader", got.Origin)
+	}
+}
+
+// TestPlan_LegacyTaskOriginDefaultsToOperator covers the backward-compat
+// path: a JSONL row produced before Origin existed reads back with the
+// historical-bias default rather than an empty string.
+func TestPlan_LegacyTaskOriginDefaultsToOperator(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plan.jsonl")
+	body := `{"op":"create","id":"t-legacy","title":"pre-origin","ts":"2026-01-01T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	got, ok := p.Get("t-legacy")
+	if !ok {
+		t.Fatal("legacy task missing after replay")
+	}
+	if got.Origin != OriginOperator {
+		t.Errorf("legacy origin = %q want operator (historical bias)", got.Origin)
+	}
+}

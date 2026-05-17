@@ -53,6 +53,37 @@ func (s Status) IsOpen() bool {
 // IsShelved reports whether the task is paused (not active, not done).
 func (s Status) IsShelved() bool { return s == StatusShelved }
 
+// Origin records how a task came into existence. Surfaced as the first
+// row of the TaskDetailModal participation log so a reader can tell
+// "operator asked for this" apart from "leader filed it on its own."
+// Empty on disk for tasks created before this field existed; replay
+// backfills those to OriginOperator (the historical bias).
+type Origin string
+
+const (
+	// OriginOperator: the operator explicitly asked for this work
+	// (chat, dashboard, Telegram).
+	OriginOperator Origin = "operator"
+	// OriginLeader: the leader filed this task on its own initiative —
+	// cleanups, review follow-ups, refactors the leader noticed.
+	OriginLeader Origin = "leader"
+	// OriginProjectManager: synthesised from an external tracker by
+	// the PM archetype.
+	OriginProjectManager Origin = "project_manager"
+	// OriginSystem: automatic plumbing (rare; e.g. a future pruner
+	// "stale branch" cleanup task).
+	OriginSystem Origin = "system"
+)
+
+// IsValidOrigin reports whether s names a known origin value.
+func IsValidOrigin(s Origin) bool {
+	switch s {
+	case OriginOperator, OriginLeader, OriginProjectManager, OriginSystem:
+		return true
+	}
+	return false
+}
+
 // Task is the materialised view of a task assembled by replaying
 // events. The leader sees this shape via list_tasks; the daemon uses
 // it to decide whether to keep ticking.
@@ -72,6 +103,11 @@ type Task struct {
 	Evidence       []string  `json:"evidence,omitempty"` // job_ids
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	// Origin records who filed the task. Set on create events; left
+	// empty on update events. Legacy tasks without an Origin on disk
+	// default to OriginOperator during replay — the historical bias was
+	// that pre-this-field tasks were almost always operator-asked.
+	Origin Origin `json:"origin,omitempty"`
 }
 
 // Event is one mutation written to the JSONL file. Op is either
@@ -89,6 +125,10 @@ type Event struct {
 	DependsOn   *[]string `json:"depends_on,omitempty"`
 	Notes       *string   `json:"notes,omitempty"`
 	AddEvidence []string  `json:"add_evidence,omitempty"`
+	// Origin only meaningful on create events. Update events leave it
+	// empty so a future "edit origin" tool would need explicit support
+	// rather than getting it for free here — origin is immutable today.
+	Origin Origin `json:"origin,omitempty"`
 }
 
 // Plan is the live snapshot + appender. Safe for concurrent calls;
@@ -180,6 +220,14 @@ func (p *Plan) replay() error {
 		// normalises before persisting, so this is purely a heal-on-load
 		// path for legacy data.
 		t.Stage, t.Status = normalizePair(t.Stage, t.Status)
+		// Legacy tasks were created before Origin existed. Default to
+		// OriginOperator — the historical bias (pre-Origin tasks were
+		// almost always operator-asked). The false-positive rate is
+		// tolerable per the task spec; retrofitting the actual origin
+		// would mean re-parsing chat history we don't keep.
+		if t.Origin == "" {
+			t.Origin = OriginOperator
+		}
 	}
 	return nil
 }
@@ -285,6 +333,7 @@ func (p *Plan) apply(ev Event) {
 			ParentID:  ev.ParentID,
 			CreatedAt: ev.Timestamp,
 			UpdatedAt: ev.Timestamp,
+			Origin:    ev.Origin,
 		}
 		if ev.Status != "" {
 			t.Status = ev.Status
@@ -354,6 +403,17 @@ func (p *Plan) AddTask(in NewTaskInput) (Task, error) {
 	if in.Title == "" {
 		return Task{}, errors.New("plan: title is required")
 	}
+	origin := in.Origin
+	if origin == "" {
+		// Caller didn't supply one — fall back to OriginOperator.
+		// Higher layers (the MCP add_task handler) pick a smarter
+		// default by caller-role; this is the last-resort fallback so a
+		// programmatic AddTask from a test or migration still produces
+		// a well-formed task.
+		origin = OriginOperator
+	} else if !IsValidOrigin(origin) {
+		return Task{}, fmt.Errorf("plan: unknown origin %q", origin)
+	}
 	now := time.Now().UTC()
 	id := newID()
 	ev := Event{
@@ -362,6 +422,7 @@ func (p *Plan) AddTask(in NewTaskInput) (Task, error) {
 		Timestamp: now,
 		Title:     in.Title,
 		ParentID:  in.ParentID,
+		Origin:    origin,
 		// Fresh tasks land in "proposed". Recorded in the event so
 		// replay sees it; legacy events without a stage flow through
 		// the replay-time backfill.
@@ -389,6 +450,9 @@ type NewTaskInput struct {
 	ParentID  string
 	DependsOn []string
 	Notes     string
+	// Origin records who filed the task; defaults to OriginOperator
+	// when empty. Validated against IsValidOrigin before any write.
+	Origin Origin
 }
 
 // UpdateInput is a sparse mutation; nil pointers mean "leave alone".
